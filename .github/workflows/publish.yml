@@ -4,15 +4,17 @@ name: Publish pfBlockerNG pkg repository
 # repository (ADR-17). It lives in pfBlockerNG/pkg so it deploys to THIS repo's
 # GitHub Pages — served at https://pfblockerng.github.io/pkg — via the same-repo
 # OIDC actions/deploy-pages. No deploy key, no cross-repo secret: everything it
-# needs from pfBlockerNG/pfBlockerNG is PUBLIC (the reusable build workflow, the
-# generator script, and the Release .pkg assets), used with this repo's own
-# GITHUB_TOKEN.
+# needs from pfBlockerNG/pfBlockerNG (and the ports tree) is PUBLIC, used with
+# this repo's own GITHUB_TOKEN.
 #
 # CONTENT — the union of:
-#   * the current devel .pkg, built fresh by CALLING the source repo's reusable
-#     build-pkg-linux.yml (cross-repo `uses:`), so the devel channel is always
-#     current even with no GitHub Release cut yet (this is what andrebrait.github.io
-#     served); and
+#   * the current devel .pkg, built fresh here by running the SOURCE repo's own
+#     scripts/build-pkg-portable.py against a checkout of its tree, so the devel
+#     channel is always current with no GitHub Release cut (parity with what
+#     andrebrait.github.io served). NOTE: we run the source repo's *script*, not
+#     its reusable build workflow — a reusable workflow executes in the CALLER's
+#     context, so its internal `actions/checkout` would grab THIS repo, not the
+#     source. Running the script after an explicit `repository:` checkout avoids that.
 #   * every GitHub *Release* .pkg asset of pfBlockerNG/pfBlockerNG (the durable
 #     store — ADR-09/17), enumerated and downloaded each run.
 # The catalog is a DERIVED, fully-regenerated index — stateless + idempotent.
@@ -45,32 +47,27 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
-jobs:
-  # Build the current devel .pkg by reusing the SOURCE repo's portable Linux
-  # builder cross-repo (public reusable workflow). Its `pfBlockerNG-pkg` artifact
-  # is available to the publish job in this same run. Built on schedule always;
-  # on a manual dispatch unless build_branch_pkg is unticked.
-  build-branch-pkg:
-    name: Build devel .pkg (portable Linux)
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
-    uses: pfBlockerNG/pfBlockerNG/.github/workflows/build-pkg-linux.yml@devel
-    with:
-      channel: devel
+# TARGET facts of the devel build — the pfSense the .pkg installs onto
+# (CE 2.8.1 = FreeBSD 15 / py311 / php 8.3); inputs to the portable builder, not
+# read from any tree. Mirror build-pkg-linux.yml's defaults.
+env:
+  PKG_ABI: "FreeBSD:15:amd64"
+  PKG_PY_FLAVOR: "py311"
+  PKG_PHP: "8.3"
+  PORTS_REPO: "pfBlockerNG/FreeBSD-ports"
+  PORTS_REF: "pfblockerng/use-github"
 
+jobs:
   publish:
-    name: Generate catalog + deploy to Pages
+    name: Build devel + generate catalog + deploy to Pages
     runs-on: ubuntu-latest
-    # A skipped `needs` entry still satisfies the dependency, so this runs whether
-    # or not the build ran; never block on it.
-    needs: [build-branch-pkg]
-    if: always()
     timeout-minutes: 20
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
-      - name: Checkout the pfBlockerNG generator script (public source repo)
+      - name: Checkout the pfBlockerNG source (generator + builder + tree)
         uses: actions/checkout@v6
         with:
           repository: pfBlockerNG/pfBlockerNG
@@ -83,18 +80,28 @@ jobs:
           python-version: "3.11"
 
       - name: Ensure the zstd encoder is present
-        # build-repo-portable.py needs a zstd ENCODER (the `zstd` binary or the
+        # Both portable scripts need a zstd ENCODER (the `zstd` binary or the
         # python `zstandard` module). ubuntu-latest may not ship it — install it.
         run: command -v zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
 
-      - name: Download the freshly-built devel .pkg (if the build ran)
-        # Present when build-branch-pkg ran; absent if it was skipped. The reusable
-        # workflow's artifact is scoped to this run, so download by name.
-        uses: actions/download-artifact@v4
-        with:
-          name: pfBlockerNG-pkg
-          path: store
-        continue-on-error: true
+      - name: Build the current devel .pkg (source repo's portable builder)
+        # Run the SOURCE repo's scripts/build-pkg-portable.py (single source of
+        # truth — same script build-pkg-linux.yml wraps) against the checked-out
+        # tree. Skipped only on a manual dispatch with build_branch_pkg unticked.
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
+        run: |
+          set -eu
+          mkdir -p store
+          git clone --depth 1 -b "$PORTS_REF" "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
+          python3 pfblockerng/scripts/build-pkg-portable.py \
+            --ports "${RUNNER_TEMP}/ports" \
+            --channel devel \
+            --local-src pfblockerng \
+            --abi "$PKG_ABI" \
+            --py-flavor "$PKG_PY_FLAVOR" \
+            --php "$PKG_PHP" \
+            --out store
+          ls -l store
 
       - name: Fold in every Release .pkg asset
         # The durable store is the source repo's GitHub Releases' .pkg assets
