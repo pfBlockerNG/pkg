@@ -1,0 +1,141 @@
+name: Publish pfBlockerNG pkg repository
+
+# Self-contained publisher for the pfBlockerNG self-hosted FreeBSD `pkg`
+# repository (ADR-17). It lives in pfBlockerNG/pkg so it deploys to THIS repo's
+# GitHub Pages — served at https://pfblockerng.github.io/pkg — via the same-repo
+# OIDC actions/deploy-pages. No deploy key, no cross-repo secret: everything it
+# needs from pfBlockerNG/pfBlockerNG is PUBLIC (the generator script + the
+# Release .pkg assets), read with this repo's own GITHUB_TOKEN.
+#
+# It is a DERIVED, fully-regenerated index over the durable GitHub *Release*
+# `.pkg` assets of pfBlockerNG/pfBlockerNG: each run enumerates every release,
+# downloads its .pkg, buckets by ABI (the generator reads the ABI from each
+# .pkg's manifest), and deploys the whole tree — stateless + idempotent.
+#
+# TRIGGERS:
+#   * workflow_dispatch — manual, AND fired by pfBlockerNG/pfBlockerNG's
+#     release.yml (`gh workflow run`, authenticated with the PKG_DISPATCH_TOKEN
+#     PAT) so a new release publishes here within seconds.
+#   * schedule — a daily backstop that picks up anything a missed dispatch left behind.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+# Least privilege: read to checkout + read public releases; the Pages OIDC deploy
+# pair is the only elevation, scoped to this job.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time; never cancel an in-flight deploy (a half-replaced
+# site is worse than a queued one).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Generate catalog + deploy to Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Checkout the pfBlockerNG generator script (public source repo)
+        uses: actions/checkout@v6
+        with:
+          repository: pfBlockerNG/pfBlockerNG
+          ref: devel
+          path: pfblockerng
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Ensure the zstd encoder is present
+        # build-repo-portable.py needs a zstd ENCODER (the `zstd` binary or the
+        # python `zstandard` module). ubuntu-latest may not ship it — install it.
+        run: command -v zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
+
+      - name: Collect every Release .pkg asset into one dir
+        # The durable store is the GitHub Releases' .pkg assets of the source repo
+        # (public). Enumerate ALL releases (paginated — no cap, so older .pkg never
+        # drop out of the derived index) and download each one's .pkg. Flat dir —
+        # the generator buckets by ABI from each .pkg's own manifest, not the name.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SRC_REPO: pfBlockerNG/pfBlockerNG
+        run: |
+          set -eu
+          mkdir -p store
+          TAGS="$(gh api "repos/${SRC_REPO}/releases" --paginate --jq '.[].tag_name' || true)"
+          if [ -n "$TAGS" ]; then
+            printf '%s\n' "$TAGS" | while IFS= read -r TAG; do
+              [ -n "$TAG" ] || continue
+              echo "--- Release ${TAG}: downloading .pkg assets ---"
+              gh release download "$TAG" -R "$SRC_REPO" --dir store --pattern '*.pkg' --clobber \
+                || echo "  (no .pkg assets on ${TAG})"
+            done
+          else
+            echo "No GitHub Releases found in ${SRC_REPO}."
+          fi
+          N="$(find store -type f -name '*.pkg' | wc -l | tr -d ' ')"
+          echo "Total .pkg collected: ${N}"
+          find store -type f -name '*.pkg' -exec ls -l {} \; || true
+          if [ "$N" -eq 0 ]; then
+            echo "::error::No .pkg assets found in ${SRC_REPO} releases — nothing to publish."
+            exit 1
+          fi
+
+      - name: Generate the per-ABI catalog (pure-Python)
+        # scripts/build-repo-portable.py — no libpkg, no ABI env. One <ABI>/ subtree
+        # per distinct ABI (meta.conf / meta / packagesite.pkg / data.pkg + the .pkg).
+        run: |
+          set -eu
+          python3 pfblockerng/scripts/build-repo-portable.py --in store --out site
+          echo "--- Published site tree ---"
+          find site -type f | sort
+
+      - name: Add a human landing page (pkg ignores it)
+        # Pages serves a directory; a tiny index documents the conf URL for humans.
+        # pkg(8) only ever fetches <ABI>/meta.conf etc., never the root index.
+        run: |
+          set -eu
+          {
+            echo '<!doctype html><meta charset="utf-8">'
+            echo '<title>pfBlockerNG pkg repository</title>'
+            echo '<h1>pfBlockerNG self-hosted pkg repository</h1>'
+            echo '<p>Add this repo to a pfSense box, then <code>pkg install pfSense-pkg-pfBlockerNG-devel</code>:</p>'
+            echo '<pre>'
+            python3 pfblockerng/scripts/build-repo-portable.py --print-conf | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+            echo '</pre>'
+            echo '<p>Catalog trees (one per ABI):</p><ul>'
+            for d in site/*/; do
+              [ -d "$d" ] || continue
+              abi="$(basename "$d")"
+              printf '<li><a href="%s/">%s</a></li>\n' "$abi" "$abi"
+            done
+            echo '</ul>'
+          } > site/index.html
+          # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
+          touch site/.nojekyll
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Report the published URL
+        run: |
+          echo "Deployed to: ${{ steps.deploy.outputs.page_url }}"
+          echo "Client conf url (per ABI): https://pfblockerng.github.io/pkg/\${ABI}"
