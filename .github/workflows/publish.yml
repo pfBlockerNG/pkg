@@ -4,42 +4,66 @@ name: Publish pfBlockerNG pkg repository
 # repository (ADR-17). It lives in pfBlockerNG/pkg so it deploys to THIS repo's
 # GitHub Pages — served at https://pfblockerng.github.io/pkg — via the same-repo
 # OIDC actions/deploy-pages. No deploy key, no cross-repo secret: everything it
-# needs from pfBlockerNG/pfBlockerNG is PUBLIC (the generator script + the
-# Release .pkg assets), read with this repo's own GITHUB_TOKEN.
+# needs from pfBlockerNG/pfBlockerNG is PUBLIC (the reusable build workflow, the
+# generator script, and the Release .pkg assets), used with this repo's own
+# GITHUB_TOKEN.
 #
-# It is a DERIVED, fully-regenerated index over the durable GitHub *Release*
-# `.pkg` assets of pfBlockerNG/pfBlockerNG: each run enumerates every release,
-# downloads its .pkg, buckets by ABI (the generator reads the ABI from each
-# .pkg's manifest), and deploys the whole tree — stateless + idempotent.
+# CONTENT — the union of:
+#   * the current devel .pkg, built fresh by CALLING the source repo's reusable
+#     build-pkg-linux.yml (cross-repo `uses:`), so the devel channel is always
+#     current even with no GitHub Release cut yet (this is what andrebrait.github.io
+#     served); and
+#   * every GitHub *Release* .pkg asset of pfBlockerNG/pfBlockerNG (the durable
+#     store — ADR-09/17), enumerated and downloaded each run.
+# The catalog is a DERIVED, fully-regenerated index — stateless + idempotent.
 #
 # TRIGGERS:
 #   * workflow_dispatch — manual, AND fired by pfBlockerNG/pfBlockerNG's
 #     release.yml (`gh workflow run`, authenticated with the PKG_DISPATCH_TOKEN
 #     PAT) so a new release publishes here within seconds.
-#   * schedule — a daily backstop that picks up anything a missed dispatch left behind.
+#   * schedule — a daily backstop that also refreshes the devel build.
 
 on:
   workflow_dispatch:
+    inputs:
+      build_branch_pkg:
+        description: "Build the current devel .pkg and fold it in (default true)."
+        type: boolean
+        default: true
   schedule:
     - cron: "0 6 * * *"
 
 # Least privilege: read to checkout + read public releases; the Pages OIDC deploy
-# pair is the only elevation, scoped to this job.
+# pair is the only elevation.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# One Pages deploy at a time; never cancel an in-flight deploy (a half-replaced
-# site is worse than a queued one).
+# One Pages deploy at a time; never cancel an in-flight deploy.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
+  # Build the current devel .pkg by reusing the SOURCE repo's portable Linux
+  # builder cross-repo (public reusable workflow). Its `pfBlockerNG-pkg` artifact
+  # is available to the publish job in this same run. Built on schedule always;
+  # on a manual dispatch unless build_branch_pkg is unticked.
+  build-branch-pkg:
+    name: Build devel .pkg (portable Linux)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
+    uses: pfBlockerNG/pfBlockerNG/.github/workflows/build-pkg-linux.yml@devel
+    with:
+      channel: devel
+
   publish:
     name: Generate catalog + deploy to Pages
     runs-on: ubuntu-latest
+    # A skipped `needs` entry still satisfies the dependency, so this runs whether
+    # or not the build ran; never block on it.
+    needs: [build-branch-pkg]
+    if: always()
     timeout-minutes: 20
     environment:
       name: github-pages
@@ -63,11 +87,20 @@ jobs:
         # python `zstandard` module). ubuntu-latest may not ship it — install it.
         run: command -v zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
 
-      - name: Collect every Release .pkg asset into one dir
-        # The durable store is the GitHub Releases' .pkg assets of the source repo
-        # (public). Enumerate ALL releases (paginated — no cap, so older .pkg never
-        # drop out of the derived index) and download each one's .pkg. Flat dir —
-        # the generator buckets by ABI from each .pkg's own manifest, not the name.
+      - name: Download the freshly-built devel .pkg (if the build ran)
+        # Present when build-branch-pkg ran; absent if it was skipped. The reusable
+        # workflow's artifact is scoped to this run, so download by name.
+        uses: actions/download-artifact@v4
+        with:
+          name: pfBlockerNG-pkg
+          path: store
+        continue-on-error: true
+
+      - name: Fold in every Release .pkg asset
+        # The durable store is the source repo's GitHub Releases' .pkg assets
+        # (public). Enumerate ALL releases (paginated — no cap) and download each
+        # one's .pkg into the same flat dir; the generator buckets by ABI from each
+        # .pkg's own manifest, not the filename.
         env:
           GH_TOKEN: ${{ github.token }}
           SRC_REPO: pfBlockerNG/pfBlockerNG
@@ -83,13 +116,13 @@ jobs:
                 || echo "  (no .pkg assets on ${TAG})"
             done
           else
-            echo "No GitHub Releases found in ${SRC_REPO}."
+            echo "No GitHub Releases in ${SRC_REPO} (devel build is the only source)."
           fi
           N="$(find store -type f -name '*.pkg' | wc -l | tr -d ' ')"
           echo "Total .pkg collected: ${N}"
           find store -type f -name '*.pkg' -exec ls -l {} \; || true
           if [ "$N" -eq 0 ]; then
-            echo "::error::No .pkg assets found in ${SRC_REPO} releases — nothing to publish."
+            echo "::error::No .pkg to publish (devel build skipped/failed AND no releases)."
             exit 1
           fi
 
