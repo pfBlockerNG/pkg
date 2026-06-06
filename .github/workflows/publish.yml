@@ -103,6 +103,40 @@ jobs:
             --out store
           ls -l store
 
+      - name: Build the current devel HEAD as a nightly .pkg (ADR-18)
+        # The nightly channel is a SEPARATE package (pfSense-pkg-pfBlockerNG-nightly,
+        # the -nightly port) built from the SAME devel HEAD, served from a distinct
+        # nightly/ subtree. Stateless, like the devel build: one current nightly per
+        # run (no GitHub pre-release store). The version is pkg-safe + monotonic —
+        # <target>.YYYYMMDD.<run_number> (target = the -nightly port PORTVERSION; the
+        # date dominates, run_number breaks same-day ties) — and the source commit
+        # rides the annotation. Built into its OWN store so it never mixes with the
+        # release catalog (file-overlap: -nightly and -devel share src/ paths).
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
+        run: |
+          set -eu
+          mkdir -p nightly_store
+          # The ports tree was cloned by the devel build step; clone if that was skipped.
+          [ -d "${RUNNER_TEMP}/ports" ] \
+            || git clone --depth 1 -b "$PORTS_REF" "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
+          TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
+            "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
+          [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
+          SHA="$(git -C pfblockerng rev-parse HEAD)"
+          VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "Building nightly ${VER} from devel ${SHA}"
+          python3 pfblockerng/scripts/build-pkg-portable.py \
+            --ports "${RUNNER_TEMP}/ports" \
+            --channel nightly \
+            --local-src pfblockerng \
+            --abi "$PKG_ABI" \
+            --py-flavor "$PKG_PY_FLAVOR" \
+            --php "$PKG_PHP" \
+            --pkgversion "$VER" \
+            --annotate "commit=${SHA}" \
+            --out nightly_store
+          ls -l nightly_store
+
       - name: Fold in every Release .pkg asset
         # The durable store is the source repo's GitHub Releases' .pkg assets
         # (public). Enumerate ALL releases (paginated — no cap) and download each
@@ -142,6 +176,18 @@ jobs:
           echo "--- Published site tree ---"
           find site -type f | sort
 
+      - name: Generate the nightly catalog subtree (nightly/<ABI>/) — ADR-18
+        # The nightly .pkg(s) get their OWN per-ABI catalog under site/nightly/, so
+        # the served URL is …/pkg/nightly/${ABI} (what add-repo.sh nightly writes).
+        # Deployed in the SAME Pages artifact as the release catalog (one deploy).
+        # Skipped if the nightly build was skipped (no nightly .pkg to index).
+        if: ${{ hashFiles('nightly_store/*.pkg') != '' }}
+        run: |
+          set -eu
+          python3 pfblockerng/scripts/build-repo-portable.py --in nightly_store --out site/nightly
+          echo "--- Published nightly subtree ---"
+          find site/nightly -type f | sort
+
       - name: Add a human landing page (pkg ignores it)
         # Pages serves a directory; a tiny index documents the conf URL for humans.
         # pkg(8) only ever fetches <ABI>/meta.conf etc., never the root index.
@@ -159,9 +205,15 @@ jobs:
             for d in site/*/; do
               [ -d "$d" ] || continue
               abi="$(basename "$d")"
+              [ "$abi" = nightly ] && continue   # the nightly subtree, not an ABI
               printf '<li><a href="%s/">%s</a></li>\n' "$abi" "$abi"
             done
             echo '</ul>'
+            if [ -d site/nightly ]; then
+              echo '<p><strong>Nightly channel</strong> (bleeding edge — the devel tip rebuilt daily):'
+              echo '<code>add-repo.sh nightly</code> then <code>pkg install pfSense-pkg-pfBlockerNG-nightly</code>;'
+              echo 'served from <a href="nightly/">nightly/${ABI}</a>.</p>'
+            fi
           } > site/index.html
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
           touch site/.nojekyll
