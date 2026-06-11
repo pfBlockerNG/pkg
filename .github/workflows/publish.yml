@@ -220,11 +220,35 @@ jobs:
           echo "--- Published nightly subtree ---"
           find site/nightly -type f | sort
 
-      - name: Add a human landing page (pkg ignores it)
-        # Pages serves a directory; a tiny index documents the conf URL for humans.
-        # pkg(8) only ever fetches <ABI>/meta.conf etc., never the root index.
+      - name: Add a human landing page + per-directory indexes (pkg ignores them)
+        # GitHub Pages serves a directory ONLY if it holds an index.html (no auto
+        # listing), AND a relative href whose first path segment contains a ':' (the
+        # ABI, e.g. FreeBSD:15:amd64) is mis-parsed by browsers as a 'scheme:' (RFC
+        # 3986 §4.2) — so every catalog-dir link needs a leading './'. pkg(8) is
+        # unaffected: it builds absolute <ABI>/meta.conf URLs itself and never reads
+        # these pages (the ':' is a perfectly valid path char in an absolute URL).
         run: |
           set -eu
+          # 1) A browsable index.html in every catalog dir (one holding a .pkg),
+          #    listing each file by its (colon-free) basename — relative to that dir.
+          find site -type d | sort | while IFS= read -r d; do
+            ls "$d"/*.pkg >/dev/null 2>&1 || continue
+            name="${d#site/}"
+            {
+              echo '<!doctype html><meta charset="utf-8">'
+              printf '<title>pfBlockerNG pkg — %s</title>\n' "$name"
+              printf '<h1>%s</h1>\n<ul>\n' "$name"
+              for f in "$d"/*; do
+                b="$(basename "$f")"
+                if [ -f "$f" ] && [ "$b" != index.html ]; then
+                  printf '<li><a href="%s">%s</a></li>\n' "$b" "$b"
+                fi
+              done
+              echo '</ul>'
+            } > "$d/index.html"
+          done
+          # 2) The root landing page: the conf snippet + a './'-prefixed link to each
+          #    catalog dir (release <ABI>/ and nightly/<ABI>/).
           {
             echo '<!doctype html><meta charset="utf-8">'
             echo '<title>pfBlockerNG pkg repository</title>'
@@ -233,18 +257,16 @@ jobs:
             echo '<pre>'
             python3 pfblockerng/scripts/build-repo-portable.py --print-conf | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
             echo '</pre>'
-            echo '<p>Catalog trees (one per ABI):</p><ul>'
-            for d in site/*/; do
-              [ -d "$d" ] || continue
-              abi="$(basename "$d")"
-              [ "$abi" = nightly ] && continue   # the nightly subtree, not an ABI
-              printf '<li><a href="%s/">%s</a></li>\n' "$abi" "$abi"
+            echo '<p>Catalog trees:</p><ul>'
+            find site -type d | sort | while IFS= read -r d; do
+              ls "$d"/*.pkg >/dev/null 2>&1 || continue
+              name="${d#site/}"
+              printf '<li><a href="./%s/">%s</a></li>\n' "$name" "$name"
             done
             echo '</ul>'
             if [ -d site/nightly ]; then
               echo '<p><strong>Nightly channel</strong> (bleeding edge — the devel tip rebuilt daily):'
-              echo '<code>add-repo.sh nightly</code> then <code>pkg install pfSense-pkg-pfBlockerNG-nightly</code>;'
-              echo 'served from <a href="nightly/">nightly/${ABI}</a>.</p>'
+              echo '<code>add-repo.sh nightly</code> then <code>pkg install pfSense-pkg-pfBlockerNG-nightly</code>.</p>'
             fi
           } > site/index.html
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
