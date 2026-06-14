@@ -138,6 +138,8 @@ jobs:
           # epoch. Baked into each .pkg as the `created` annotation so the landing page
           # shows when the code was created, not when this catalog was republished.
           CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
+          # The source commit too — surfaced as a linked short SHA in the Commit column.
+          COMMIT="$(git -C pfblockerng rev-parse HEAD)"
           jq -c '.[]' build_matrix.json | while IFS= read -r e; do
             ABI="$(printf '%s' "$e"   | jq -r .abi)"
             PHP="$(printf '%s' "$e"   | jq -r .php)"
@@ -154,6 +156,7 @@ jobs:
               --php "$PHP" \
               --variant "$VAR" \
               --annotate "created=${CREATED}" \
+              --annotate "commit=${COMMIT}" \
               --out "$d"
             for f in "$d"/*.pkg; do
               cp "$f" "store/${ABI}__$(basename "$f")"
