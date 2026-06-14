@@ -22,6 +22,11 @@ from the source repo on a pfSense box, then:
 pkg install pfSense-pkg-pfBlockerNG-devel   # or: pfSense-pkg-pfBlockerNG (stable)
 ```
 
+The **stable** and **devel** packages are served from one shared repo
+(`pfblockerng`, written to `pfblockerng.conf`) — exactly as Netgate ships both
+from its single `pfSense` repo — so one `add-repo.sh` run exposes both; pick
+which to `pkg install`.
+
 The client repo conf points `pkg` at `https://pfblockerng.github.io/pkg/${ABI}`
 (NONE-signed, TLS-anchored). See the
 [pfBlockerNG README](https://github.com/pfBlockerNG/pfBlockerNG#readme) for details.
