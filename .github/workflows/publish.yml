@@ -98,7 +98,7 @@ jobs:
         # array of {abi, php, py_flavor, variant} the build/catalog steps loop over.
         id: matrix
         run: |
-          set -eu
+          set -euo pipefail
           git -C pfblockerng fetch --no-tags origin \
             '+refs/heads/ci-metadata:refs/remotes/origin/ci-metadata'
           BUILD_RAW="$( cd pfblockerng && sh scripts/read-version-matrix.sh --print-build )"
@@ -120,6 +120,8 @@ jobs:
                 php_version: .php_version,
                 py_flavor: .py_flavor
               } ]' > landing_matrix.json
+          jq -e 'length > 0' landing_matrix.json >/dev/null \
+            || { echo "::error::landing matrix resolved to zero targets"; exit 1; }
           # Fail fast on an empty matrix: otherwise both ABI loops are no-ops and the
           # run can still "succeed" by publishing only release assets, silently dropping
           # the devel + nightly channels for every ABI.
