@@ -19,6 +19,15 @@ name: Publish pfBlockerNG pkg repository
 #     store — ADR-09/17), enumerated and downloaded each run.
 # The catalog is a DERIVED, fully-regenerated index — stateless + idempotent.
 #
+# MULTI-ABI (issue #199): the build is NOT pinned to a single ABI. It reads the
+# SOURCE repo's BUILD matrix (scripts/read-version-matrix.sh, off the ci-metadata
+# orphan ref) and builds the devel + nightly .pkg for EVERY (freebsd_major, arch)
+# entry — e.g. FreeBSD:15:amd64 (CE), FreeBSD:16:amd64 (Plus) and
+# FreeBSD:16:aarch64 (Plus, Netgate ARM appliances). The generator buckets by the
+# ABI in each .pkg's own manifest, so the catalog grows a <ABI>/ (and
+# nightly/<ABI>/) subtree per entry automatically — ARM boxes can then install
+# from the self-hosted repo.
+#
 # TRIGGERS:
 #   * workflow_dispatch — manual, AND fired by pfBlockerNG/pfBlockerNG's
 #     release.yml (`gh workflow run`, authenticated with the PKG_DISPATCH_TOKEN
@@ -47,13 +56,10 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
-# TARGET facts of the devel build — the pfSense the .pkg installs onto
-# (CE 2.8.1 = FreeBSD 15 / py311 / php 8.3); inputs to the portable builder, not
-# read from any tree. Mirror build-pkg-linux.yml's defaults.
+# The pfSense ports tree the portable builders read (USE_GITHUB layout). The
+# per-ABI TARGET facts (FreeBSD major, php, py flavor, variant) are NOT pinned
+# here any more — they come from the SOURCE repo's BUILD matrix at runtime.
 env:
-  PKG_ABI: "FreeBSD:15:amd64"
-  PKG_PY_FLAVOR: "py311"
-  PKG_PHP: "8.3"
   PORTS_REPO: "pfBlockerNG/FreeBSD-ports"
   PORTS_REF: "pfblockerng/use-github"
 
@@ -61,7 +67,7 @@ jobs:
   publish:
     name: Build devel + generate catalog + deploy to Pages
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -84,31 +90,75 @@ jobs:
         # python `zstandard` module). ubuntu-latest may not ship it — install it.
         run: command -v zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
 
-      - name: Build the current devel .pkg (source repo's portable builder)
+      - name: Read the BUILD matrix (every (freebsd_major, arch) entry)
+        # The SOURCE repo owns the supported-version matrix on its ci-metadata
+        # orphan ref; read-version-matrix.sh resolves it (each entry carries a
+        # resolved `arch`, default amd64). Fetch ci-metadata into a tracking ref
+        # first — a single-branch checkout only has `devel`. Emit a compact JSON
+        # array of {abi, php, py_flavor, variant} the build/catalog steps loop over.
+        id: matrix
+        run: |
+          set -eu
+          git -C pfblockerng fetch --no-tags origin \
+            '+refs/heads/ci-metadata:refs/remotes/origin/ci-metadata'
+          ( cd pfblockerng && sh scripts/read-version-matrix.sh --print-build ) \
+            | jq -c '[ .[] | {
+                abi: "FreeBSD:\(.freebsd_major):\(.arch)",
+                php: .php_version,
+                py_flavor: .py_flavor,
+                variant: .variant
+              } ] | unique' > build_matrix.json
+          echo "--- BUILD targets ---"
+          jq -r '.[] | "\(.abi)  php=\(.php)  \(.py_flavor)  \(.variant)"' build_matrix.json
+
+      - name: Clone the FreeBSD-ports tree (port + Mk framework)
+        run: |
+          set -eu
+          git clone --depth 1 -b "$PORTS_REF" \
+            "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
+
+      - name: Build the current devel .pkg for every ABI (source repo's builder)
         # Run the SOURCE repo's scripts/build-pkg-portable.py (single source of
-        # truth — same script build-pkg-linux.yml wraps) against the checked-out
-        # tree. Skipped only on a manual dispatch with build_branch_pkg unticked.
+        # truth — same script build-pkg-linux.yml wraps) once per BUILD-matrix
+        # entry. All builds share the same name+version, so they collide on
+        # filename in a flat dir — write each into store/ with an ABI-tagged name
+        # (the generator reads the ABI from each .pkg's manifest, NOT the filename,
+        # and republishes it canonically). Skipped only on a manual dispatch with
+        # build_branch_pkg unticked.
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
         run: |
           set -eu
           mkdir -p store
-          git clone --depth 1 -b "$PORTS_REF" "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
-          python3 pfblockerng/scripts/build-pkg-portable.py \
-            --ports "${RUNNER_TEMP}/ports" \
-            --channel devel \
-            --local-src pfblockerng \
-            --abi "$PKG_ABI" \
-            --py-flavor "$PKG_PY_FLAVOR" \
-            --php "$PKG_PHP" \
-            --out store
+          jq -c '.[]' build_matrix.json | while IFS= read -r e; do
+            ABI="$(printf '%s' "$e"   | jq -r .abi)"
+            PHP="$(printf '%s' "$e"   | jq -r .php)"
+            PYF="$(printf '%s' "$e"   | jq -r .py_flavor)"
+            VAR="$(printf '%s' "$e"   | jq -r .variant)"
+            echo "--- devel build for ${ABI} (php=${PHP} ${PYF} ${VAR}) ---"
+            d="$(mktemp -d)"
+            python3 pfblockerng/scripts/build-pkg-portable.py \
+              --ports "${RUNNER_TEMP}/ports" \
+              --channel devel \
+              --local-src pfblockerng \
+              --abi "$ABI" \
+              --py-flavor "$PYF" \
+              --php "$PHP" \
+              --variant "$VAR" \
+              --out "$d"
+            for f in "$d"/*.pkg; do
+              cp "$f" "store/${ABI}__$(basename "$f")"
+            done
+          done
           ls -l store
 
       # ADR-18 nightly RETENTION via an Actions cache (same-repo, no token — which is
       # why the dated-pre-release store was infeasible here). Restore the rolling store
-      # of recent nightly .pkg, build ONLY the current devel HEAD into it, prune to the
-      # newest 14, then re-save. Rolling-cache idiom: a unique per-run key ALWAYS saves;
-      # restore-keys (a prefix) grabs the most recent prior store.
-      - name: Restore the nightly retention store (last 14 builds)
+      # of recent nightly .pkg, build ONLY the current devel HEAD into it (per ABI),
+      # prune each ABI to the newest 14, then re-save. Rolling-cache idiom: a unique
+      # per-run key ALWAYS saves; restore-keys (a prefix) grabs the most recent prior
+      # store. The store is bucketed PER ABI (nightly_store/<ABI>/) so retention and
+      # the generator stay arch-correct and same-version builds never collide on disk.
+      - name: Restore the nightly retention store (last 14 builds per ABI)
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
         uses: actions/cache/restore@v4
         with:
@@ -119,48 +169,67 @@ jobs:
 
       - name: Build the current devel HEAD nightly + prune to the newest 14 (ADR-18)
         # A SEPARATE package (pfSense-pkg-pfBlockerNG-nightly, the -nightly port) from
-        # the SAME devel HEAD, served from a distinct nightly/ subtree. Build ONLY the
-        # current HEAD and fold it into the restored store — skip even that when HEAD is
-        # unchanged since the last build (a `.last_commit` sidecar; a no-change day just
-        # re-publishes the cached 14). Version <target>.YYYYMMDD.<run_number> (pkg-safe,
-        # monotonic; target = the -nightly port PORTVERSION) + the commit annotation.
+        # the SAME devel HEAD, served from a distinct nightly/ subtree, built for EVERY
+        # ABI. Build ONLY the current HEAD and fold it into the restored store — skip
+        # even that when HEAD is unchanged since the last build AND every ABI is already
+        # present (a `.last_commit` sidecar; a no-change day just re-publishes the cached
+        # set). Version <target>.YYYYMMDD.<run_number> (pkg-safe, monotonic; target = the
+        # -nightly port PORTVERSION) + the commit annotation, identical across ABIs (the
+        # per-ABI subdir, not the filename, separates them).
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
         run: |
           set -eu
           mkdir -p nightly_store
+          # Migration: an older flat cache kept .pkg at the store root; the layout
+          # is now per-ABI (nightly_store/<ABI>/). Drop any stray root-level .pkg so
+          # they don't linger un-pruned (they're rebuilt into their ABI subdir).
+          rm -f nightly_store/*.pkg 2>/dev/null || true
           SHA="$(git -C pfblockerng rev-parse HEAD)"
+          # Every ABI already present at this SHA? Then nothing to build.
+          MISSING=0
+          jq -r '.[].abi' build_matrix.json | while IFS= read -r ABI; do
+            ls "nightly_store/${ABI}"/*.pkg >/dev/null 2>&1 || exit 1
+          done || MISSING=1
           if [ "$SHA" = "$(cat nightly_store/.last_commit 2>/dev/null || true)" ] \
-             && ls nightly_store/*.pkg >/dev/null 2>&1; then
-            echo "devel HEAD unchanged (${SHA}) — keeping the cached nightlies, no new build"
+             && [ "$MISSING" -eq 0 ]; then
+            echo "devel HEAD unchanged (${SHA}) and all ABIs present — keeping cached nightlies"
           else
-            # The ports tree was cloned by the devel build step; clone if that was skipped.
-            [ -d "${RUNNER_TEMP}/ports" ] \
-              || git clone --depth 1 -b "$PORTS_REF" "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
             TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
               "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
             [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
             VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
-            echo "Building nightly ${VER} from devel ${SHA}"
-            python3 pfblockerng/scripts/build-pkg-portable.py \
-              --ports "${RUNNER_TEMP}/ports" \
-              --channel nightly \
-              --local-src pfblockerng \
-              --abi "$PKG_ABI" \
-              --py-flavor "$PKG_PY_FLAVOR" \
-              --php "$PKG_PHP" \
-              --pkgversion "$VER" \
-              --annotate "commit=${SHA}" \
-              --out nightly_store
+            jq -c '.[]' build_matrix.json | while IFS= read -r e; do
+              ABI="$(printf '%s' "$e" | jq -r .abi)"
+              PHP="$(printf '%s' "$e" | jq -r .php)"
+              PYF="$(printf '%s' "$e" | jq -r .py_flavor)"
+              VAR="$(printf '%s' "$e" | jq -r .variant)"
+              echo "--- nightly ${VER} for ${ABI} from devel ${SHA} ---"
+              mkdir -p "nightly_store/${ABI}"
+              python3 pfblockerng/scripts/build-pkg-portable.py \
+                --ports "${RUNNER_TEMP}/ports" \
+                --channel nightly \
+                --local-src pfblockerng \
+                --abi "$ABI" \
+                --py-flavor "$PYF" \
+                --php "$PHP" \
+                --variant "$VAR" \
+                --pkgversion "$VER" \
+                --annotate "commit=${SHA}" \
+                --out "nightly_store/${ABI}"
+            done
             printf '%s\n' "$SHA" > nightly_store/.last_commit
           fi
-          # Retain the newest 14 nightly .pkg (version-sorted); drop the older overflow.
-          total="$(find nightly_store -maxdepth 1 -name '*.pkg' | wc -l | tr -d ' ')"
-          if [ "$total" -gt 14 ]; then
-            find nightly_store -maxdepth 1 -name '*.pkg' -printf '%f\n' | sort -V \
-              | head -n "$((total - 14))" \
-              | while IFS= read -r f; do echo "prune ${f}"; rm -f "nightly_store/${f}"; done
-          fi
-          echo "--- nightly store (<= 14) ---"; ls -l nightly_store
+          # Retain the newest 14 nightly .pkg PER ABI (version-sorted); drop the overflow.
+          for d in nightly_store/*/; do
+            [ -d "$d" ] || continue
+            total="$(find "$d" -maxdepth 1 -name '*.pkg' | wc -l | tr -d ' ')"
+            if [ "$total" -gt 14 ]; then
+              find "$d" -maxdepth 1 -name '*.pkg' -printf '%f\n' | sort -V \
+                | head -n "$((total - 14))" \
+                | while IFS= read -r f; do echo "prune ${d}${f}"; rm -f "${d}${f}"; done
+            fi
+          done
+          echo "--- nightly store (<= 14 per ABI) ---"; find nightly_store -name '*.pkg' | sort
 
       - name: Save the nightly retention store
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
@@ -202,6 +271,7 @@ jobs:
       - name: Generate the per-ABI catalog (pure-Python)
         # scripts/build-repo-portable.py — no libpkg, no ABI env. One <ABI>/ subtree
         # per distinct ABI (meta.conf / meta / packagesite.pkg / data.pkg + the .pkg).
+        # A flat store holding multiple ABIs is fine — it buckets from each manifest.
         run: |
           set -eu
           python3 pfblockerng/scripts/build-repo-portable.py --in store --out site
@@ -211,12 +281,18 @@ jobs:
       - name: Generate the nightly catalog subtree (nightly/<ABI>/) — ADR-18
         # The nightly .pkg(s) get their OWN per-ABI catalog under site/nightly/, so
         # the served URL is …/pkg/nightly/${ABI} (what add-repo.sh nightly writes).
-        # Deployed in the SAME Pages artifact as the release catalog (one deploy).
-        # Skipped if the nightly build was skipped (no nightly .pkg to index).
-        if: ${{ hashFiles('nightly_store/*.pkg') != '' }}
+        # The store is bucketed per ABI; run the generator once per bucket so each
+        # writes only its own nightly/<ABI>/ subtree (it wipes+rebuilds only the ABI
+        # buckets in its input). Deployed in the SAME Pages artifact (one deploy).
+        # Skipped if no nightly .pkg exist (the nightly build was skipped).
+        if: ${{ hashFiles('nightly_store/**/*.pkg') != '' }}
         run: |
           set -eu
-          python3 pfblockerng/scripts/build-repo-portable.py --in nightly_store --out site/nightly
+          for d in nightly_store/*/; do
+            [ -d "$d" ] || continue
+            ls "$d"*.pkg >/dev/null 2>&1 || continue
+            python3 pfblockerng/scripts/build-repo-portable.py --in "$d" --out site/nightly
+          done
           echo "--- Published nightly subtree ---"
           find site/nightly -type f | sort
 
