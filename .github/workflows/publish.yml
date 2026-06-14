@@ -316,55 +316,19 @@ jobs:
           echo "--- Published nightly subtree ---"
           find site/nightly -type f | sort
 
-      - name: Add a human landing page + per-directory indexes (pkg ignores them)
-        # GitHub Pages serves a directory ONLY if it holds an index.html (no auto
-        # listing), AND a relative href whose first path segment contains a ':' (the
-        # ABI, e.g. FreeBSD:15:amd64) is mis-parsed by browsers as a 'scheme:' (RFC
-        # 3986 §4.2) — so every catalog-dir link needs a leading './'. pkg(8) is
-        # unaffected: it builds absolute <ABI>/meta.conf URLs itself and never reads
-        # these pages (the ':' is a perfectly valid path char in an absolute URL).
+      - name: Render the human landing page + per-directory indexes
+        # The source repo's scripts/gen_landing.py renders the styled index OVER the
+        # machine catalog: channel install cards (stable/devel/nightly) with a copy-
+        # paste bootstrap, a Version x ABI table read from each .pkg's manifest, and a
+        # per-dir listing that links the package(s) but hides the pkg(8) catalog
+        # plumbing (meta.conf/packagesite.pkg/data.pkg — still served by URL). It needs
+        # the zstd binary (ensured above) and add-repo.sh (for the per-channel conf).
+        # pkg(8) never reads these pages — it builds absolute <ABI>/meta.conf URLs
+        # itself, where the ':' in an ABI is a valid path char.
         run: |
           set -eu
-          # 1) A browsable index.html in every catalog dir (one holding a .pkg),
-          #    listing each file by its (colon-free) basename — relative to that dir.
-          find site -type d | sort | while IFS= read -r d; do
-            ls "$d"/*.pkg >/dev/null 2>&1 || continue
-            name="${d#site/}"
-            {
-              echo '<!doctype html><meta charset="utf-8">'
-              printf '<title>pfBlockerNG pkg — %s</title>\n' "$name"
-              printf '<h1>%s</h1>\n<ul>\n' "$name"
-              for f in "$d"/*; do
-                b="$(basename "$f")"
-                if [ -f "$f" ] && [ "$b" != index.html ]; then
-                  printf '<li><a href="%s">%s</a></li>\n' "$b" "$b"
-                fi
-              done
-              echo '</ul>'
-            } > "$d/index.html"
-          done
-          # 2) The root landing page: the conf snippet + a './'-prefixed link to each
-          #    catalog dir (release <ABI>/ and nightly/<ABI>/).
-          {
-            echo '<!doctype html><meta charset="utf-8">'
-            echo '<title>pfBlockerNG pkg repository</title>'
-            echo '<h1>pfBlockerNG self-hosted pkg repository</h1>'
-            echo '<p>Add this repo to a pfSense box, then <code>pkg install pfSense-pkg-pfBlockerNG-devel</code>:</p>'
-            echo '<pre>'
-            python3 pfblockerng/scripts/build-repo-portable.py --print-conf | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
-            echo '</pre>'
-            echo '<p>Catalog trees:</p><ul>'
-            find site -type d | sort | while IFS= read -r d; do
-              ls "$d"/*.pkg >/dev/null 2>&1 || continue
-              name="${d#site/}"
-              printf '<li><a href="./%s/">%s</a></li>\n' "$name" "$name"
-            done
-            echo '</ul>'
-            if [ -d site/nightly ]; then
-              echo '<p><strong>Nightly channel</strong> (bleeding edge — the devel tip rebuilt daily):'
-              echo '<code>add-repo.sh nightly</code> then <code>pkg install pfSense-pkg-pfBlockerNG-nightly</code>.</p>'
-            fi
-          } > site/index.html
+          python3 pfblockerng/scripts/gen_landing.py \
+            site "https://pfblockerng.github.io/pkg" pfblockerng/scripts/add-repo.sh
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
           touch site/.nojekyll
 
