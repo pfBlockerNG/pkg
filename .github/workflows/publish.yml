@@ -134,6 +134,10 @@ jobs:
         run: |
           set -eu
           mkdir -p store
+          # The artifact's creation time = the source (devel HEAD) commit's committer
+          # epoch. Baked into each .pkg as the `created` annotation so the landing page
+          # shows when the code was created, not when this catalog was republished.
+          CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
           jq -c '.[]' build_matrix.json | while IFS= read -r e; do
             ABI="$(printf '%s' "$e"   | jq -r .abi)"
             PHP="$(printf '%s' "$e"   | jq -r .php)"
@@ -149,6 +153,7 @@ jobs:
               --py-flavor "$PYF" \
               --php "$PHP" \
               --variant "$VAR" \
+              --annotate "created=${CREATED}" \
               --out "$d"
             for f in "$d"/*.pkg; do
               cp "$f" "store/${ABI}__$(basename "$f")"
@@ -218,6 +223,9 @@ jobs:
             echo "nightly inputs unchanged (fp ${FP}) and all ABIs present — keeping cached nightlies"
           else
             VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
+            # Creation time = the source (devel HEAD) commit's committer epoch — baked
+            # in as `created` so the landing page shows the real build date.
+            CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
             jq -c '.[]' build_matrix.json | while IFS= read -r e; do
               ABI="$(printf '%s' "$e" | jq -r .abi)"
               PHP="$(printf '%s' "$e" | jq -r .php)"
@@ -235,6 +243,7 @@ jobs:
                 --variant "$VAR" \
                 --pkgversion "$VER" \
                 --annotate "commit=${SHA}" \
+                --annotate "created=${CREATED}" \
                 --out "nightly_store/${ABI}"
             done
             printf '%s\n' "$FP" > nightly_store/.fingerprint
