@@ -16,7 +16,7 @@ pfBlockerNG release.
 ## Using it on pfSense
 
 Run [`scripts/add-repo.sh`](https://github.com/pfBlockerNG/pfBlockerNG/blob/devel/scripts/add-repo.sh)
-from the source repo on a pfSense box, then:
+from the source repo on a pfSense box (no argument), then:
 
 ```sh
 pkg install pfSense-pkg-pfBlockerNG-devel   # or: pfSense-pkg-pfBlockerNG (stable)
@@ -25,7 +25,9 @@ pkg install pfSense-pkg-pfBlockerNG-devel   # or: pfSense-pkg-pfBlockerNG (stabl
 The **stable** and **devel** packages are served from one shared repo
 (`pfblockerng`, written to `pfblockerng.conf`) — exactly as Netgate ships both
 from its single `pfSense` repo — so one `add-repo.sh` run exposes both; pick
-which to `pkg install`.
+which to `pkg install`. The **nightly** repo is opt-in and separate: run
+`add-repo.sh --nightly` for the bleeding-edge `pfSense-pkg-pfBlockerNG-nightly`
+build (CI-passing only — not for daily use).
 
 The client repo conf points `pkg` at `https://pfblockerng.github.io/pkg/${ABI}`
 (NONE-signed, TLS-anchored). See the
