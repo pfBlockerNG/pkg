@@ -101,13 +101,25 @@ jobs:
           set -eu
           git -C pfblockerng fetch --no-tags origin \
             '+refs/heads/ci-metadata:refs/remotes/origin/ci-metadata'
-          ( cd pfblockerng && sh scripts/read-version-matrix.sh --print-build ) \
+          BUILD_RAW="$( cd pfblockerng && sh scripts/read-version-matrix.sh --print-build )"
+          printf '%s' "$BUILD_RAW" \
             | jq -c '[ .[] | {
                 abi: "FreeBSD:\(.freebsd_major):\(.arch)",
                 php: .php_version,
                 py_flavor: .py_flavor,
                 variant: .variant
               } ] | unique' > build_matrix.json
+          # The landing page (gen_landing.py --matrix) joins each .pkg's ABI to its pfSense
+          # edition/version + php/py to split the packages table by edition; it needs the
+          # fuller per-entry fields the trimmed build_matrix.json drops.
+          printf '%s' "$BUILD_RAW" \
+            | jq -c '[ .[] | {
+                abi: "FreeBSD:\(.freebsd_major):\(.arch)",
+                pfsense_version: .pfsense_version,
+                variant: .variant,
+                php_version: .php_version,
+                py_flavor: .py_flavor
+              } ]' > landing_matrix.json
           # Fail fast on an empty matrix: otherwise both ABI loops are no-ops and the
           # run can still "succeed" by publishing only release assets, silently dropping
           # the devel + nightly channels for every ABI.
@@ -340,7 +352,8 @@ jobs:
         run: |
           set -eu
           python3 pfblockerng/scripts/gen_landing.py \
-            site "https://pfblockerng.github.io/pkg" pfblockerng/scripts/add-repo.sh
+            site "https://pfblockerng.github.io/pkg" pfblockerng/scripts/add-repo.sh \
+            --matrix landing_matrix.json
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
           touch site/.nojekyll
 
