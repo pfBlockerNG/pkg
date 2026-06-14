@@ -108,6 +108,11 @@ jobs:
                 py_flavor: .py_flavor,
                 variant: .variant
               } ] | unique' > build_matrix.json
+          # Fail fast on an empty matrix: otherwise both ABI loops are no-ops and the
+          # run can still "succeed" by publishing only release assets, silently dropping
+          # the devel + nightly channels for every ABI.
+          jq -e 'length > 0' build_matrix.json >/dev/null \
+            || { echo "::error::BUILD matrix resolved to zero targets"; exit 1; }
           echo "--- BUILD targets ---"
           jq -r '.[] | "\(.abi)  php=\(.php)  \(.py_flavor)  \(.variant)"' build_matrix.json
 
@@ -171,9 +176,10 @@ jobs:
         # A SEPARATE package (pfSense-pkg-pfBlockerNG-nightly, the -nightly port) from
         # the SAME devel HEAD, served from a distinct nightly/ subtree, built for EVERY
         # ABI. Build ONLY the current HEAD and fold it into the restored store — skip
-        # even that when HEAD is unchanged since the last build AND every ABI is already
-        # present (a `.last_commit` sidecar; a no-change day just re-publishes the cached
-        # set). Version <target>.YYYYMMDD.<run_number> (pkg-safe, monotonic; target = the
+        # even that when the effective inputs are unchanged AND every ABI is already
+        # present (a `.fingerprint` sidecar over source HEAD + the resolved BUILD matrix
+        # + the -nightly PORTVERSION; a no-change day just re-publishes the cached set).
+        # Version <target>.YYYYMMDD.<run_number> (pkg-safe, monotonic; target = the
         # -nightly port PORTVERSION) + the commit annotation, identical across ABIs (the
         # per-ABI subdir, not the filename, separates them).
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
@@ -184,19 +190,33 @@ jobs:
           # is now per-ABI (nightly_store/<ABI>/). Drop any stray root-level .pkg so
           # they don't linger un-pruned (they're rebuilt into their ABI subdir).
           rm -f nightly_store/*.pkg 2>/dev/null || true
+          # Drop cached buckets for ABIs no longer in the matrix, so a removed arch
+          # stops being pruned/generated/published (the loops below + the catalog step
+          # walk nightly_store/*/, not the current matrix).
+          for d in nightly_store/*/; do
+            [ -d "$d" ] || continue
+            ABI="${d#nightly_store/}"; ABI="${ABI%/}"
+            jq -e --arg a "$ABI" 'any(.[]; .abi == $a)' build_matrix.json >/dev/null 2>&1 \
+              || { echo "drop stale ABI bucket ${ABI}"; rm -rf "$d"; }
+          done
           SHA="$(git -C pfblockerng rev-parse HEAD)"
-          # Every ABI already present at this SHA? Then nothing to build.
+          TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
+            "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
+          [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
+          # Fingerprint the effective nightly inputs — source HEAD, the resolved BUILD
+          # matrix (abi/php/py_flavor/variant from ci-metadata) AND the -nightly
+          # PORTVERSION. Any of these changing at the same SHA forces a rebuild; SHA
+          # alone is too narrow (it misses a matrix or PORTVERSION change).
+          FP="$( { printf '%s\n' "$SHA" "$TARGET"; cat build_matrix.json; } | sha256sum | cut -d' ' -f1 )"
+          # Every ABI already present with these inputs? Then nothing to build.
           MISSING=0
           jq -r '.[].abi' build_matrix.json | while IFS= read -r ABI; do
             ls "nightly_store/${ABI}"/*.pkg >/dev/null 2>&1 || exit 1
           done || MISSING=1
-          if [ "$SHA" = "$(cat nightly_store/.last_commit 2>/dev/null || true)" ] \
+          if [ "$FP" = "$(cat nightly_store/.fingerprint 2>/dev/null || true)" ] \
              && [ "$MISSING" -eq 0 ]; then
-            echo "devel HEAD unchanged (${SHA}) and all ABIs present — keeping cached nightlies"
+            echo "nightly inputs unchanged (fp ${FP}) and all ABIs present — keeping cached nightlies"
           else
-            TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
-              "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
-            [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
             VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
             jq -c '.[]' build_matrix.json | while IFS= read -r e; do
               ABI="$(printf '%s' "$e" | jq -r .abi)"
@@ -217,7 +237,7 @@ jobs:
                 --annotate "commit=${SHA}" \
                 --out "nightly_store/${ABI}"
             done
-            printf '%s\n' "$SHA" > nightly_store/.last_commit
+            printf '%s\n' "$FP" > nightly_store/.fingerprint
           fi
           # Retain the newest 14 nightly .pkg PER ABI (version-sorted); drop the overflow.
           for d in nightly_store/*/; do
