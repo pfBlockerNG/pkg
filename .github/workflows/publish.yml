@@ -132,8 +132,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # NOTE: --jq runs PER PAGE under --paginate, so `last` would pick the last of
+          # each page, not globally. Pipe the raw paginated arrays to `jq -s` (slurp) and
+          # `add` them into one array before selecting/sorting.
           TAG="$(gh api "repos/${SRC_REPO}/releases" --paginate \
-            --jq 'map(select(.prerelease==false and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
+            | jq -r -s 'add | map(select(.prerelease==false and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
           if [ -n "$TAG" ]; then
             echo "Latest stable tag: ${TAG}"
             git clone --depth 1 -b "$TAG" "https://github.com/${SRC_REPO}" stable_src
@@ -148,7 +151,9 @@ jobs:
         # built nightly subtrees (site/nightly/<varver>/<arch>/*.pkg); the brain folds the
         # fresh nightly in and prunes to 14. Rolling-cache idiom: a unique per-run key
         # ALWAYS saves; restore-keys (a prefix) grabs the most recent prior store.
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
+        # ALWAYS restore — even on a build_branch_pkg=false dispatch (which builds the
+        # release tree with --no-nightly): the restored site/nightly must be present in
+        # the deployed artifact, or the Pages deploy would WIPE the live nightly channel.
         uses: actions/cache/restore@v4
         with:
           path: site/nightly
