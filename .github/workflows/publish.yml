@@ -237,10 +237,16 @@ jobs:
         # table read from each .pkg's MANIFEST (layout-agnostic — it walks the tree and
         # reads ABI/channel from the package, so the release/<varver>/<arch>/ layout needs
         # no change), and per-dir listings. pkg(8) never reads these pages.
+        #
+        # The base-URL arg is the CLIENT bootstrap/conf base — it must be the Cloudflare
+        # WORKER (which routes the pfSense UA to the variant tree), NOT this Pages origin.
+        # The pages no longer carry a flat <ABI>/ catalog (it moved to release/<varver>/<arch>/),
+        # so a conf pointing at <pages>/${ABI} would 404. The page is still SERVED from
+        # Pages; only the install command + conf snippet point at the Worker.
         run: |
           set -eu
           python3 pfblockerng/scripts/gen_landing.py \
-            site "https://pfblockerng.github.io/pkg" pfblockerng/scripts/add-repo.sh \
+            site "https://pkg.pfblockerng.workers.dev" pfblockerng/scripts/add-repo.sh \
             --matrix landing_matrix.json
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
           touch site/.nojekyll
