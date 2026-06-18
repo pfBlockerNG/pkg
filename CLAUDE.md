@@ -15,3 +15,8 @@ GitHub-issue handling + labels, and commit style. Read that file — it is the
 source of truth. The pfBlockerNG-package mechanics (the DNSBL/ABP pipeline, the
 smoke/UI suites) and language/runtime code-standard specifics do **not** apply
 here. **Any rule below overrides the inherited default for this repo.**
+
+## Commit attribution and signing
+
+Inherited — see `pfBlockerNG/pfBlockerNG`'s `## Commit style` → **Author, committer, and signing**
+(the source of truth). Not restated here, to avoid drift.
