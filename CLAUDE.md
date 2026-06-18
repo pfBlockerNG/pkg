@@ -16,6 +16,19 @@ source of truth. The pfBlockerNG-package mechanics (the DNSBL/ABP pipeline, the
 smoke/UI suites) and language/runtime code-standard specifics do **not** apply
 here. **Any rule below overrides the inherited default for this repo.**
 
+## Git hooks
+
+Activate once after cloning: `sh scripts/setup-hooks.sh` (sets `core.hooksPath` to `.githooks`).
+git can't auto-apply a committed hooks path, so this opt-in is required. **Claude: ensure hooks
+are active before working here** — if `git config core.hooksPath` is not `.githooks`, run it once
+at session start (idempotent).
+
+`.githooks/prepare-commit-msg` (byte-synced with `pfBlockerNG/pfBlockerNG`) appends a
+`Co-authored-by:` trailer for the human owner so GitHub credits them when an agent is the
+committer — resolving the owner generically (`coauthor.*` git config, else
+`$CLAUDE_CODE_USER_EMAIL`, else the author), and a no-op when the human is already the committer
+or credited. See the public repo's *Commit style → Author, committer, and signing*.
+
 ## Commit attribution and signing
 
 Inherited — see `pfBlockerNG/pfBlockerNG`'s `## Commit style` → **Author, committer, and signing**
