@@ -105,16 +105,26 @@ jobs:
             | jq -c '.' > matrix.json
           jq -e 'length > 0' matrix.json >/dev/null \
             || { echo "::error::BUILD matrix resolved to zero targets"; exit 1; }
+          # ROUTE matrix = build ∪ route-only (ADR-27 Part 2). The brain consumes THIS
+          # (route-only entries emit a frozen catalog, no build/nightly); --print-route
+          # == --print-build until a version is flagged route-only, so this is inert today.
+          ( cd pfblockerng && sh scripts/read-version-matrix.sh --print-route ) \
+            | jq -c '.' > route_matrix.json
           # gen_landing.py --matrix wants the per-entry fields keyed by resolved ABI.
+          # Built from the ROUTE matrix + role, so the landing page's "EOL pfSense
+          # versions" tables (role=="route-only") render; role is absent today.
           jq -c '[ .[] | {
               abi: "FreeBSD:\(.freebsd_major):\(.arch)",
               pfsense_version: .pfsense_version,
               variant: .variant,
               php_version: .php_version,
-              py_flavor: .py_flavor
-            } ]' matrix.json > landing_matrix.json
+              py_flavor: .py_flavor,
+              role: (.role // "build")
+            } ]' route_matrix.json > landing_matrix.json
           echo "--- BUILD targets ---"
           jq -r '.[] | "\(.variant) \(.pfsense_version) FreeBSD:\(.freebsd_major):\(.arch) php=\(.php_version) \(.py_flavor) [\(.status)]"' matrix.json
+          echo "--- ROUTE-ONLY (EOL) targets ---"
+          jq -r '[ .[] | select(.role == "route-only") ] | if length == 0 then "(none)" else .[] | "\(.variant) \(.pfsense_version) [route-only]" end' route_matrix.json
 
       - name: Clone the FreeBSD-ports tree (port + Mk framework)
         run: |
@@ -145,6 +155,52 @@ jobs:
             echo "No stable (non-prerelease) Release yet — production stays empty."
             echo "tag=" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Download frozen .pkg for route-only (EOL) pfSense versions
+        # ADR-27 Part 2. A route-only matrix entry (role=="route-only") is an EOL pfSense
+        # version no longer built/smoked but still SERVED from its last .pkg. For each, pull
+        # that version's last Release assets (the matrix `last_tag`) and hand them to the
+        # brain as --route-only-pkgs <varver>:<path>. The brain emits a frozen catalog from
+        # them (no build, no nightly). NO-OP today: there are no route-only entries, so this
+        # emits an empty arg string and the brain behaves exactly as before.
+        id: route-only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ARGS_FILE="${RUNNER_TEMP}/route_only_args"
+          : > "$ARGS_FILE"
+          COUNT="$(jq '[ .[] | select(.role == "route-only") ] | length' route_matrix.json)"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No route-only (EOL) entries — nothing to download."
+            echo "args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # NOTE: iterate via a here-string (process substitution), NOT a pipe into `while`,
+          # so the loop body runs in THIS shell — a `cmd | while` subshell would lose state.
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            PFSENSE_VER="$(printf '%s' "$entry" | jq -r '.pfsense_version')"
+            VARIANT="$(printf '%s' "$entry" | jq -r '.variant')"
+            LAST_TAG="$(printf '%s' "$entry" | jq -r '.last_tag // empty')"
+            MAJOR_MINOR="$(printf '%s' "$PFSENSE_VER" | cut -d. -f1-2)"
+            VARVER="$(printf '%s' "$VARIANT" | tr '[:upper:]' '[:lower:]')-${MAJOR_MINOR}"
+            if [ -z "$LAST_TAG" ]; then
+              echo "::error::route-only entry ${VARVER} has no last_tag — cannot fetch its frozen .pkg"
+              exit 1
+            fi
+            ASSET_DIR="${RUNNER_TEMP}/frozen/${VARVER}"
+            mkdir -p "$ASSET_DIR"
+            gh release download "$LAST_TAG" --repo "${SRC_REPO}" --pattern '*.pkg' --dir "$ASSET_DIR"
+            for PKG_FILE in "$ASSET_DIR"/*.pkg; do
+              [ -e "$PKG_FILE" ] || { echo "::error::no .pkg in Release ${LAST_TAG} for ${VARVER}"; exit 1; }
+              printf ' --route-only-pkgs %s:%s' "$VARVER" "$PKG_FILE" >> "$ARGS_FILE"
+            done
+          done <<EOF
+          $(jq -c '.[] | select(.role == "route-only")' route_matrix.json)
+          EOF
+          echo "args=$(cat "$ARGS_FILE")" >> "$GITHUB_OUTPUT"
+          echo "route-only args: $(cat "$ARGS_FILE")"
 
       - name: Restore the nightly retention store (last 14 builds per subtree)
         # ADR-18 retention via a same-repo Actions cache (no token). The cache holds the
@@ -182,9 +238,13 @@ jobs:
           if [ -n "$STABLE_TAG" ]; then
             STABLE_ARGS="--stable-tag ${STABLE_TAG} --stable-src stable_src"
           fi
+          # ROUTE matrix (build ∪ route-only); route-only entries emit a frozen catalog
+          # from the .pkg downloaded above (no build, no nightly). Inert until a version
+          # is flagged route-only (then --print-route == --print-build, args empty).
+          ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
-            --matrix-json matrix.json \
+            --matrix-json route_matrix.json \
             --out site \
             --ports "${RUNNER_TEMP}/ports" \
             --local-src pfblockerng \
@@ -192,6 +252,7 @@ jobs:
             --nightly-keep 14 \
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
+            $ROUTE_ONLY_ARGS \
             $STABLE_ARGS
           echo "--- Published site tree ---"
           find site -type f | sort
@@ -212,15 +273,17 @@ jobs:
           if [ -n "$STABLE_TAG" ]; then
             STABLE_ARGS="--stable-tag ${STABLE_TAG} --stable-src stable_src"
           fi
+          ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
-            --matrix-json matrix.json \
+            --matrix-json route_matrix.json \
             --out site \
             --ports "${RUNNER_TEMP}/ports" \
             --local-src pfblockerng \
             --no-nightly \
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
+            $ROUTE_ONLY_ARGS \
             $STABLE_ARGS
           find site -type f | sort
 
