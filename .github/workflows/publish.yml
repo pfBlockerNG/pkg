@@ -17,20 +17,22 @@ name: Publish pfBlockerNG pkg repository
 #   nightly/<variant>-<major.minor>/<arch>/   (nightly only, retained to 14)
 #   routing.json                              (UA → catalog, for the Cloudflare Worker)
 #
-# CONTENT:
-#   * devel — built fresh from the SOURCE repo's devel HEAD, every matrix entry.
-#   * stable — built from the latest stable (non-prerelease) Release TAG's source,
-#     every matrix entry. The SAME tag build feeds both the GitHub Release and this
-#     repo. There is no stable release of this fork yet, so production stays empty
-#     until one is cut (the resolver below yields no tag → stable is simply skipped).
-#   * nightly — a SEPARATE package from the same devel HEAD, folded in with the
-#     retained prior nightlies (restored from an Actions cache) and pruned to 14.
+# CONTENT (ADR-20 D3 — the release/ subtree is CONSUMED, not rebuilt):
+#   * devel — SERVED FROM the latest prerelease (alpha/beta/rc) Release's .pkg assets.
+#   * stable — SERVED FROM the latest stable (non-prerelease) Release's .pkg assets.
+#     Both are built ONCE by pfBlockerNG/pfBlockerNG's release.yml (full matrix) and
+#     downloaded here, mapped to release/<varver>/<arch>/ by the variant slug in each
+#     filename. Either channel absent → that catalog is simply empty until a Release
+#     exists (no stable release of this fork yet → production stays empty).
+#   * nightly — the ONLY fresh build here: a SEPARATE package from devel HEAD, folded in
+#     with the retained prior nightlies (restored from an Actions cache) and pruned to 14.
 # The catalog is a DERIVED, fully-regenerated index — stateless + idempotent.
 #
 # TRIGGERS:
-#   * workflow_dispatch — manual, AND fired by pfBlockerNG/pfBlockerNG's
-#     release.yml so a new release publishes here within seconds.
-#   * schedule — a daily backstop that also refreshes the devel + nightly builds.
+#   * workflow_dispatch — manual, AND fired by pfBlockerNG/pfBlockerNG's release.yml
+#     (after the Release assets are attached) so a new release publishes here in seconds.
+#   * schedule — a daily backstop that refreshes the nightly build and re-consumes the
+#     latest Releases (idempotent for release/).
 
 on:
   workflow_dispatch:
@@ -132,29 +134,59 @@ jobs:
           git clone --depth 1 -b "$PORTS_REF" \
             "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
 
-      - name: Resolve the latest stable release tag (production source)
-        # Stable/production is ALWAYS built from the release TAG's source (ADR-20 D3).
-        # Pick the newest NON-prerelease, non-draft Release; check out the source at
-        # that tag into a sibling dir for the builder's --stable-src. No stable release
-        # exists yet → STABLE_TAG stays empty and the brain skips the stable build.
-        id: stable
+      - name: Download Release .pkg assets (latest stable + latest prerelease)
+        # ADR-20 D3 rework: the release/<varver>/<arch>/ catalog is SERVED FROM the GitHub
+        # Release .pkg assets (built once by pfBlockerNG/pfBlockerNG's release.yml), no longer
+        # rebuilt here. Download the newest stable (non-prerelease) Release → stable channel,
+        # and the newest prerelease Release → devel channel. Map each asset to its catalog dir
+        # via the variant slug encoded in its filename
+        # (…-<variant>-<major.minor>-FreeBSD-<major>-<arch>.pkg) and hand them to the brain as
+        # --release-pkgs <varver>:<path>; retain_by_channel keeps the newest devel + newest
+        # stable per (varver, arch). Either channel absent → simply not served yet (empty pool
+        # is a warn+skip in the brain). Nightly is STILL built fresh from devel HEAD below.
+        id: release-pkgs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # NOTE: --jq runs PER PAGE under --paginate, so `last` would pick the last of
-          # each page, not globally. Pipe the raw paginated arrays to `jq -s` (slurp) and
-          # `add` them into one array before selecting/sorting.
-          TAG="$(gh api "repos/${SRC_REPO}/releases" --paginate \
-            | jq -r -s 'add | map(select(.prerelease==false and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
-          if [ -n "$TAG" ]; then
-            echo "Latest stable tag: ${TAG}"
-            git clone --depth 1 -b "$TAG" "https://github.com/${SRC_REPO}" stable_src
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          else
-            echo "No stable (non-prerelease) Release yet — production stays empty."
-            echo "tag=" >> "$GITHUB_OUTPUT"
-          fi
+          ARGS_FILE="${RUNNER_TEMP}/release_pkgs_args"
+          : > "$ARGS_FILE"
+          DL_ROOT="${RUNNER_TEMP}/release_assets"
+          mkdir -p "$DL_ROOT"
+
+          # Newest non-prerelease (stable) + newest prerelease tag. --jq runs PER PAGE under
+          # --paginate, so slurp (`jq -s 'add'`) into one array before sorting globally.
+          RELEASES_JSON="$(gh api "repos/${SRC_REPO}/releases" --paginate | jq -s 'add')"
+          STABLE_TAG="$(printf '%s' "$RELEASES_JSON" \
+            | jq -r 'map(select(.prerelease==false and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
+          PRERELEASE_TAG="$(printf '%s' "$RELEASES_JSON" \
+            | jq -r 'map(select(.prerelease==true  and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
+          echo "Stable Release:     ${STABLE_TAG:-<none>}"
+          echo "Prerelease Release: ${PRERELEASE_TAG:-<none>}"
+
+          # Download both channels' .pkg assets (the source tar.gz never matches *.pkg), then
+          # map each to its varver and emit a --release-pkgs arg.
+          for TAG in "$STABLE_TAG" "$PRERELEASE_TAG"; do
+            [ -n "$TAG" ] || continue
+            DEST="${DL_ROOT}/${TAG}"
+            mkdir -p "$DEST"
+            gh release download "$TAG" --repo "${SRC_REPO}" --pattern '*.pkg' --dir "$DEST" || {
+              echo "::warning::no .pkg assets in Release ${TAG}"; continue; }
+            for PKG in "$DEST"/*.pkg; do
+              [ -e "$PKG" ] || continue
+              BASE="$(basename "$PKG")"
+              # Variant slug = the <ce|plus>-<major.minor> segment immediately before -FreeBSD-.
+              VARVER="$(printf '%s' "$BASE" \
+                | sed -nE 's/.*-((ce|plus)-[0-9]+\.[0-9]+)-FreeBSD-[0-9]+-(amd64|aarch64)\.pkg$/\1/p')"
+              if [ -z "$VARVER" ]; then
+                echo "::warning::cannot parse a variant slug from ${BASE} — skipping"
+                continue
+              fi
+              printf ' --release-pkgs %s:%s' "$VARVER" "$PKG" >> "$ARGS_FILE"
+            done
+          done
+          echo "args=$(cat "$ARGS_FILE")" >> "$GITHUB_OUTPUT"
+          echo "release-pkgs args:$(cat "$ARGS_FILE")"
 
       - name: Download frozen .pkg for route-only (EOL) pfSense versions
         # ADR-27 Part 2. A route-only matrix entry (role=="route-only") is an EOL pfSense
@@ -218,14 +250,14 @@ jobs:
             nightly-store-
 
       - name: Build the variant tree + routing.json (the brain)
-        # scripts/build-repo-portable.py --build-matrix drives build-pkg-portable.py per
-        # (entry × channel), lays out release/ + nightly/ + routing.json, and prunes the
-        # nightly subtrees to 14. The nightly version is <target>.YYYYMMDD.<run_number>
-        # (pkg-safe, monotonic; target = the -nightly port PORTVERSION); the commit +
-        # created annotations are stamped on every build for the landing page.
+        # scripts/build-repo-portable.py --build-matrix lays out release/ + nightly/ +
+        # routing.json and prunes the nightly subtrees to 14. The release/ catalog is
+        # SERVED from the downloaded Release .pkg assets (--release-pkgs); only NIGHTLY is
+        # built fresh here (from devel HEAD via --local-src), versioned
+        # <target>.YYYYMMDD.<run_number> (pkg-safe, monotonic; target = the -nightly port
+        # PORTVERSION). The commit + created annotations are stamped on every build for the
+        # landing page (the consumed Release .pkg already carry their own annotations).
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
-        env:
-          STABLE_TAG: ${{ steps.stable.outputs.tag }}
         run: |
           set -euo pipefail
           SHA="$(git -C pfblockerng rev-parse HEAD)"
@@ -234,13 +266,9 @@ jobs:
             "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
           [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
           VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
-          STABLE_ARGS=""
-          if [ -n "$STABLE_TAG" ]; then
-            STABLE_ARGS="--stable-tag ${STABLE_TAG} --stable-src stable_src"
-          fi
-          # ROUTE matrix (build ∪ route-only); route-only entries emit a frozen catalog
-          # from the .pkg downloaded above (no build, no nightly). Inert until a version
-          # is flagged route-only (then --print-route == --print-build, args empty).
+          # release/ is consumed from the Release assets; route-only entries serve a frozen
+          # .pkg (no build, no nightly). Both arg strings are empty until populated.
+          RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
           ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
@@ -253,26 +281,21 @@ jobs:
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
             $ROUTE_ONLY_ARGS \
-            $STABLE_ARGS
+            $RELEASE_PKGS_ARGS
           echo "--- Published site tree ---"
           find site -type f | sort
 
       - name: Build the release tree ONLY (manual dispatch, builds skipped)
-        # A manual dispatch can opt out of the package builds (build_branch_pkg=false)
-        # to just regenerate routing.json + the release catalog from devel HEAD without
-        # touching the nightly store. Uses --no-nightly so the cached nightlies are
-        # neither read nor pruned in this branch.
+        # A manual dispatch can opt out of the nightly build (build_branch_pkg=false) to just
+        # regenerate routing.json + the consumed release/ catalog without touching the nightly
+        # store. Uses --no-nightly so the cached nightlies are neither read nor pruned here;
+        # release/ is still served from the downloaded Release assets (--release-pkgs).
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.build_branch_pkg }}
-        env:
-          STABLE_TAG: ${{ steps.stable.outputs.tag }}
         run: |
           set -euo pipefail
           SHA="$(git -C pfblockerng rev-parse HEAD)"
           CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
-          STABLE_ARGS=""
-          if [ -n "$STABLE_TAG" ]; then
-            STABLE_ARGS="--stable-tag ${STABLE_TAG} --stable-src stable_src"
-          fi
+          RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
           ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
@@ -284,7 +307,7 @@ jobs:
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
             $ROUTE_ONLY_ARGS \
-            $STABLE_ARGS
+            $RELEASE_PKGS_ARGS
           find site -type f | sort
 
       - name: Save the nightly retention store
