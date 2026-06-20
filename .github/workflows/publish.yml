@@ -155,23 +155,32 @@ jobs:
           mkdir -p "$DL_ROOT"
 
           # Newest non-prerelease (stable) + newest prerelease tag. --jq runs PER PAGE under
-          # --paginate, so slurp (`jq -s 'add'`) into one array before sorting globally.
+          # --paginate, so slurp (`jq -s 'add'`) into one array before sorting globally. Sort by
+          # published_at (the actual publish time), falling back to created_at (the commit date)
+          # for any release that lacks it — created_at alone can mis-order a late-published draft.
           RELEASES_JSON="$(gh api "repos/${SRC_REPO}/releases" --paginate | jq -s 'add')"
           STABLE_TAG="$(printf '%s' "$RELEASES_JSON" \
-            | jq -r 'map(select(.prerelease==false and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
+            | jq -r 'map(select(.prerelease==false and .draft==false)) | sort_by(.published_at // .created_at) | last | .tag_name // empty')"
           PRERELEASE_TAG="$(printf '%s' "$RELEASES_JSON" \
-            | jq -r 'map(select(.prerelease==true  and .draft==false)) | sort_by(.created_at) | last | .tag_name // empty')"
+            | jq -r 'map(select(.prerelease==true  and .draft==false)) | sort_by(.published_at // .created_at) | last | .tag_name // empty')"
           echo "Stable Release:     ${STABLE_TAG:-<none>}"
           echo "Prerelease Release: ${PRERELEASE_TAG:-<none>}"
 
           # Download both channels' .pkg assets (the source tar.gz never matches *.pkg), then
-          # map each to its varver and emit a --release-pkgs arg.
+          # map each to its varver and emit a --release-pkgs arg. Pre-check the asset list so a
+          # genuine absence is a warn+skip, while a transient download failure (network/auth)
+          # fails the step (set -e) instead of being silently swallowed as "no assets".
           for TAG in "$STABLE_TAG" "$PRERELEASE_TAG"; do
             [ -n "$TAG" ] || continue
             DEST="${DL_ROOT}/${TAG}"
             mkdir -p "$DEST"
-            gh release download "$TAG" --repo "${SRC_REPO}" --pattern '*.pkg' --dir "$DEST" || {
-              echo "::warning::no .pkg assets in Release ${TAG}"; continue; }
+            PKG_COUNT="$(gh release view "$TAG" --repo "${SRC_REPO}" --json assets \
+              --jq '[.assets[] | select(.name | endswith(".pkg"))] | length')"
+            if [ "${PKG_COUNT}" -eq 0 ]; then
+              echo "::warning::no .pkg assets in Release ${TAG}"
+              continue
+            fi
+            gh release download "$TAG" --repo "${SRC_REPO}" --pattern '*.pkg' --dir "$DEST"
             for PKG in "$DEST"/*.pkg; do
               [ -e "$PKG" ] || continue
               BASE="$(basename "$PKG")"
