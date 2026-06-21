@@ -333,15 +333,15 @@ jobs:
         # reads ABI/channel from the package, so the release/<varver>/<arch>/ layout needs
         # no change), and per-dir listings. pkg(8) never reads these pages.
         #
-        # The base-URL arg is the CLIENT bootstrap/conf base — it must be the Cloudflare
-        # WORKER (which routes the pfSense UA to the variant tree), NOT this Pages origin.
-        # The pages no longer carry a flat <ABI>/ catalog (it moved to release/<varver>/<arch>/),
-        # so a conf pointing at <pages>/${ABI} would 404. The page is still SERVED from
-        # Pages; only the install command + conf snippet point at the Worker.
+        # The base-URL arg is the CLIENT bootstrap/conf base — the direct GitHub Pages
+        # origin (ADR-39; the Cloudflare Worker has been retired). add-repo.sh resolves
+        # the per-box conf URL as <base>/<channel>/<varver>/<arch>, regenerated at boot
+        # by the rc.d hook on a pfSense OS upgrade. The landing page's bootstrap one-liner
+        # and manual-conf snippet both derive from this base.
         run: |
           set -eu
           python3 pfblockerng/scripts/gen_landing.py \
-            site "https://pkg.pfblockerng.workers.dev" pfblockerng/scripts/add-repo.sh \
+            site "https://pfblockerng.github.io/pkg" pfblockerng/scripts/add-repo.sh \
             --matrix landing_matrix.json
           # .nojekyll: serve the tree verbatim (no Jekyll stripping of _-prefixed paths).
           touch site/.nojekyll
@@ -358,4 +358,4 @@ jobs:
       - name: Report the published URL
         run: |
           echo "Deployed to: ${{ steps.deploy.outputs.page_url }}"
-          echo "Client conf url is the Cloudflare Worker (routes by pfSense UA to the variant catalog)."
+          echo "Client conf url is the direct Pages origin: https://pfblockerng.github.io/pkg/<channel>/<varver>/<arch> (resolved per box by add-repo.sh)."
