@@ -15,7 +15,6 @@ name: Publish pfBlockerNG pkg repository
 #
 #   release/<variant>-<major.minor>/<arch>/   (devel + stable, one catalog)
 #   nightly/<variant>-<major.minor>/<arch>/   (nightly only, retained to 14)
-#   routing.json                              (UA → catalog, for the Cloudflare Worker)
 #
 # CONTENT (ADR-20 D3 — the release/ subtree is CONSUMED, not rebuilt):
 #   * devel — SERVED FROM the latest prerelease (alpha/beta/rc) Release's .pkg assets.
@@ -66,7 +65,7 @@ env:
 
 jobs:
   publish:
-    name: Build the variant tree + routing.json + deploy to Pages
+    name: Build the variant tree + deploy to Pages
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -258,12 +257,12 @@ jobs:
           restore-keys: |
             nightly-store-
 
-      - name: Build the variant tree + routing.json (the brain)
-        # scripts/build-repo-portable.py --build-matrix lays out release/ + nightly/ +
-        # routing.json and prunes the nightly subtrees to 14. The release/ catalog is
+      - name: Build the variant tree (the brain)
+        # scripts/build-repo-portable.py --build-matrix lays out release/ + nightly/ and
+        # prunes the nightly subtrees to 14. The release/ catalog is
         # SERVED from the downloaded Release .pkg assets (--release-pkgs); only NIGHTLY is
         # built fresh here (from devel HEAD via --local-src), versioned
-        # <target>.YYYYMMDD.<run_number> (pkg-safe, monotonic; target = the -nightly port
+        # <target>.YYYYMMDD.<seq> (pkg-safe, monotonic; target = the -nightly port
         # PORTVERSION). The commit + created annotations are stamped on every build for the
         # landing page (the consumed Release .pkg already carry their own annotations).
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
@@ -274,7 +273,19 @@ jobs:
           TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
             "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
           [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
-          VER="${TARGET}.$(date -u +%Y%m%d).${{ github.run_number }}"
+          # The final version component is a SAME-DATE sequence: it disambiguates multiple
+          # nightlies built on the same date (first of the day = .1, a second same-day build
+          # = .2, ...), and resets each date (the YYYYMMDD component already orders across
+          # days). Derive it from the restored retention store: the highest existing
+          # <name>-<...>.<DATE>.<N>.pkg, plus one (1 when none exists for today).
+          DATE="$(date -u +%Y%m%d)"
+          SEQ=1
+          if [ -d site/nightly ]; then
+            LAST="$(find site/nightly -type f -name "*.${DATE}.*.pkg" 2>/dev/null \
+              | sed -nE "s/.*\.${DATE}\.([0-9]+)\.pkg\$/\1/p" | sort -n | tail -1)"
+            [ -z "$LAST" ] || SEQ="$((LAST + 1))"
+          fi
+          VER="${TARGET}.${DATE}.${SEQ}"
           # release/ is consumed from the Release assets; route-only entries serve a frozen
           # .pkg (no build, no nightly). Both arg strings are empty until populated.
           RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
@@ -296,7 +307,7 @@ jobs:
 
       - name: Build the release tree ONLY (manual dispatch, builds skipped)
         # A manual dispatch can opt out of the nightly build (build_branch_pkg=false) to just
-        # regenerate routing.json + the consumed release/ catalog without touching the nightly
+        # regenerate the consumed release/ catalog without touching the nightly
         # store. Uses --no-nightly so the cached nightlies are neither read nor pruned here;
         # release/ is still served from the downloaded Release assets (--release-pkgs).
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.build_branch_pkg }}
