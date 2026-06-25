@@ -79,6 +79,9 @@ jobs:
           repository: pfBlockerNG/pfBlockerNG
           ref: devel
           path: pfblockerng
+          # No history needed — we only use the working tree (scripts + src) and HEAD.
+          # As the source repo grows, a full clone gets slower; keep this a single commit.
+          fetch-depth: 1
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -100,7 +103,9 @@ jobs:
         id: matrix
         run: |
           set -euo pipefail
-          git -C pfblockerng fetch --no-tags origin \
+          # --depth 1: read-version-matrix.sh only reads supported-versions.json at the
+          # ref tip; no ci-metadata history is needed, so don't fetch it.
+          git -C pfblockerng fetch --no-tags --depth 1 origin \
             '+refs/heads/ci-metadata:refs/remotes/origin/ci-metadata'
           ( cd pfblockerng && sh scripts/read-version-matrix.sh --print-build ) \
             | jq -c '.' > matrix.json
@@ -127,11 +132,34 @@ jobs:
           echo "--- ROUTE-ONLY (EOL) targets ---"
           jq -r '[ .[] | select(.role == "route-only") ] | if length == 0 then "(none)" else .[] | "\(.variant) \(.pfsense_version) [route-only]" end' route_matrix.json
 
-      - name: Clone the FreeBSD-ports tree (port + Mk framework)
+      - name: Clone the FreeBSD-ports tree (blobless + sparse, ~12x faster)
+        # The nightly is built from ONE ports tree for every matrix leg, so sparse-checkout
+        # the UNION of build origins across each distinct (php, py-flavor) in the matrix
+        # (CE php8.3, Plus php8.5, ...). Reuses the SOURCE repo's shared sparse-clone helper +
+        # build-pkg-portable.py --print-build-origins — the single source of truth for "which
+        # port dirs a build reads" — so this can never drift from how the .pkg is actually
+        # built. Drops the clone from ~1.3 GB/~37 s (full tree) to ~30 MB/~3 s; the built .pkg
+        # is byte-identical.
         run: |
           set -eu
-          git clone --depth 1 -b "$PORTS_REF" \
-            "https://github.com/${PORTS_REPO}" "${RUNNER_TEMP}/ports"
+          PORTS="${RUNNER_TEMP}/ports"
+          first=1
+          jq -r '.[] | "\(.php_version):\(.py_flavor)"' matrix.json | sort -u \
+          | while IFS=: read -r php py; do
+              if [ "$first" = 1 ]; then
+                # First leg: blobless+no-checkout clone + sparse-checkout the nightly port
+                # and this leg's deps, via the shared helper.
+                sh pfblockerng/scripts/sparse-clone-ports.sh \
+                  "https://github.com/${PORTS_REPO}" "$PORTS_REF" "$PORTS" nightly "$php" "$py"
+                first=0
+              else
+                # Subsequent legs: add this leg's deps to the same sparse tree.
+                origins="$(python3 pfblockerng/scripts/build-pkg-portable.py \
+                  --print-build-origins --ports "$PORTS" --channel nightly --php "$php" --py-flavor "$py")"
+                # shellcheck disable=SC2086  # origins are a whitespace-separated dir list
+                git -C "$PORTS" sparse-checkout add $origins
+              fi
+            done
 
       - name: Download Release .pkg assets (latest stable + latest prerelease)
         # ADR-20 D3 rework: the release/<varver>/<arch>/ catalog is SERVED FROM the GitHub
