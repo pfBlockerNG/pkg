@@ -141,7 +141,7 @@ jobs:
         # built. Drops the clone from ~1.3 GB/~37 s (full tree) to ~30 MB/~3 s; the built .pkg
         # is byte-identical.
         run: |
-          set -eu
+          set -euo pipefail
           PORTS="${RUNNER_TEMP}/ports"
           first=1
           jq -r '.[] | "\(.php_version):\(.py_flavor)"' matrix.json | sort -u \
