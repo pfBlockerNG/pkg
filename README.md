@@ -6,14 +6,10 @@ publishing workflow. The package source lives at
 [pfBlockerNG/pfBlockerNG](https://github.com/pfBlockerNG/pfBlockerNG).
 
 The catalog is a **derived index**: [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
-downloads the newest stable and prerelease `.pkg` assets from `pfBlockerNG/pfBlockerNG`,
-builds one current nightly, runs the catalog generator, and deploys the per-`${ABI}` tree
-to this repo's GitHub Pages. It runs daily and after each pfBlockerNG release. Frozen
-`route-only` packages remain available for supported installs on EOL pfSense versions.
-
-Package downgrade is unsupported. Before upgrading, save a pfSense configuration backup.
-Installing an older pfBlockerNG package may break configuration or enforcement; recover by
-restoring the pre-upgrade backup or reinstalling the newer package.
+enumerates every GitHub Release of `pfBlockerNG/pfBlockerNG`, downloads its `.pkg`
+assets, runs the catalog generator, and deploys the per-`${ABI}` tree to this
+repo's GitHub Pages. It runs on a daily schedule and is triggered on each
+pfBlockerNG release.
 
 **Served at:** `https://pfblockerng.github.io/pkg`
 
