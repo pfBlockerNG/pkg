@@ -8,13 +8,13 @@ name: Publish pfBlockerNG pkg repository
 # used with this repo's own GITHUB_TOKEN.
 #
 # THE BRAIN IS THE SCRIPT (ADR-20 routing rework). This workflow no longer hand-
-# loops the per-ABI builds or catalog generation. It reads
+# loops the per-ABI builds, the nightly prune, or the catalog generation. It reads
 # the SOURCE repo's BUILD matrix and hands it to scripts/build-repo-portable.py
 # --build-matrix, which drives the DUMB scripts/build-pkg-portable.py per
 # (entry × channel) and projects the matrix 1:1 onto the tree:
 #
 #   release/<variant>-<major.minor>/<arch>/   (devel + stable, one catalog)
-#   nightly/<variant>-<major.minor>/<arch>/   (current nightly only)
+#   nightly/<variant>-<major.minor>/<arch>/   (nightly only, retained to 14)
 #
 # CONTENT (ADR-20 D3 — the release/ subtree is CONSUMED, not rebuilt):
 #   * devel — SERVED FROM the latest prerelease (alpha/beta/rc) Release's .pkg assets.
@@ -23,7 +23,8 @@ name: Publish pfBlockerNG pkg repository
 #     downloaded here, mapped to release/<varver>/<arch>/ by the variant slug in each
 #     filename. Either channel absent → that catalog is simply empty until a Release
 #     exists (no stable release of this fork yet → production stays empty).
-#   * nightly — the ONLY fresh build here: one current package from devel HEAD.
+#   * nightly — the ONLY fresh build here: a SEPARATE package from devel HEAD, folded in
+#     with the retained prior nightlies (restored from an Actions cache) and pruned to 14.
 # The catalog is a DERIVED, fully-regenerated index — stateless + idempotent.
 #
 # TRIGGERS:
@@ -34,6 +35,11 @@ name: Publish pfBlockerNG pkg repository
 
 on:
   workflow_dispatch:
+    inputs:
+      build_branch_pkg:
+        description: "Build the devel + nightly .pkg and fold them in (default true)."
+        type: boolean
+        default: true
   schedule:
     - cron: "0 6 * * *"
 
@@ -162,8 +168,9 @@ jobs:
         # and the newest prerelease Release → devel channel. Map each asset to its catalog dir
         # via the variant slug encoded in its filename
         # (…-<variant>-<major.minor>-FreeBSD-<major>-<arch>.pkg) and hand them to the brain as
-        # --release-pkgs <varver>:<path>. Either channel absent → simply not served yet
-        # (empty pool is a warn+skip in the brain). Nightly is built fresh below.
+        # --release-pkgs <varver>:<path>; retain_by_channel keeps the newest devel + newest
+        # stable per (varver, arch). Either channel absent → simply not served yet (empty pool
+        # is a warn+skip in the brain). Nightly is STILL built fresh from devel HEAD below.
         id: release-pkgs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -263,14 +270,30 @@ jobs:
           echo "args=$(cat "$ARGS_FILE")" >> "$GITHUB_OUTPUT"
           echo "route-only args: $(cat "$ARGS_FILE")"
 
+      - name: Restore the nightly retention store (last 14 builds per subtree)
+        # ADR-18 retention via a same-repo Actions cache (no token). The cache holds the
+        # built nightly subtrees (site/nightly/<varver>/<arch>/*.pkg); the brain folds the
+        # fresh nightly in and prunes to 14. Rolling-cache idiom: a unique per-run key
+        # ALWAYS saves; restore-keys (a prefix) grabs the most recent prior store.
+        # ALWAYS restore — even on a build_branch_pkg=false dispatch (which builds the
+        # release tree with --no-nightly): the restored site/nightly must be present in
+        # the deployed artifact, or the Pages deploy would WIPE the live nightly channel.
+        uses: actions/cache/restore@v4
+        with:
+          path: site/nightly
+          key: nightly-store-${{ github.run_id }}
+          restore-keys: |
+            nightly-store-
+
       - name: Build the variant tree (the brain)
         # scripts/build-repo-portable.py --build-matrix lays out release/ + nightly/ and
-        # emits one current package per channel. The release/ catalog is served from downloaded
-        # Release .pkg assets (--release-pkgs); NIGHTLY is built fresh from devel HEAD via
-        # --local-src, versioned <target>.YYYYMMDD.HHMMSS.nanoseconds.<run>.<attempt>
-        # (pkg-safe and monotonic; serialized UTC build time orders runs and reruns; target is the
+        # prunes the nightly subtrees to 14. The release/ catalog is
+        # SERVED from the downloaded Release .pkg assets (--release-pkgs); only NIGHTLY is
+        # built fresh here (from devel HEAD via --local-src), versioned
+        # <target>.YYYYMMDD.<seq> (pkg-safe, monotonic; target = the -nightly port
         # PORTVERSION). The commit + created annotations are stamped on every build for the
         # landing page (the consumed Release .pkg already carry their own annotations).
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
         run: |
           set -euo pipefail
           SHA="$(git -C pfblockerng rev-parse HEAD)"
@@ -278,8 +301,19 @@ jobs:
           TARGET="$(sed -n 's/^PORTVERSION=[[:space:]]*//p' \
             "${RUNNER_TEMP}/ports/net/pfSense-pkg-pfBlockerNG-nightly/Makefile" | head -1)"
           [ -n "$TARGET" ] || { echo "::error::could not read the -nightly port PORTVERSION"; exit 1; }
-          STAMP="$(date -u +%Y%m%d.%H%M%S.%N)"
-          VER="${TARGET}.${STAMP}.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          # The final version component is a SAME-DATE sequence: it disambiguates multiple
+          # nightlies built on the same date (first of the day = .1, a second same-day build
+          # = .2, ...), and resets each date (the YYYYMMDD component already orders across
+          # days). Derive it from the restored retention store: the highest existing
+          # <name>-<...>.<DATE>.<N>.pkg, plus one (1 when none exists for today).
+          DATE="$(date -u +%Y%m%d)"
+          SEQ=1
+          if [ -d site/nightly ]; then
+            LAST="$(find site/nightly -type f -name "*.${DATE}.*.pkg" 2>/dev/null \
+              | sed -nE "s/.*\.${DATE}\.([0-9]+)\.pkg\$/\1/p" | sort -n | tail -1)"
+            [ -z "$LAST" ] || SEQ="$((LAST + 1))"
+          fi
+          VER="${TARGET}.${DATE}.${SEQ}"
           # release/ is consumed from the Release assets; route-only entries serve a frozen
           # .pkg (no build, no nightly). Both arg strings are empty until populated.
           RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
@@ -291,12 +325,45 @@ jobs:
             --ports "${RUNNER_TEMP}/ports" \
             --local-src pfblockerng \
             --nightly-pkgversion "$VER" \
+            --nightly-keep 14 \
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
             $ROUTE_ONLY_ARGS \
             $RELEASE_PKGS_ARGS
           echo "--- Published site tree ---"
           find site -type f | sort
+
+      - name: Build the release tree ONLY (manual dispatch, builds skipped)
+        # A manual dispatch can opt out of the nightly build (build_branch_pkg=false) to just
+        # regenerate the consumed release/ catalog without touching the nightly
+        # store. Uses --no-nightly so the cached nightlies are neither read nor pruned here;
+        # release/ is still served from the downloaded Release assets (--release-pkgs).
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.build_branch_pkg }}
+        run: |
+          set -euo pipefail
+          SHA="$(git -C pfblockerng rev-parse HEAD)"
+          CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
+          RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
+          ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
+          # shellcheck disable=SC2086
+          python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
+            --matrix-json route_matrix.json \
+            --out site \
+            --ports "${RUNNER_TEMP}/ports" \
+            --local-src pfblockerng \
+            --no-nightly \
+            --annotate "commit=${SHA}" \
+            --annotate "created=${CREATED}" \
+            $ROUTE_ONLY_ARGS \
+            $RELEASE_PKGS_ARGS
+          find site -type f | sort
+
+      - name: Save the nightly retention store
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_branch_pkg }}
+        uses: actions/cache/save@v4
+        with:
+          path: site/nightly
+          key: nightly-store-${{ github.run_id }}
 
       - name: Render the human landing page + per-directory indexes
         # The source repo's scripts/gen_landing.py renders the styled index OVER the
