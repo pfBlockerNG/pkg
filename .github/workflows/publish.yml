@@ -13,15 +13,15 @@ name: Publish pfBlockerNG pkg repository
 # --build-matrix, which drives the DUMB scripts/build-pkg-portable.py per
 # (entry × channel) and projects the matrix 1:1 onto the tree:
 #
-#   release/<variant>-<major.minor>/<arch>/   (devel + stable, one catalog)
-#   nightly/<variant>-<major.minor>/<arch>/   (nightly only, retained to 14)
+#   release/<variant>-<major.minor>/   (devel + stable, one catalog — arch-less, issue #1806)
+#   nightly/<variant>-<major.minor>/   (nightly only, retained to 14)
 #
 # CONTENT (ADR-20 D3 — the release/ subtree is CONSUMED, not rebuilt):
 #   * devel — SERVED FROM the latest prerelease (alpha/beta/rc) Release's .pkg assets.
 #   * stable — SERVED FROM the latest stable (non-prerelease) Release's .pkg assets.
 #     Both are built ONCE by pfBlockerNG/pfBlockerNG's release.yml (full matrix) and
-#     downloaded here, mapped to release/<varver>/<arch>/ by the variant slug in each
-#     filename. Either channel absent → that catalog is simply empty until a Release
+#     downloaded here; a NO_ARCH asset (…-FreeBSD-<major>.pkg) maps to every varver of
+#     its FreeBSD major, and dependency assets (issue #1806) fold in via --dep-pkgs. Either channel absent → that catalog is simply empty until a Release
 #     exists (no stable release of this fork yet → production stays empty).
 #   * nightly — the ONLY fresh build here: a SEPARATE package from devel HEAD, folded in
 #     with the retained prior nightlies (restored from an Actions cache) and pruned to 14.
@@ -197,6 +197,10 @@ jobs:
           # map each to its varver and emit a --release-pkgs arg. Pre-check the asset list so a
           # genuine absence is a warn+skip, while a transient download failure (network/auth)
           # fails the step (set -e) instead of being silently swallowed as "no assets".
+          DEP_ARGS_FILE="${RUNNER_TEMP}/dep_pkgs_args"
+          DEP_SEEN_FILE="${RUNNER_TEMP}/dep_pkgs_seen"
+          : > "$DEP_ARGS_FILE"
+          : > "$DEP_SEEN_FILE"
           for TAG in "$STABLE_TAG" "$PRERELEASE_TAG"; do
             [ -n "$TAG" ] || continue
             DEST="${DL_ROOT}/${TAG}"
@@ -211,18 +215,48 @@ jobs:
             for PKG in "$DEST"/*.pkg; do
               [ -e "$PKG" ] || continue
               BASE="$(basename "$PKG")"
-              # Variant slug = the <ce|plus>-<major.minor> segment immediately before -FreeBSD-.
-              VARVER="$(printf '%s' "$BASE" \
-                | sed -nE 's/.*-((ce|plus)-[0-9]+\.[0-9]+)-FreeBSD-[0-9]+-(amd64|aarch64)\.pkg$/\1/p')"
-              if [ -z "$VARVER" ]; then
-                echo "::warning::cannot parse a variant slug from ${BASE} — skipping"
-                continue
-              fi
-              printf ' --release-pkgs %s:%s' "$VARVER" "$PKG" >> "$ARGS_FILE"
+              case "$BASE" in
+                pfSense-pkg-pfBlockerNG*)
+                  # NO_ARCH branch asset (issue #1806): …-FreeBSD-<major>.pkg — one wildcard
+                  # package per FreeBSD major, serving EVERY varver of that major. Map it to
+                  # each matching route-matrix row.
+                  MAJOR="$(printf '%s' "$BASE" \
+                    | sed -nE 's/.*-FreeBSD-([0-9]+)\.pkg$/\1/p')"
+                  if [ -z "$MAJOR" ]; then
+                    # Pre-#1806 legacy asset (…-<ce|plus>-X.Y-FreeBSD-N-<arch>.pkg): concrete
+                    # ABI, rejected by the arch-less catalog emitter — deliberately unmapped.
+                    echo "::warning::legacy/unparsable branch asset ${BASE} — skipping (pre-#1806 release?)"
+                    continue
+                  fi
+                  VARVERS="$(jq -r --arg m "$MAJOR" \
+                    '.[] | select(.freebsd_major == $m) | "\(.variant | ascii_downcase)-\(.pfsense_version | split(".")[0:2] | join("."))"' \
+                    route_matrix.json | sort -u)"
+                  if [ -z "$VARVERS" ]; then
+                    echo "::warning::no matrix varver for FreeBSD major ${MAJOR} (asset ${BASE}) — skipping"
+                    continue
+                  fi
+                  for VARVER in $VARVERS; do
+                    printf ' --release-pkgs %s:%s' "$VARVER" "$PKG" >> "$ARGS_FILE"
+                  done
+                  ;;
+                *)
+                  # Dependency package attached to the Release (issue #1806, e.g.
+                  # py311-charset-normalizer-<ver>.pkg): folded into the catalogs of its own
+                  # wildcard-ABI major by --dep-pkgs. Dedup by filename across the two
+                  # channels' tags (same name+version twice would trip the collision check).
+                  if grep -qxF "$BASE" "$DEP_SEEN_FILE"; then
+                    continue
+                  fi
+                  echo "$BASE" >> "$DEP_SEEN_FILE"
+                  printf ' --dep-pkgs %s' "$PKG" >> "$DEP_ARGS_FILE"
+                  ;;
+              esac
             done
           done
           echo "args=$(cat "$ARGS_FILE")" >> "$GITHUB_OUTPUT"
+          echo "dep_args=$(cat "$DEP_ARGS_FILE")" >> "$GITHUB_OUTPUT"
           echo "release-pkgs args:$(cat "$ARGS_FILE")"
+          echo "dep-pkgs args:$(cat "$DEP_ARGS_FILE")"
 
       - name: Download frozen .pkg for route-only (EOL) pfSense versions
         # ADR-27 Part 2. A route-only matrix entry (role=="route-only") is an EOL pfSense
@@ -317,6 +351,7 @@ jobs:
           # release/ is consumed from the Release assets; route-only entries serve a frozen
           # .pkg (no build, no nightly). Both arg strings are empty until populated.
           RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
+          DEP_PKGS_ARGS="${{ steps.release-pkgs.outputs.dep_args }}"
           ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
@@ -329,7 +364,8 @@ jobs:
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
             $ROUTE_ONLY_ARGS \
-            $RELEASE_PKGS_ARGS
+            $RELEASE_PKGS_ARGS \
+            $DEP_PKGS_ARGS
           echo "--- Published site tree ---"
           find site -type f | sort
 
@@ -344,6 +380,7 @@ jobs:
           SHA="$(git -C pfblockerng rev-parse HEAD)"
           CREATED="$(git -C pfblockerng show -s --format=%ct HEAD)"
           RELEASE_PKGS_ARGS="${{ steps.release-pkgs.outputs.args }}"
+          DEP_PKGS_ARGS="${{ steps.release-pkgs.outputs.dep_args }}"
           ROUTE_ONLY_ARGS="${{ steps.route-only.outputs.args }}"
           # shellcheck disable=SC2086
           python3 pfblockerng/scripts/build-repo-portable.py --build-matrix \
@@ -355,7 +392,8 @@ jobs:
             --annotate "commit=${SHA}" \
             --annotate "created=${CREATED}" \
             $ROUTE_ONLY_ARGS \
-            $RELEASE_PKGS_ARGS
+            $RELEASE_PKGS_ARGS \
+            $DEP_PKGS_ARGS
           find site -type f | sort
 
       - name: Save the nightly retention store
