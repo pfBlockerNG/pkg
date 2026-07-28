@@ -199,8 +199,8 @@ jobs:
           # fails the step (set -e) instead of being silently swallowed as "no assets".
           DEP_ARGS_FILE="${RUNNER_TEMP}/dep_pkgs_args"
           DEP_SEEN_FILE="${RUNNER_TEMP}/dep_pkgs_seen"
-          : > "$DEP_ARGS_FILE"
-          : > "$DEP_SEEN_FILE"
+          true > "$DEP_ARGS_FILE"
+          true > "$DEP_SEEN_FILE"
           for TAG in "$STABLE_TAG" "$PRERELEASE_TAG"; do
             [ -n "$TAG" ] || continue
             DEST="${DL_ROOT}/${TAG}"
