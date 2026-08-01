@@ -15,8 +15,11 @@ jobs:
       - name: Check shell sources and workflows
         run: |
           set -eu
-          for file in scripts/setup-hooks.sh tests/test_no_special_builtin_truncation.sh; do
+          for file in scripts/setup-hooks.sh tests/*.sh; do
             sh -n "$file"
           done
-          shellcheck scripts/setup-hooks.sh tests/test_no_special_builtin_truncation.sh
-          dash tests/test_no_special_builtin_truncation.sh
+          shellcheck scripts/setup-hooks.sh tests/*.sh
+          for test in tests/*.sh; do
+            echo "--- $test"
+            dash "$test"
+          done

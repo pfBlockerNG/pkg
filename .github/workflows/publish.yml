@@ -93,13 +93,13 @@ jobs:
         # python `zstandard` module). ubuntu-latest may not ship it — install it.
         run: command -v zstd >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y zstd; }
 
-      - name: Read the BUILD matrix (every (version, arch) entry)
+      - name: Read the BUILD matrix (every supported-version entry)
         # The SOURCE repo owns the supported-version matrix on its ci-metadata orphan
-        # ref; read-version-matrix.sh resolves it (each entry carries a resolved
-        # `arch`, default amd64). Fetch ci-metadata into a tracking ref first — a
-        # single-branch checkout only has `devel`. The brain consumes the full entry
-        # (pfsense_version/variant/freebsd_major/arch/php_version/py_flavor/status);
-        # the landing page (gen_landing.py --matrix) consumes the same array.
+        # ref; read-version-matrix.sh resolves it. Fetch ci-metadata into a tracking
+        # ref first — a single-branch checkout only has `devel`. The brain consumes
+        # the full entry (pfsense_version/variant/freebsd_major/php_version/py_flavor/
+        # status — `arch` was retired by #1806, the catalog is arch-less); the landing
+        # page (gen_landing.py --matrix) consumes the same array.
         id: matrix
         run: |
           set -euo pipefail
@@ -119,8 +119,11 @@ jobs:
           # gen_landing.py --matrix wants the per-entry fields keyed by resolved ABI.
           # Built from the ROUTE matrix + role, so the landing page's "EOL pfSense
           # versions" tables (role=="route-only") render; role is absent today.
+          # The ABI is CPU-wildcarded: `arch` was retired from the matrix by #1806
+          # (every published .pkg is NO_ARCH and carries "FreeBSD:<major>:*"), so
+          # interpolating it would emit the literal "FreeBSD:<major>:null".
           jq -c '[ .[] | {
-              abi: "FreeBSD:\(.freebsd_major):\(.arch)",
+              abi: "FreeBSD:\(.freebsd_major):*",
               pfsense_version: .pfsense_version,
               variant: .variant,
               php_version: .php_version,
@@ -128,7 +131,7 @@ jobs:
               role: (.role // "build")
             } ]' route_matrix.json > landing_matrix.json
           echo "--- BUILD targets ---"
-          jq -r '.[] | "\(.variant) \(.pfsense_version) FreeBSD:\(.freebsd_major):\(.arch) php=\(.php_version) \(.py_flavor) [\(.status)]"' matrix.json
+          jq -r '.[] | "\(.variant) \(.pfsense_version) FreeBSD:\(.freebsd_major):* php=\(.php_version) \(.py_flavor) [\(.status)]"' matrix.json
           echo "--- ROUTE-ONLY (EOL) targets ---"
           jq -r '[ .[] | select(.role == "route-only") ] | if length == 0 then "(none)" else .[] | "\(.variant) \(.pfsense_version) [route-only]" end' route_matrix.json
 
