@@ -177,7 +177,7 @@ jobs:
         run: |
           set -euo pipefail
           ARGS_FILE="${RUNNER_TEMP}/release_pkgs_args"
-          : > "$ARGS_FILE"
+          true > "$ARGS_FILE"
           DL_ROOT="${RUNNER_TEMP}/release_assets"
           mkdir -p "$DL_ROOT"
 
@@ -271,7 +271,7 @@ jobs:
         run: |
           set -euo pipefail
           ARGS_FILE="${RUNNER_TEMP}/route_only_args"
-          : > "$ARGS_FILE"
+          true > "$ARGS_FILE"
           COUNT="$(jq '[ .[] | select(.role == "route-only") ] | length' route_matrix.json)"
           if [ "$COUNT" -eq 0 ]; then
             echo "No route-only (EOL) entries — nothing to download."
