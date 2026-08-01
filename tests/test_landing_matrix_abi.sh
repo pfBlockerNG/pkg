@@ -24,6 +24,15 @@ fi
 
 # 2. The abi expression AS WRITTEN in the workflow emits the NO_ARCH wildcard.
 #    Extracted from the file rather than restated, so the test cannot drift from it.
+#    Exactly ONE such expression must exist: with more than one, checking the first
+#    would leave a second (possibly broken, possibly only an example in a comment)
+#    unexamined, and check 1 catches only the retired `arch` token by name.
+abi_count=$(grep -c 'abi: "FreeBSD:[^"]*"' "$WORKFLOW" || true)
+if [ "$abi_count" -ne 1 ]; then
+	printf 'expected exactly one abi FreeBSD expression in %s, found %s\n' "$WORKFLOW" "$abi_count" >&2
+	failures=$((failures + 1))
+fi
+
 abi_expr=$(grep -o 'abi: "FreeBSD:[^"]*"' "$WORKFLOW" | head -1)
 if [ -z "$abi_expr" ]; then
 	printf 'no abi FreeBSD expression found in %s\n' "$WORKFLOW" >&2
