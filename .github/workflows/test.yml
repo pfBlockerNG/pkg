@@ -1,0 +1,20 @@
+name: Test
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check shell sources and workflows
+        run: |
+          set -eu
+          sh -n scripts/setup-hooks.sh tests/test_no_special_builtin_truncation.sh
+          shellcheck scripts/setup-hooks.sh tests/test_no_special_builtin_truncation.sh
+          dash tests/test_no_special_builtin_truncation.sh
