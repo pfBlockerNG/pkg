@@ -3,7 +3,7 @@
 `pfBlockerNG/pkg` hosts and deploys the self-hosted FreeBSD `pkg` repository to
 GitHub Pages (ADR-17). Its `.github/workflows/publish.yml` builds the current
 `devel` `.pkg` (via `pfBlockerNG/pfBlockerNG`'s `build-pkg-portable.py`), folds
-in every Release `.pkg`, regenerates the per-ABI catalog, and deploys to
+in every Release `.pkg`, regenerates the arch-less catalog, and deploys to
 `pfblockerng.github.io/pkg`.
 
 As a `pfBlockerNG`-org repo, this **inherits `pfBlockerNG/pfBlockerNG`'s
