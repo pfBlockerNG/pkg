@@ -27,7 +27,11 @@ fi
 #    Exactly ONE such expression must exist: with more than one, checking the first
 #    would leave a second (possibly broken, possibly only an example in a comment)
 #    unexamined, and check 1 catches only the retired `arch` token by name.
-abi_count=$(grep -c 'abi: "FreeBSD:[^"]*"' "$WORKFLOW" || true)
+#    Counted with grep -o | wc -l, not grep -c: the latter counts matching LINES, so a
+#    second expression sharing a line with the first (a trailing-comment decoy) would
+#    report 1. wc also yields 0 rather than an empty string if the file is unreadable,
+#    which keeps this check live instead of erroring past itself.
+abi_count=$(grep -o 'abi: "FreeBSD:[^"]*"' "$WORKFLOW" | wc -l | tr -d ' ')
 if [ "$abi_count" -ne 1 ]; then
 	printf 'expected exactly one abi FreeBSD expression in %s, found %s\n' "$WORKFLOW" "$abi_count" >&2
 	failures=$((failures + 1))
