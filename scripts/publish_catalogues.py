@@ -174,6 +174,24 @@ _NIGHTLY_DESTINATIONS: tuple[str, ...] = ("nightly",)
 _MAX_DESTINATIONS_TEXT = 256
 _MAX_DESTINATIONS_ELEMENTS = len(_CHANNEL_ORDER) + 1
 
+# The closed set of ordered destination tuples a tagged run may carry. Authority:
+# release_version.py's derive_destinations (source repo; read for context, never
+# imported here) — for any release tag it returns exactly one of these five tuples.
+# ("stable",) alone and ("stable","edge") are NOT among its outputs: a final
+# (stable-channel) tag always fans to at least testing, and never skips testing to
+# reach edge directly. issue #2146's acceptance criteria require an unlisted
+# destination to abort, so this is the single, closed source of truth — never widen
+# it to "any ordered subset" elsewhere.
+_VALID_TAGGED_DESTINATIONS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("edge",),
+        ("testing",),
+        ("testing", "edge"),
+        ("stable", "testing"),
+        ("stable", "testing", "edge"),
+    }
+)
+
 _RELEASE_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:\.[abr][1-9][0-9]*)?$")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*:[1-9][0-9]*$")
@@ -212,14 +230,9 @@ def _parse_destinations(raw: str) -> tuple[str, ...]:
         return values
     if "nightly" in values:
         raise IntakeError("nightly must not be combined with any other destination")
-    if len(set(values)) != len(values):
-        raise IntakeError("destinations must not contain duplicates")
-    if any(value not in _CHANNEL_ORDER for value in values):
-        raise IntakeError(f"destinations must be a subset of {_CHANNEL_ORDER!r}")
-    canonical_order = tuple(channel for channel in _CHANNEL_ORDER if channel in values)
-    if values != canonical_order:
+    if values not in _VALID_TAGGED_DESTINATIONS:
         raise IntakeError(
-            f"destinations must be ordered {_CHANNEL_ORDER!r}; got {values!r}"
+            f"destinations must be one of {sorted(_VALID_TAGGED_DESTINATIONS)!r}; got {values!r}"
         )
     return values
 
@@ -361,7 +374,6 @@ def verify_asset(
         )
 
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
     try:
         manifest = pfb_pkg.read_compact_manifest(asset_path)
     except pfb_pkg.PkgError as exc:
@@ -381,7 +393,13 @@ def verify_asset(
             digest=digest,
         )
     return _verify_dependency_asset(
-        brp, asset_path, asset_name, manifest, work_dir=work_dir, digest=digest
+        engine,
+        asset_path,
+        asset_name,
+        manifest,
+        intake=intake,
+        work_dir=work_dir,
+        digest=digest,
     )
 
 
@@ -451,14 +469,25 @@ def _verify_canonical_asset(
 
 
 def _verify_dependency_asset(
-    brp: ModuleType,
+    engine: Engine,
     asset_path: Path,
     asset_name: str,
     manifest: Mapping[str, object],
     *,
+    intake: Intake,
     work_dir: Path,
     digest: str,
 ) -> VerifiedAsset:
+    """Dependency .pkg (e.g. py311-charset-normalizer) — no provenance annotation, so
+    only its own manifest identity is checked. release.yml renames a tagged run's
+    dependency assets with the SAME ``-<Variant>-<pfsense_version>`` suffix it applies
+    to the canonical package (the "Build the .pkg via build-leg.sh" step's
+    ``RENAMED_DEP``); a nightly dependency artifact carries no such suffix. Which exact
+    ROUTE row a dep belongs to is decided later, by ABI, in verify_run (axis 9) — this
+    only needs the suffix to be well-formed, not tied to a specific row.
+    """
+    brp = engine.build_repo_portable
+    pfb_pkg = engine.pfb_pkg
     name = manifest.get("name")
     version = manifest.get("version")
     segment_re = brp._PKG_SEGMENT_RE
@@ -470,19 +499,38 @@ def _verify_dependency_asset(
         raise AssetVerificationError(
             f"{asset_name}: dependency manifest version is missing or unsafe"
         )
-    expected_declared = f"{name}-{version}.pkg"
-    if asset_name != expected_declared:
+
+    canonical_name = f"{name}-{version}.pkg"
+    if intake.kind == "tagged":
+        prefix = f"{name}-{version}-"
+        if not asset_name.startswith(prefix):
+            raise AssetVerificationError(
+                f"{asset_name}: declared name does not match the package's manifest identity; "
+                f"expected a name starting with {prefix!r} and ending with '-<Variant>-<pfsense_version>.pkg'"
+            )
+        suffix = asset_name[len(prefix) : -len(".pkg")]
+        variant, sep, pfsense_version = suffix.rpartition("-")
+        if (
+            not sep
+            or not pfb_pkg._VARIANT.fullmatch(variant)
+            or not pfb_pkg._PF_VERSION.fullmatch(pfsense_version)
+        ):
+            raise AssetVerificationError(
+                f"{asset_name}: declared name does not carry a valid -<Variant>-<pfsense_version> "
+                "Release-asset suffix"
+            )
+    elif asset_name != canonical_name:
         raise AssetVerificationError(
             f"{asset_name}: declared name does not match the package's manifest identity; "
-            f"expected {expected_declared!r}"
+            f"expected {canonical_name!r}"
         )
 
-    work_path = work_dir / expected_declared
+    work_path = work_dir / canonical_name
     shutil.copyfile(asset_path, work_path)
     return VerifiedAsset(
         asset_class="dependency",
         declared_name=asset_name,
-        canonical_name=expected_declared,
+        canonical_name=canonical_name,
         work_path=work_path,
         sha256=digest,
         manifest=manifest,
@@ -551,8 +599,26 @@ def _normalize_route_matrix(
     return build_rows, route_only_rows
 
 
+def _canonical_record(asset: VerifiedAsset) -> Mapping[str, object]:
+    """Narrow ``VerifiedAsset.record`` (``Mapping | None``) for a canonical asset.
+
+    ``asset_class == "canonical"`` and ``record is not None`` travel together by
+    construction in verify_asset, but that pairing is a convention nothing at the type
+    level enforces — a future caller (S2-S4) handing verify_run a hand-built
+    "canonical" VerifiedAsset with no record would otherwise crash on a bare
+    ``TypeError: 'NoneType' object is not subscriptable`` deep inside a set/dict
+    comprehension. Routing every canonical-record read through this accessor turns
+    that into one explicit, named RunVerificationError instead.
+    """
+    if asset.asset_class != "canonical" or asset.record is None:
+        raise RunVerificationError(
+            f"{asset.declared_name}: expected a canonical asset with a record"
+        )
+    return asset.record
+
+
 def _require_single_value(assets: Sequence[VerifiedAsset], field_name: str) -> object:
-    values = {asset.record[field_name] for asset in assets}
+    values = {_canonical_record(asset)[field_name] for asset in assets}
     if len(values) != 1:
         raise RunVerificationError(
             f"canonical assets disagree on {field_name}: {sorted(map(str, values))!r}"
@@ -590,7 +656,7 @@ def verify_run(
     # build-role row), matched exactly once.
     matched_keys: set[tuple[object, object]] = set()
     for asset in canonical:
-        row = asset.record["matrix_row"]
+        row = _canonical_record(asset)["matrix_row"]
         key = (row["variant"], row["pfsense_version"])
         if key not in build_rows:
             raise RunVerificationError(

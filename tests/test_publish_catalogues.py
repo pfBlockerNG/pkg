@@ -375,6 +375,19 @@ class IntakeDestinationsTests(unittest.TestCase):
         with self.assertRaises(pc.IntakeError):
             pc.parse_intake(_REPO, "1", "v4.0.0", huge, "10:1")
 
+    def test_destinations_stable_alone_rejected(self) -> None:
+        """F2: derive_destinations (release_version.py) never returns ("stable",)
+        alone — a final tag always fans to at least testing too. Structurally
+        unreachable, so it must abort rather than be silently accepted."""
+        with self.assertRaises(pc.IntakeError):
+            pc.parse_intake(_REPO, "1", "v4.0.0", '["stable"]', "10:1")
+
+    def test_destinations_stable_edge_skipping_testing_rejected(self) -> None:
+        """F2: derive_destinations never skips testing to go straight from stable to
+        edge — ("stable","edge") is not among its five possible outputs."""
+        with self.assertRaises(pc.IntakeError):
+            pc.parse_intake(_REPO, "1", "v4.0.0", '["stable","edge"]', "10:1")
+
 
 class IntakeReleaseIdTests(unittest.TestCase):
     def test_release_id_empty_on_tagged_rejected(self) -> None:
@@ -594,8 +607,27 @@ class AssetVerificationTests(unittest.TestCase):
         )
         self.assertEqual(asset.record["channel"], "nightly")
 
-    def test_verify_dependency_asset(self) -> None:
+    def test_verify_dependency_asset_tagged_real_release_asset_shape(self) -> None:
+        """F1: release.yml renames a tagged run's dependency .pkg with the SAME
+        -<Variant>-<pfsense_version> suffix it applies to the canonical package
+        (RENAMED_DEP in the "Build the .pkg via build-leg.sh" step) — this is the
+        real asset shape, not a fixture-convenient bare name."""
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
+        path, digest = _wrap_dependency_pkg(self.tmp_path)
+        asset = pc.verify_asset(
+            _ENGINE,
+            path,
+            "py311-charset-normalizer-3.4.0-CE-2.8.pkg",
+            intake=intake,
+            expected_sha256=digest,
+            work_dir=self.work_dir,
+        )
+        self.assertEqual(asset.asset_class, "dependency")
+        self.assertIsNone(asset.record)
+        self.assertEqual(asset.canonical_name, "py311-charset-normalizer-3.4.0.pkg")
+
+    def test_verify_dependency_asset_nightly_bare_name(self) -> None:
+        intake = self._intake(channel="nightly", destinations='["nightly"]')
         path, digest = _wrap_dependency_pkg(self.tmp_path)
         asset = pc.verify_asset(
             _ENGINE,
@@ -607,6 +639,23 @@ class AssetVerificationTests(unittest.TestCase):
         )
         self.assertEqual(asset.asset_class, "dependency")
         self.assertIsNone(asset.record)
+
+    def test_dependency_tagged_bare_name_without_suffix_rejected(self) -> None:
+        """A tagged dependency asset that is missing its -<Variant>-<pfsense_version>
+        Release-asset suffix (the pre-fix bug: this used to be REJECTED even for the
+        real, correctly-suffixed shape; now a bare name on the tagged path is the one
+        that must be rejected)."""
+        intake = self._intake(channel="testing", destinations='["testing","edge"]')
+        path, digest = _wrap_dependency_pkg(self.tmp_path)
+        with self.assertRaises(pc.AssetVerificationError):
+            pc.verify_asset(
+                _ENGINE,
+                path,
+                "py311-charset-normalizer-3.4.0.pkg",
+                intake=intake,
+                expected_sha256=digest,
+                work_dir=self.work_dir,
+            )
 
     # --- hostile asset name rows ---
 
@@ -738,14 +787,19 @@ class AssetVerificationTests(unittest.TestCase):
             )
 
     def test_destination_not_servable_by_record_channel_rejected(self) -> None:
+        """Axis 13 in isolation: intake.release_tag is set to the SAME value the edge
+        record was built for, so axis 5 (source_tag == release_tag) passes cleanly —
+        only the channel/primary-destination mismatch (axis 13) can reject this."""
         record = _record(channel="edge")
-        # destinations says "testing" is primary, but the record was built for edge.
-        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
+        self.assertEqual(record["source_tag"], _TAG_FOR_CHANNEL["edge"])
+        intake = pc.parse_intake(
+            _REPO, "1", record["source_tag"], '["testing","edge"]', "10:1"
+        )
         path, digest = _wrap_canonical_pkg(self.tmp_path, record)
         declared = (
             f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}-CE-2.8.pkg"
         )
-        with self.assertRaises(pc.AssetVerificationError):
+        with self.assertRaises(pc.AssetVerificationError) as ctx:
             pc.verify_asset(
                 _ENGINE,
                 path,
@@ -754,6 +808,7 @@ class AssetVerificationTests(unittest.TestCase):
                 expected_sha256=digest,
                 work_dir=self.work_dir,
             )
+        self.assertIn("channel", str(ctx.exception))
 
     def test_route_composition_violation_propagates_from_engine(self) -> None:
         """Axis 8 (record.route == channel/varver) is validate_build_record's own
@@ -780,6 +835,8 @@ class AssetVerificationTests(unittest.TestCase):
         self.assertIn("route", str(ctx.exception))
 
     def test_dependency_name_mismatch_rejected(self) -> None:
+        """Correctly Release-asset-suffixed, but the version segment lies about the
+        manifest's real version — the real hostile shape, not a bare-name typo."""
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         path, digest = _wrap_dependency_pkg(
             self.tmp_path, name="py311-charset-normalizer", version="3.4.0"
@@ -788,7 +845,7 @@ class AssetVerificationTests(unittest.TestCase):
             pc.verify_asset(
                 _ENGINE,
                 path,
-                "py311-charset-normalizer-9.9.9.pkg",
+                "py311-charset-normalizer-9.9.9-CE-2.8.pkg",
                 intake=intake,
                 expected_sha256=digest,
                 work_dir=self.work_dir,
@@ -969,6 +1026,43 @@ class RunVerificationTests(unittest.TestCase):
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
             pc.verify_run(_ENGINE, intake, [canonical, dependency], route_matrix)
+
+    # --- _normalize_route_matrix branches (F4) ---
+
+    def test_route_matrix_row_not_a_mapping_rejected(self) -> None:
+        record = _record(channel="testing")
+        asset = _fabricated_asset(record)
+        route_matrix = ["not-a-mapping"]
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
+        with self.assertRaises(pc.RunVerificationError) as ctx:
+            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+        self.assertIn("must be an object", str(ctx.exception))
+
+    def test_route_matrix_invalid_role_rejected(self) -> None:
+        record = _record(channel="testing")
+        asset = _fabricated_asset(record)
+        route_matrix = [_matrix_row(role="frozen")]
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
+        with self.assertRaises(pc.RunVerificationError) as ctx:
+            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+        self.assertIn("invalid role", str(ctx.exception))
+
+    def test_route_matrix_duplicate_version_identity_rejected(self) -> None:
+        record = _record(channel="testing")
+        asset = _fabricated_asset(record)
+        route_matrix = [_matrix_row(), _matrix_row()]
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
+        with self.assertRaises(pc.RunVerificationError) as ctx:
+            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+        self.assertIn("duplicate version identity", str(ctx.exception))
+
+    def test_route_matrix_empty_rejected(self) -> None:
+        record = _record(channel="testing")
+        asset = _fabricated_asset(record)
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
+        with self.assertRaises(pc.RunVerificationError) as ctx:
+            pc.verify_run(_ENGINE, intake, [asset], [])
+        self.assertIn("must not be empty", str(ctx.exception))
 
 
 if __name__ == "__main__":
