@@ -1,19 +1,55 @@
-"""Tests for scripts/catalogue_assembly.py — issue #2146 step S3 (four disjoint
-channel catalogues assembled atomically from an already-resolved plan).
+"""Tests for scripts/catalogue_assembly.py — issue #2146 R1 ("the tree IS the
+state"): regenerate one (channel, varver) catalogue directly from the ``.pkg``
+files already sitting under ``site_root/channel/varver``, plus a
+per-(channel, varver) retention prune and the multi-destination byte/checksum/
+provenance identity post-condition. No intake parsing, no ledger, no git, no
+network, no scratch tree, no backup/rollback — this pins the collapsed module
+against the pfBlockerNG source-repo engine loaded from PFB_SRC (see
+tests/_srcrepo.py). Fixture .pkg archives are minimal, pure-Python zstd-tar
+files carrying only +COMPACT_MANIFEST (mirrors
+tests/test_publish_catalogues.py's _wrap_dependency_pkg style, simplified
+further) — the pool/dependency packages regenerate_catalogue/prune_retained
+handle never need the full canonical-package validation path (that only fires
+for a manifest carrying a pfb_build_record annotation, which these fixtures
+omit; see build-repo-portable.py's _validate_annotated_project_pkg /
+_canonical_build_record).
 
-No intake parsing, no ledger, no git, no network — this pins Plan/CatalogueTarget and
-assemble() against the pfBlockerNG source-repo engine loaded from PFB_SRC (see
-tests/_srcrepo.py). Fixture .pkg archives are minimal, pure-Python zstd-tar files
-carrying only +COMPACT_MANIFEST (mirrors tests/test_publish_catalogues.py's
-_wrap_dependency_pkg style, simplified further) — assemble()'s pool/dependency
-packages never need the full canonical-package validation path (that only fires for a
-manifest carrying a pfb_build_record annotation, which these fixtures omit; see
-build-repo-portable.py's _validate_annotated_project_pkg / _canonical_build_record).
+Coverage dropped from the retired Plan-based suite, and why (issue #2146 R1
+brief): the mechanism each guarded no longer exists.
+  - Plan/CatalogueTarget structural rows (empty plan, duplicate catalogue key,
+    missing pool/dependency path, directory-instead-of-file pool entry): a
+    Plan aggregating multiple targets, and an explicit list of arbitrary
+    source paths per target, no longer exist. One regenerate_catalogue() call
+    always targets exactly one (channel, varver), and its pool is DISCOVERED
+    by globbing that catalogue directory, not supplied as a path list — a
+    "missing pool path" or "duplicate target in the plan" can no longer occur
+    structurally.
+  - DestinationTupleTests (the five-tuple destinations fan-out): that was
+    Plan-level routing of one asset to several (channel, varver) targets in a
+    single call. publish_catalogues.py's own _VALID_TAGGED_DESTINATIONS +
+    test_publish_catalogues.py already cover the closed five-tuple set at the
+    Intake layer, untouched by this change.
+  - StagingProtectionTests (same-named files from different source dirs;
+    forcing a .pkg suffix on a non-.pkg-named source): _stage's pool now
+    always comes from globbing ONE directory for "*.pkg", so two different
+    source directories can no longer both contribute to one pool, and every
+    pool member already carries a .pkg suffix by construction of the glob.
+  - SourceIndexResolutionTests (_build_source_index realpath-aliasing dedup):
+    _build_source_index built its map from Plan.targets, which is gone;
+    verify_multi_destination_identity now takes a caller-supplied
+    source_index directly, so alias resolution is the caller's concern.
+  - AtomicityTests / PublishRecoveryTests / the backup-litter and
+    stale-backup-clobber halves of the old SteadyStateReplaceTests: all
+    exercised the backup/rollback machinery this change deletes outright (the
+    git commit of site_root is the transaction boundary now, per the design
+    doc landed alongside this change) — nothing here replaces them because
+    there is no longer a rollback to test. The surviving, still-meaningful
+    halves of SteadyStateReplaceTests (replace leaves a clean directory, other
+    catalogues untouched) live on below, adapted to the new call shape.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import io
 import itertools
@@ -124,16 +160,6 @@ def _not_zstd_file(directory: Path, name: str = "garbage.pkg") -> Path:
     return path
 
 
-def _tree_snapshot(root: Path) -> dict[str, bytes]:
-    if not root.exists():
-        return {}
-    return {
-        str(p.relative_to(root)): p.read_bytes()
-        for p in sorted(root.rglob("*"))
-        if p.is_file()
-    }
-
-
 def _build_record(*, channel: str = "testing", release_line: str | None = None) -> dict:
     """A genuine, digest-bound build record — mirrors tests/test_publish_catalogues.py's
     _matrix_row()/_record() (build_input_digest always engine-computed, never
@@ -182,7 +208,7 @@ def _annotated_pkg(
     directory: Path, *, record: dict, local_name: str | None = None
 ) -> Path:
     """A minimal .pkg carrying a genuine, load_build_record-parseable pfb_build_record
-    annotation. Consumed directly by _verify_multi_destination_identity in these
+    annotation. Consumed directly by verify_multi_destination_identity in these
     tests, never by build_repo/validate_project_pkg, so +COMPACT_MANIFEST alone is
     enough (see _make_pkg's docstring for why the fuller archive is unnecessary)."""
     pfb_pkg = _ENGINE.pfb_pkg
@@ -202,20 +228,25 @@ def _annotated_pkg(
     return path
 
 
-def _move_failing_on_call(fail_on_call: int):
-    """A shutil.move replacement that performs the REAL move for every call except
-    the ``fail_on_call``-th, which raises instead. Lets a test target one exact step
-    of a multi-move publish sequence without touching any other call."""
-    real_move = shutil.move
-    counter = itertools.count(1)
+def _drop(catalogue_dir: Path, *sources: Path) -> None:
+    """Copy each of ``sources`` into ``catalogue_dir`` under its own basename —
+    exactly what the release job does before calling regenerate_catalogue()."""
+    catalogue_dir.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        shutil.copy2(source, catalogue_dir / source.name)
 
-    def _fake(src, dst, *args, **kwargs):
-        n = next(counter)
-        if n == fail_on_call:
-            raise OSError(f"synthetic move failure on call #{n}")
-        return real_move(src, dst, *args, **kwargs)
 
-    return _fake
+def _pkg_names(catalogue_dir: Path) -> list[str]:
+    """The catalogue's own emitted package names, excluding the catalog descriptor
+    archives (data.pkg/packagesite.pkg) so a test can compare against a plain
+    canonical/dependency filename set."""
+    if not catalogue_dir.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in catalogue_dir.glob("*.pkg")
+        if p.name not in _ENGINE.build_repo_portable._CATALOG_PKG_FILES
+    )
 
 
 class _TempDirTestCase(unittest.TestCase):
@@ -260,11 +291,8 @@ class ChannelValidationTests(_TempDirTestCase):
         self._assert_channel_rejected("..")
 
     def _assert_channel_rejected(self, channel: str) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        target = ca.CatalogueTarget(channel=channel, varver="ce-2.8", pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(self.tmp / "out", channel, "ce-2.8", engine=_ENGINE)
         self.assertIn("unknown channel", str(ctx.exception))
 
 
@@ -280,7 +308,18 @@ class VarverValidationTests(_TempDirTestCase):
 
     @_requires_engine
     def test_varver_extra_segment_rejected(self) -> None:
-        self._assert_varver_rejected("ce-2.8/extra")
+        # Message-specific: a multi-segment varver must be rejected by THIS
+        # module's own single_segment=True guard, not merely happen to raise
+        # for some other reason (e.g. the resulting path not existing) —
+        # single_segment=False would let "ce-2.8/extra" through this check
+        # and still raise downstream on directory-existence, silently
+        # papering over a dropped guard.
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "ce-2.8/extra", engine=_ENGINE
+            )
+        self.assertIn("invalid varver", str(ctx.exception))
+        self.assertIn("ONE segment", str(ctx.exception))
 
     @_requires_engine
     def test_varver_traversal_prefix_rejected(self) -> None:
@@ -323,95 +362,45 @@ class VarverValidationTests(_TempDirTestCase):
         self._assert_varver_rejected("a" * 300)
 
     def _assert_varver_rejected(self, varver: str) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        target = ca.CatalogueTarget(channel="stable", varver=varver, pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
         with self.assertRaises(ca.CatalogueAssemblyError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(self.tmp / "out", "stable", varver, engine=_ENGINE)
 
 
 # --------------------------------------------------------------------------- #
-# Plan-structure hostile rows: empty plan/pool, duplicate keys, missing paths.
+# Catalogue-directory existence + empty-pool rows.
 # --------------------------------------------------------------------------- #
 
 
-class PlanStructureValidationTests(_TempDirTestCase):
+class PathExistenceTests(_TempDirTestCase):
     @_requires_engine
-    def test_empty_plan_rejected(self) -> None:
-        plan = ca.Plan(targets=())
+    def test_catalogue_dir_missing_rejected(self) -> None:
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
-        self.assertIn("no catalogue targets", str(ctx.exception))
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "ce-2.8", engine=_ENGINE
+            )
+        self.assertIn("does not exist", str(ctx.exception))
+
+    @_requires_engine
+    def test_site_root_is_a_file_rejected(self) -> None:
+        out = self.tmp / "out"
+        out.write_bytes(b"not a directory")
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertIn("does not exist", str(ctx.exception))
 
     @_requires_engine
     def test_empty_pool_rejected(self) -> None:
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=())
-        plan = ca.Plan(targets=(target,))
+        out = self.tmp / "out"
+        (out / "stable" / "ce-2.8").mkdir(parents=True)
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
         self.assertIn("empty pool", str(ctx.exception))
 
     @_requires_engine
-    def test_duplicate_catalogue_key_rejected(self) -> None:
-        pkg_a = _canonical_pkg(self.tmp, version="4.0.0", local_name="a.pkg")
-        pkg_b = _canonical_pkg(self.tmp, version="4.0.0", local_name="b.pkg")
-        target_a = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg_a,))
-        target_b = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg_b,))
-        plan = ca.Plan(targets=(target_a, target_b))
+    def test_prune_catalogue_dir_missing_rejected(self) -> None:
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
-        self.assertIn("duplicate catalogue target", str(ctx.exception))
-
-    @_requires_engine
-    def test_missing_pool_path_rejected(self) -> None:
-        missing = self.tmp / "does-not-exist.pkg"
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(missing,))
-        plan = ca.Plan(targets=(target,))
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.prune_retained(self.tmp / "out", "stable", "ce-2.8", engine=_ENGINE)
         self.assertIn("does not exist", str(ctx.exception))
-
-    @_requires_engine
-    def test_directory_instead_of_file_rejected(self) -> None:
-        directory = self.tmp / "a-directory.pkg"
-        directory.mkdir()
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(directory,)
-        )
-        plan = ca.Plan(targets=(target,))
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
-        self.assertIn("does not exist", str(ctx.exception))
-
-    @_requires_engine
-    def test_missing_dependency_path_rejected(self) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        missing_dep = self.tmp / "missing-dep.pkg"
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg,), dependencies=(missing_dep,)
-        )
-        plan = ca.Plan(targets=(target,))
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
-        self.assertIn("does not exist", str(ctx.exception))
-
-
-# --------------------------------------------------------------------------- #
-# out_dir hostile row.
-# --------------------------------------------------------------------------- #
-
-
-class OutputValidationTests(_TempDirTestCase):
-    @_requires_engine
-    def test_out_dir_existing_file_rejected(self) -> None:
-        out = self.tmp / "out"
-        out.write_bytes(b"not a directory")
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.assemble(plan, out, _ENGINE)
-        self.assertIn("not a directory", str(ctx.exception))
 
 
 # --------------------------------------------------------------------------- #
@@ -423,41 +412,43 @@ class OutputValidationTests(_TempDirTestCase):
 class PoolContentHostileTests(_TempDirTestCase):
     @_requires_engine
     def test_zero_byte_file_rejected(self) -> None:
-        bad = _zero_byte_file(self.tmp)
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(bad,))
-        plan = ca.Plan(targets=(target,))
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        _drop(catalogue_dir, _zero_byte_file(self.tmp))
         with self.assertRaises(_ENGINE.pfb_pkg.PkgError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
     def test_non_zstd_file_rejected(self) -> None:
-        bad = _not_zstd_file(self.tmp)
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(bad,))
-        plan = ca.Plan(targets=(target,))
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        _drop(catalogue_dir, _not_zstd_file(self.tmp))
         with self.assertRaises(_ENGINE.pfb_pkg.PkgError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
     def test_concrete_abi_rejected(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
         pkg = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:15:amd64")
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
+        _drop(catalogue_dir, pkg)
         with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
     def test_mixed_abi_majors_rejected(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
         pkg_a = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:15:*")
         pkg_b = _dep_pkg(self.tmp, name="py311-foo", version="1.0", abi="FreeBSD:16:*")
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg_a,), dependencies=(pkg_b,)
-        )
-        plan = ca.Plan(targets=(target,))
+        _drop(catalogue_dir, pkg_a, pkg_b)
         with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
     def test_same_name_version_different_bytes_rejected(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
         pkg_a = _canonical_pkg(
             self.tmp,
             version="4.0.0",
@@ -470,12 +461,9 @@ class PoolContentHostileTests(_TempDirTestCase):
             origin="net/pfSense-pkg-pfBlockerNG-DIFFERENT",
             local_name="b.pkg",
         )
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg_a, pkg_b)
-        )
-        plan = ca.Plan(targets=(target,))
+        _drop(catalogue_dir, pkg_a, pkg_b)
         with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
-            ca.assemble(plan, self.tmp / "out", _ENGINE)
+            ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
 
 # --------------------------------------------------------------------------- #
@@ -483,7 +471,7 @@ class PoolContentHostileTests(_TempDirTestCase):
 # --------------------------------------------------------------------------- #
 
 
-class BasicAssemblyTests(_TempDirTestCase):
+class BasicRegenerateTests(_TempDirTestCase):
     @_requires_engine
     def test_channel_stable_alone(self) -> None:
         self._assert_single_channel_catalogue("stable")
@@ -501,12 +489,11 @@ class BasicAssemblyTests(_TempDirTestCase):
         self._assert_single_channel_catalogue("nightly")
 
     def _assert_single_channel_catalogue(self, channel: str) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        target = ca.CatalogueTarget(channel=channel, varver="ce-2.8", pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
         catalogue_dir = out / channel / "ce-2.8"
+        pkg = _canonical_pkg(self.tmp, version="4.0.0")
+        _drop(catalogue_dir, pkg)
+        ca.regenerate_catalogue(out, channel, "ce-2.8", engine=_ENGINE)
         self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.pkg").is_file())
         self.assertTrue((catalogue_dir / "meta.conf").is_file())
         self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
@@ -527,74 +514,318 @@ class BasicAssemblyTests(_TempDirTestCase):
         self._assert_single_varver("plus-26.07", major="16")
 
     def _assert_single_varver(self, varver: str, *, major: str = "15") -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0", abi=f"FreeBSD:{major}:*")
-        target = ca.CatalogueTarget(channel="stable", varver=varver, pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        self.assertTrue(
-            (out / "stable" / varver / "pfSense-pkg-pfBlockerNG-4.0.0.pkg").is_file()
+        catalogue_dir = out / "stable" / varver
+        pkg = _canonical_pkg(self.tmp, version="4.0.0", abi=f"FreeBSD:{major}:*")
+        _drop(catalogue_dir, pkg)
+        ca.regenerate_catalogue(out, "stable", varver, engine=_ENGINE)
+        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.pkg").is_file())
+
+
+# --------------------------------------------------------------------------- #
+# The _CATALOG_PKG_FILES trap: a second regeneration pass over the SAME
+# directory must not swallow the data.pkg/packagesite.pkg the first pass wrote.
+# --------------------------------------------------------------------------- #
+
+
+class RegenerateTwiceTrapTests(_TempDirTestCase):
+    @_requires_engine
+    def test_regenerate_twice_same_package_set(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        pkg = _canonical_pkg(self.tmp, version="4.0.0")
+        _drop(catalogue_dir, pkg)
+
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        first_pass = _pkg_names(catalogue_dir)
+        self.assertEqual(first_pass, ["pfSense-pkg-pfBlockerNG-4.0.0.pkg"])
+
+        # The trap: regenerate AGAIN over the same directory, which now also
+        # contains the data.pkg/packagesite.pkg the first pass just wrote.
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        second_pass = _pkg_names(catalogue_dir)
+        self.assertEqual(second_pass, first_pass)
+
+    @_requires_engine
+    def test_regenerate_three_times_stable(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        pkg = _canonical_pkg(self.tmp, version="1.0.0")
+        _drop(catalogue_dir, pkg)
+        for _ in range(3):
+            ca.regenerate_catalogue(out, "nightly", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
         )
 
 
 # --------------------------------------------------------------------------- #
-# Tagged destination tuples — the closed set from release_version.py:134, plus
-# nightly. Each: the listed catalogues exist, the unlisted ones do not.
+# Drop a new .pkg in / delete one — the catalogue tracks whatever the
+# directory currently holds, nothing more, nothing less.
 # --------------------------------------------------------------------------- #
 
 
-class DestinationTupleTests(_TempDirTestCase):
+class DirectoryDrivenChangeTests(_TempDirTestCase):
     @_requires_engine
-    def test_destinations_edge(self) -> None:
-        self._assert_destination_tuple(("edge",))
+    def test_dropping_new_pkg_gains_it(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        old = _canonical_pkg(self.tmp, version="1.0.0", local_name="old.pkg")
+        _drop(catalogue_dir, old)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
+        )
+
+        new = _dep_pkg(self.tmp, name="py311-charset-normalizer", version="3.4.0")
+        _drop(catalogue_dir, new)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(
+            _pkg_names(catalogue_dir),
+            sorted(
+                [
+                    "pfSense-pkg-pfBlockerNG-1.0.0.pkg",
+                    "py311-charset-normalizer-3.4.0.pkg",
+                ]
+            ),
+        )
 
     @_requires_engine
-    def test_destinations_testing(self) -> None:
-        self._assert_destination_tuple(("testing",))
+    def test_deleting_pkg_loses_it(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        dep = _dep_pkg(self.tmp, name="py311-charset-normalizer", version="3.4.0")
+        canonical = _canonical_pkg(self.tmp, version="1.0.0")
+        _drop(catalogue_dir, dep, canonical)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(
+            _pkg_names(catalogue_dir),
+            sorted(
+                [
+                    "pfSense-pkg-pfBlockerNG-1.0.0.pkg",
+                    "py311-charset-normalizer-3.4.0.pkg",
+                ]
+            ),
+        )
+
+        (catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").unlink()
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Replace-in-place: the old SteadyStateReplaceTests halves that survive the
+# removal of the backup/rollback machinery (no stale-backup/no-litter checks —
+# there is no backup to leave litter).
+# --------------------------------------------------------------------------- #
+
+
+class ReplaceInPlaceTests(_TempDirTestCase):
+    @_requires_engine
+    def test_replace_existing_catalogue_clean(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        old_pkg = _canonical_pkg(self.tmp, version="1.0.0", local_name="old.pkg")
+        _drop(catalogue_dir, old_pkg)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").is_file())
+
+        (catalogue_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").unlink()
+        new_pkg = _canonical_pkg(self.tmp, version="2.0.0", local_name="new.pkg")
+        _drop(catalogue_dir, new_pkg)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+
+        self.assertFalse((catalogue_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").exists())
+        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").is_file())
+        # No nesting: the varver directory must not contain a copy of itself.
+        self.assertFalse((catalogue_dir / "ce-2.8").exists())
+        self.assertFalse((catalogue_dir / "stable").exists())
 
     @_requires_engine
-    def test_destinations_testing_edge(self) -> None:
-        self._assert_destination_tuple(("testing", "edge"))
+    def test_replace_leaves_other_catalogues_untouched(self) -> None:
+        out = self.tmp / "out"
+        stable_dir = out / "stable" / "ce-2.8"
+        testing_dir = out / "testing" / "ce-2.8"
+        _drop(
+            stable_dir,
+            _canonical_pkg(self.tmp, version="1.0.0", local_name="stable.pkg"),
+        )
+        _drop(
+            testing_dir,
+            _canonical_pkg(self.tmp, version="1.0.0", local_name="testing.pkg"),
+        )
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        ca.regenerate_catalogue(out, "testing", "ce-2.8", engine=_ENGINE)
+        testing_before = {
+            p.relative_to(testing_dir): p.read_bytes()
+            for p in sorted(testing_dir.rglob("*"))
+            if p.is_file()
+        }
 
-    @_requires_engine
-    def test_destinations_stable_testing(self) -> None:
-        self._assert_destination_tuple(("stable", "testing"))
+        (stable_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").unlink()
+        _drop(
+            stable_dir,
+            _canonical_pkg(self.tmp, version="2.0.0", local_name="stable2.pkg"),
+        )
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
-    @_requires_engine
-    def test_destinations_stable_testing_edge(self) -> None:
-        self._assert_destination_tuple(("stable", "testing", "edge"))
+        testing_after = {
+            p.relative_to(testing_dir): p.read_bytes()
+            for p in sorted(testing_dir.rglob("*"))
+            if p.is_file()
+        }
+        self.assertEqual(testing_before, testing_after)
+        self.assertTrue((stable_dir / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").is_file())
 
-    @_requires_engine
-    def test_destinations_nightly(self) -> None:
-        self._assert_destination_tuple(("nightly",))
 
-    def _assert_destination_tuple(self, destinations: tuple[str, ...]) -> None:
-        targets = tuple(
-            ca.CatalogueTarget(
-                channel=channel,
-                varver="ce-2.8",
-                pool=(
-                    _canonical_pkg(
-                        self.tmp, version="4.0.0", local_name=f"{channel}.pkg"
-                    ),
+# --------------------------------------------------------------------------- #
+# Retention: below/at/above keep, keep=1, two varvers pruning independently,
+# dependency packages never counted.
+# --------------------------------------------------------------------------- #
+
+
+class RetentionTests(_TempDirTestCase):
+    def _seed(self, catalogue_dir: Path, versions: list[str]) -> None:
+        # Canonically-named on disk already — a real catalogue directory only ever
+        # holds build_repo's own canonical <name>-<version>.pkg output; prune_retained
+        # never renames anything, it only deletes whole files.
+        for v in versions:
+            _drop(
+                catalogue_dir,
+                _canonical_pkg(
+                    self.tmp,
+                    version=v,
+                    local_name=f"pfSense-pkg-pfBlockerNG-{v}.pkg",
                 ),
             )
-            for channel in destinations
-        )
-        plan = ca.Plan(targets=targets)
+
+    @_requires_engine
+    def test_below_keep_all_survive(self) -> None:
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        for channel in destinations:
-            self.assertTrue((out / channel / "ce-2.8").is_dir())
-        for channel in ca._KNOWN_CHANNELS - set(destinations):
-            self.assertFalse((out / channel).exists())
+        catalogue_dir = out / "stable" / "ce-2.8"
+        self._seed(catalogue_dir, ["1.0.0", "2.0.0"])
+        evicted = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(evicted, ())
+        self.assertEqual(len(_pkg_names(catalogue_dir)), 2)
+
+    @_requires_engine
+    def test_exactly_at_keep_all_survive(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        versions = [f"1.0.{i}" for i in range(ca.DEFAULT_RETENTION_KEEP)]
+        self._seed(catalogue_dir, versions)
+        evicted = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(evicted, ())
+        self.assertEqual(len(_pkg_names(catalogue_dir)), ca.DEFAULT_RETENTION_KEEP)
+
+    @_requires_engine
+    def test_above_keep_oldest_evicted(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        versions = [f"1.0.{i}" for i in range(ca.DEFAULT_RETENTION_KEEP + 1)]
+        self._seed(catalogue_dir, versions)
+        evicted = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(len(evicted), 1)
+        self.assertEqual(evicted[0].name, "pfSense-pkg-pfBlockerNG-1.0.0.pkg")
+        self.assertFalse(evicted[0].exists())
+        remaining = _pkg_names(catalogue_dir)
+        self.assertEqual(len(remaining), ca.DEFAULT_RETENTION_KEEP)
+        self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
+
+    @_requires_engine
+    def test_keep_one(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        self._seed(catalogue_dir, ["1.0.0", "2.0.0", "3.0.0"])
+        evicted = ca.prune_retained(
+            out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: 1
+        )
+        self.assertEqual(len(evicted), 2)
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-3.0.0.pkg"]
+        )
+
+    @_requires_engine
+    def test_two_varvers_prune_independently(self) -> None:
+        out = self.tmp / "out"
+        dir_a = out / "stable" / "ce-2.8"
+        dir_b = out / "stable" / "plus-26.03"
+        self._seed(dir_a, ["1.0.0", "2.0.0", "3.0.0"])
+        for v in ["1.0.0", "2.0.0"]:
+            _drop(
+                dir_b,
+                _canonical_pkg(
+                    self.tmp, version=v, abi="FreeBSD:16:*", local_name=f"b{v}.pkg"
+                ),
+            )
+
+        def keep_for(channel: str, varver: str) -> int:
+            return {"ce-2.8": 1, "plus-26.03": 5}[varver]
+
+        evicted_a = ca.prune_retained(
+            out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=keep_for
+        )
+        evicted_b = ca.prune_retained(
+            out, "stable", "plus-26.03", engine=_ENGINE, keep_count_for=keep_for
+        )
+        self.assertEqual(len(evicted_a), 2)
+        self.assertEqual(evicted_b, ())
+        self.assertEqual(_pkg_names(dir_a), ["pfSense-pkg-pfBlockerNG-3.0.0.pkg"])
+        self.assertEqual(len(_pkg_names(dir_b)), 2)
+
+    @_requires_engine
+    def test_dependency_pkg_never_counted_or_touched(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        versions = [f"1.0.{i}" for i in range(ca.DEFAULT_RETENTION_KEEP + 1)]
+        self._seed(catalogue_dir, versions)
+        dep = _dep_pkg(
+            self.tmp,
+            name="py311-charset-normalizer",
+            version="3.4.0",
+            local_name="py311-charset-normalizer-3.4.0.pkg",
+        )
+        _drop(catalogue_dir, dep)
+
+        evicted = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        self.assertEqual(len(evicted), 1)
+        self.assertNotIn("py311-charset-normalizer", str(evicted[0]))
+        self.assertIn("py311-charset-normalizer-3.4.0.pkg", _pkg_names(catalogue_dir))
+        canonical_remaining = [
+            n for n in _pkg_names(catalogue_dir) if n.startswith("pfSense-pkg")
+        ]
+        self.assertEqual(len(canonical_remaining), ca.DEFAULT_RETENTION_KEEP)
+
+    @_requires_engine
+    def test_invalid_keep_count_rejected(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        self._seed(catalogue_dir, ["1.0.0"])
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.prune_retained(
+                out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: 0
+            )
+        self.assertIn("positive integer", str(ctx.exception))
+
+    @_requires_engine
+    def test_pruned_generation_absent_after_regenerate(self) -> None:
+        """Retention runs BEFORE regeneration in the real flow: an evicted
+        generation must never reappear once the catalogue is rebuilt."""
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        versions = [f"1.0.{i}" for i in range(ca.DEFAULT_RETENTION_KEEP + 1)]
+        self._seed(catalogue_dir, versions)
+        ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
+        remaining = _pkg_names(catalogue_dir)
+        self.assertEqual(len(remaining), ca.DEFAULT_RETENTION_KEEP)
+        self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
 
 
 # --------------------------------------------------------------------------- #
-# Fan-out / multi-destination byte+checksum+provenance identity — the ticket's
-# "multi-destination fixture proves byte/checksum/provenance identity" criterion,
-# both the positive path (through assemble()) and the negative path (a direct,
-# white-box call proving the post-condition itself is load-bearing).
+# Fan-out / multi-destination byte+checksum+provenance identity.
 # --------------------------------------------------------------------------- #
 
 
@@ -602,20 +833,19 @@ class FanOutIdentityTests(_TempDirTestCase):
     @_requires_engine
     def test_shared_freebsd_major_fanout_identical_bytes(self) -> None:
         # A NO_ARCH asset with wildcard ABI FreeBSD:16:* legitimately lands in BOTH
-        # plus-26.03 and plus-26.07 (both FreeBSD major 16) — same physical file,
-        # staged into two catalogues.
+        # plus-26.03 and plus-26.07 (both FreeBSD major 16) — same physical bytes,
+        # dropped into two catalogue directories, regenerated independently.
         shared = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:16:*")
-        target_a = ca.CatalogueTarget(
-            channel="stable", varver="plus-26.03", pool=(shared,)
-        )
-        target_b = ca.CatalogueTarget(
-            channel="stable", varver="plus-26.07", pool=(shared,)
-        )
-        plan = ca.Plan(targets=(target_a, target_b))
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        path_a = out / "stable" / "plus-26.03" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
-        path_b = out / "stable" / "plus-26.07" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
+        dir_a = out / "stable" / "plus-26.03"
+        dir_b = out / "stable" / "plus-26.07"
+        _drop(dir_a, shared)
+        _drop(dir_b, shared)
+        ca.regenerate_catalogue(out, "stable", "plus-26.03", engine=_ENGINE)
+        ca.regenerate_catalogue(out, "stable", "plus-26.07", engine=_ENGINE)
+
+        path_a = dir_a / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
+        path_b = dir_b / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
         self.assertTrue(path_a.is_file())
         self.assertTrue(path_b.is_file())
         data_a, data_b = path_a.read_bytes(), path_b.read_bytes()
@@ -628,13 +858,11 @@ class FanOutIdentityTests(_TempDirTestCase):
     def test_multi_channel_fanout_identical_bytes_sha_and_record(self) -> None:
         shared = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:15:*")
         channels = ("stable", "testing", "edge")
-        targets = tuple(
-            ca.CatalogueTarget(channel=channel, varver="ce-2.8", pool=(shared,))
-            for channel in channels
-        )
-        plan = ca.Plan(targets=targets)
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
+        for channel in channels:
+            _drop(out / channel / "ce-2.8", shared)
+            ca.regenerate_catalogue(out, channel, "ce-2.8", engine=_ENGINE)
+
         paths = [
             out / channel / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
             for channel in channels
@@ -653,490 +881,63 @@ class FanOutIdentityTests(_TempDirTestCase):
         ]
         self.assertTrue(all(r == records[0] for r in records))
 
+        # verify_multi_destination_identity agrees — this is the executable
+        # post-condition, not only a hand read of the bytes above.
+        source_index = {shared.resolve(): [(c, "ce-2.8") for c in channels]}
+        ca.verify_multi_destination_identity(_ENGINE, out, source_index)
+
     @_requires_engine
     def test_multi_destination_divergence_detected(self) -> None:
-        """A direct call proving _verify_multi_destination_identity is a real,
+        """A direct call proving verify_multi_destination_identity is a real,
         load-bearing post-condition — not merely something the happy path implies."""
         source = _canonical_pkg(self.tmp, version="4.0.0")
         divergent = _canonical_pkg(
             self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL"
         )
-        tree = self.tmp / "tree"
-        (tree / "stable" / "ce-2.8").mkdir(parents=True)
-        (tree / "testing" / "ce-2.8").mkdir(parents=True)
+        out = self.tmp / "out"
+        (out / "stable" / "ce-2.8").mkdir(parents=True)
+        (out / "testing" / "ce-2.8").mkdir(parents=True)
         canonical_name = "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
-        shutil.copy2(source, tree / "stable" / "ce-2.8" / canonical_name)
-        shutil.copy2(divergent, tree / "testing" / "ce-2.8" / canonical_name)
+        shutil.copy2(source, out / "stable" / "ce-2.8" / canonical_name)
+        shutil.copy2(divergent, out / "testing" / "ce-2.8" / canonical_name)
         index = {source.resolve(): [("stable", "ce-2.8"), ("testing", "ce-2.8")]}
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca._verify_multi_destination_identity(_ENGINE, tree, index)
+            ca.verify_multi_destination_identity(_ENGINE, out, index)
         self.assertIn("multi-destination identity violation", str(ctx.exception))
 
-
-# --------------------------------------------------------------------------- #
-# Dependency packages: present, absent, and one wired to only one catalogue even
-# though its ABI would nominally match another too.
-# --------------------------------------------------------------------------- #
-
-
-class DependencyTests(_TempDirTestCase):
     @_requires_engine
-    def test_dependency_present_included(self) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        dep = _dep_pkg(self.tmp)
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg,), dependencies=(dep,)
-        )
-        plan = ca.Plan(targets=(target,))
+    def test_multi_destination_missing_at_destination_detected(self) -> None:
+        source = _canonical_pkg(self.tmp, version="4.0.0")
         out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file()
-        )
-
-    @_requires_engine
-    def test_dependency_absent_pool_only(self) -> None:
-        pkg = _canonical_pkg(self.tmp, version="4.0.0")
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg,))
-        plan = ca.Plan(targets=(target,))
-        out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        present = sorted(
-            p.name
-            for p in (out / "stable" / "ce-2.8").glob("*.pkg")
-            if p.name not in {"packagesite.pkg", "data.pkg"}
-        )
-        self.assertEqual(present, ["pfSense-pkg-pfBlockerNG-4.0.0.pkg"])
-
-    @_requires_engine
-    def test_dependency_not_wired_to_other_catalogue_stays_out(self) -> None:
-        # dep's ABI (major 15) would nominally match BOTH catalogues below, but the
-        # plan wires it only into catalogue A's dependencies — assemble() trusts the
-        # plan, it never independently fans a dep out by ABI match.
-        pkg_a = _canonical_pkg(
-            self.tmp, version="4.0.0", abi="FreeBSD:15:*", local_name="a.pkg"
-        )
-        pkg_b = _canonical_pkg(
-            self.tmp, version="4.0.0", abi="FreeBSD:15:*", local_name="b.pkg"
-        )
-        dep = _dep_pkg(self.tmp, abi="FreeBSD:15:*")
-        target_a = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg_a,), dependencies=(dep,)
-        )
-        target_b = ca.CatalogueTarget(channel="testing", varver="ce-2.8", pool=(pkg_b,))
-        plan = ca.Plan(targets=(target_a, target_b))
-        out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file()
-        )
-        self.assertFalse(
-            (out / "testing" / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").exists()
-        )
-
-
-# --------------------------------------------------------------------------- #
-# Retention already applied: the pool's exact version set is emitted, nothing
-# pruned or added by this module.
-# --------------------------------------------------------------------------- #
-
-
-class RetentionAppliedTests(_TempDirTestCase):
-    @_requires_engine
-    def test_pool_multiple_versions_all_emitted(self) -> None:
-        versions = ["4.0.0", "3.9.5", "3.9.4"]
-        pkgs = tuple(
-            _canonical_pkg(self.tmp, version=v, local_name=f"v{v}.pkg")
-            for v in versions
-        )
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=pkgs)
-        plan = ca.Plan(targets=(target,))
-        out = self.tmp / "out"
-        ca.assemble(plan, out, _ENGINE)
-        catalogue_dir = out / "stable" / "ce-2.8"
-        present = sorted(
-            p.name
-            for p in catalogue_dir.glob("*.pkg")
-            if p.name not in {"packagesite.pkg", "data.pkg"}
-        )
-        expected = sorted(f"pfSense-pkg-pfBlockerNG-{v}.pkg" for v in versions)
-        self.assertEqual(present, expected)
-
-
-# --------------------------------------------------------------------------- #
-# Atomicity: a mid-assembly failure must leave a pre-existing out_dir tree
-# byte-identical, and must not leak any half-built catalogue into it.
-# --------------------------------------------------------------------------- #
-
-
-class AtomicityTests(_TempDirTestCase):
-    @_requires_engine
-    def test_failure_on_last_catalogue_leaves_prior_tree_untouched(self) -> None:
-        out = self.tmp / "out"
-        # Pre-populate out_dir with a complete prior tree for an UNRELATED catalogue,
-        # simulating a previous successful run.
-        good_pkg = _canonical_pkg(self.tmp, version="1.0.0")
-        seed_plan = ca.Plan(
-            targets=(
-                ca.CatalogueTarget(
-                    channel="nightly", varver="ce-2.8", pool=(good_pkg,)
-                ),
-            )
-        )
-        ca.assemble(seed_plan, out, _ENGINE)
-        before = _tree_snapshot(out)
-        self.assertTrue(before)  # sanity: seed run actually wrote something
-
-        # A run whose SECOND (last) catalogue is invalid (concrete ABI) — the first
-        # catalogue in this run would otherwise have succeeded on its own.
-        first_pkg = _canonical_pkg(self.tmp, version="2.0.0", local_name="first.pkg")
-        bad_pkg = _canonical_pkg(
-            self.tmp, version="3.0.0", abi="FreeBSD:15:amd64", local_name="bad.pkg"
-        )
-        failing_plan = ca.Plan(
-            targets=(
-                ca.CatalogueTarget(
-                    channel="stable", varver="ce-2.8", pool=(first_pkg,)
-                ),
-                ca.CatalogueTarget(channel="testing", varver="ce-2.8", pool=(bad_pkg,)),
-            )
-        )
-        with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
-            ca.assemble(failing_plan, out, _ENGINE)
-
-        after = _tree_snapshot(out)
-        self.assertEqual(before, after)
-        # Neither half of the failed run leaked into out_dir.
-        self.assertFalse((out / "stable").exists())
-        self.assertFalse((out / "testing").exists())
-
-
-# --------------------------------------------------------------------------- #
-# Fix round 1 (gate F1/F2): publish is a RECOVERABLE multi-step swap, not a bare
-# per-target rmtree+move. Each of the three failure shapes the gate reproduced
-# against the unmutated code gets its own test, plus steady-state re-publish
-# coverage (F2) — normal replace is the common case the original 52-test suite
-# never exercised at all.
-# --------------------------------------------------------------------------- #
-
-
-class PublishRecoveryTests(_TempDirTestCase):
-    @_requires_engine
-    def test_leaked_fresh_catalogue_rolled_back_on_later_failure(self) -> None:
-        """Shape 1: a two-target plan where the SECOND (fresh, no prior content)
-        target's publish move fails — the first target must not survive in out_dir."""
-        out = self.tmp / "out"
-        seed_pkg = _canonical_pkg(self.tmp, version="0.1.0", local_name="seed.pkg")
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="nightly", varver="ce-2.8", pool=(seed_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        before = _tree_snapshot(out)
-
-        first_pkg = _canonical_pkg(self.tmp, version="1.0.0", local_name="first.pkg")
-        second_pkg = _canonical_pkg(self.tmp, version="2.0.0", local_name="second.pkg")
-        plan = ca.Plan(
-            targets=(
-                ca.CatalogueTarget(
-                    channel="stable", varver="ce-2.8", pool=(first_pkg,)
-                ),
-                ca.CatalogueTarget(
-                    channel="testing", varver="ce-2.8", pool=(second_pkg,)
-                ),
-            )
-        )
-        # Both targets are FRESH (no prior out_dir content) -> each publish is exactly
-        # one shutil.move call (no backup swap). Fail the second one.
-        with (
-            mock.patch(
-                "catalogue_assembly.shutil.move", side_effect=_move_failing_on_call(2)
-            ),
-            self.assertRaises(OSError),
-        ):
-            ca.assemble(plan, out, _ENGINE)
-
-        after = _tree_snapshot(out)
-        self.assertEqual(before, after)
-        # The catalogue content itself is gone (an empty out/stable/ scaffold
-        # directory left behind by dest.parent.mkdir() is harmless bookkeeping, not
-        # leaked content — _tree_snapshot only tracks files, which is what the
-        # byte-identical guarantee above is actually about).
-        self.assertFalse((out / "stable" / "ce-2.8").exists())
-        self.assertFalse((out / "testing" / "ce-2.8").exists())
-
-    @_requires_engine
-    def test_replaced_catalogue_rolled_back_on_later_failure(self) -> None:
-        """Shape 2: both targets REPLACE existing content; the second target's
-        publish move fails — the first target's successful replace must be undone,
-        not left holding its new (post-failure) version."""
-        out = self.tmp / "out"
-        old_stable = _canonical_pkg(
-            self.tmp, version="1.0.0", local_name="old-stable.pkg"
-        )
-        old_testing = _canonical_pkg(
-            self.tmp, version="1.0.0", local_name="old-testing.pkg"
-        )
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(old_stable,)
-                    ),
-                    ca.CatalogueTarget(
-                        channel="testing", varver="ce-2.8", pool=(old_testing,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        before = _tree_snapshot(out)
-        self.assertIn(
-            "pfSense-pkg-pfBlockerNG-1.0.0.pkg", {Path(k).name for k in before}
-        )
-
-        new_stable = _canonical_pkg(
-            self.tmp, version="2.0.0", local_name="new-stable.pkg"
-        )
-        new_testing = _canonical_pkg(
-            self.tmp, version="2.0.0", local_name="new-testing.pkg"
-        )
-        plan = ca.Plan(
-            targets=(
-                ca.CatalogueTarget(
-                    channel="stable", varver="ce-2.8", pool=(new_stable,)
-                ),
-                ca.CatalogueTarget(
-                    channel="testing", varver="ce-2.8", pool=(new_testing,)
-                ),
-            )
-        )
-        # Both targets REPLACE existing content -> each publish is TWO shutil.move
-        # calls (aside-to-backup, then new-into-place): calls 1,2 for target 1;
-        # calls 3,4 for target 2. Fail the second target's REPLACE move (call 4).
-        with (
-            mock.patch(
-                "catalogue_assembly.shutil.move", side_effect=_move_failing_on_call(4)
-            ),
-            self.assertRaises(OSError),
-        ):
-            ca.assemble(plan, out, _ENGINE)
-
-        after = _tree_snapshot(out)
-        self.assertEqual(before, after)
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").is_file()
-        )
-        self.assertFalse(
-            (out / "stable" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").exists()
-        )
-
-    @_requires_engine
-    def test_catalogue_restored_when_its_own_replace_move_fails(self) -> None:
-        """Shape 3 (worst case): the failing move is the replace move ITSELF, after
-        its own aside-to-backup move already succeeded — the prior catalogue must
-        come back, not be left gone with nothing in its place."""
-        out = self.tmp / "out"
-        old_pkg = _canonical_pkg(self.tmp, version="1.0.0", local_name="old.pkg")
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="testing", varver="ce-2.8", pool=(old_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        before = _tree_snapshot(out)
-
-        new_pkg = _canonical_pkg(self.tmp, version="2.0.0", local_name="new.pkg")
-        plan = ca.Plan(
-            targets=(
-                ca.CatalogueTarget(channel="testing", varver="ce-2.8", pool=(new_pkg,)),
-            )
-        )
-        # dest exists -> call 1 = aside-to-backup (must succeed), call 2 = new-into-
-        # place (the replace move itself) -> fail exactly there.
-        with (
-            mock.patch(
-                "catalogue_assembly.shutil.move", side_effect=_move_failing_on_call(2)
-            ),
-            self.assertRaises(OSError),
-        ):
-            ca.assemble(plan, out, _ENGINE)
-
-        after = _tree_snapshot(out)
-        self.assertEqual(before, after)
-        self.assertTrue(
-            (out / "testing" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").is_file()
-        )
-
-
-class SteadyStateReplaceTests(_TempDirTestCase):
-    @_requires_engine
-    def test_replace_existing_catalogue_clean(self) -> None:
-        out = self.tmp / "out"
-        old_pkg = _canonical_pkg(self.tmp, version="1.0.0", local_name="old.pkg")
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(old_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").is_file()
-        )
-
-        new_pkg = _canonical_pkg(self.tmp, version="2.0.0", local_name="new.pkg")
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(new_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-
-        catalogue_dir = out / "stable" / "ce-2.8"
-        self.assertFalse((catalogue_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").exists())
-        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").is_file())
-        # No nesting: the varver directory must not contain a copy of itself.
-        self.assertFalse((catalogue_dir / "ce-2.8").exists())
-        self.assertFalse((catalogue_dir / "stable").exists())
-        # No leftover backup litter after a clean success.
-        self.assertFalse(
-            (out / "stable" / ".ce-2.8.catalogue-assembly-backup").exists()
-        )
-
-    @_requires_engine
-    def test_stale_backup_clobber_is_announced(self) -> None:
-        """A stale backup is the last-known-good copy of an interrupted run.
-
-        Clobbering it silently leaves an operator no trail back to the content that
-        was destroyed, so the destruction is announced on stderr before it happens.
-        """
-        out = self.tmp / "out"
-        first = _canonical_pkg(self.tmp, version="1.0.0", local_name="first.pkg")
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(first,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        stale = out / "stable" / ".ce-2.8.catalogue-assembly-backup"
-        stale.mkdir()
-        (stale / "pfSense-pkg-pfBlockerNG-0.9.0.pkg").write_bytes(b"last known good")
-
-        second = _canonical_pkg(self.tmp, version="2.0.0", local_name="second.pkg")
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            ca.assemble(
-                ca.Plan(
-                    targets=(
-                        ca.CatalogueTarget(
-                            channel="stable", varver="ce-2.8", pool=(second,)
-                        ),
-                    )
-                ),
-                out,
-                _ENGINE,
-            )
-        self.assertIn(str(stale), stderr.getvalue())
-        self.assertIn("stale", stderr.getvalue().lower())
-        self.assertFalse(stale.exists())
-
-    @_requires_engine
-    def test_replace_leaves_other_channels_untouched(self) -> None:
-        out = self.tmp / "out"
-        stable_pkg = _canonical_pkg(self.tmp, version="1.0.0", local_name="stable.pkg")
-        testing_pkg = _canonical_pkg(
-            self.tmp, version="1.0.0", local_name="testing.pkg"
-        )
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(stable_pkg,)
-                    ),
-                    ca.CatalogueTarget(
-                        channel="testing", varver="ce-2.8", pool=(testing_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-        testing_before = _tree_snapshot(out / "testing")
-
-        new_stable_pkg = _canonical_pkg(
-            self.tmp, version="2.0.0", local_name="stable2.pkg"
-        )
-        ca.assemble(
-            ca.Plan(
-                targets=(
-                    ca.CatalogueTarget(
-                        channel="stable", varver="ce-2.8", pool=(new_stable_pkg,)
-                    ),
-                )
-            ),
-            out,
-            _ENGINE,
-        )
-
-        testing_after = _tree_snapshot(out / "testing")
-        self.assertEqual(testing_before, testing_after)
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").is_file()
-        )
-
-
-# --------------------------------------------------------------------------- #
-# F3: the "record" axis of _verify_multi_destination_identity has zero
-# regression protection in the original suite (no fixture carries a real
-# pfb_build_record annotation, so record is None==None everywhere). This test
-# isolates that axis: both destination files are BYTE-IDENTICAL (same physical
-# source copied twice — the data/sha256 axes agree), and only the record
-# returned for one destination is made to diverge (injected via mock on top of a
-# GENUINE, load_build_record-parseable annotation), so only the record
-# comparison can catch it.
-# --------------------------------------------------------------------------- #
+        (out / "stable" / "ce-2.8").mkdir(parents=True)
+        canonical_name = "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
+        shutil.copy2(source, out / "stable" / "ce-2.8" / canonical_name)
+        # "testing" destination directory never populated.
+        index = {source.resolve(): [("stable", "ce-2.8"), ("testing", "ce-2.8")]}
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.verify_multi_destination_identity(_ENGINE, out, index)
+        self.assertIn("missing at destination", str(ctx.exception))
 
 
 class RecordIdentityTests(_TempDirTestCase):
     @_requires_engine
     def test_multi_destination_record_divergence_detected(self) -> None:
+        """The "record" axis of verify_multi_destination_identity: two
+        destinations with byte-identical files (same source copied twice — the
+        data/sha256 axes agree), but the record returned for one is made to
+        diverge (injected via mock on top of a GENUINE,
+        load_build_record-parseable annotation) — only the record comparison
+        can catch it."""
         record = _build_record()
         source = _annotated_pkg(self.tmp, record=record)
-        tree = self.tmp / "tree"
-        (tree / "stable" / "ce-2.8").mkdir(parents=True)
-        (tree / "testing" / "ce-2.8").mkdir(parents=True)
+        out = self.tmp / "out"
+        (out / "stable" / "ce-2.8").mkdir(parents=True)
+        (out / "testing" / "ce-2.8").mkdir(parents=True)
         canonical_name = (
             f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}.pkg"
         )
-        dest_a = tree / "stable" / "ce-2.8" / canonical_name
-        dest_b = tree / "testing" / "ce-2.8" / canonical_name
+        dest_a = out / "stable" / "ce-2.8" / canonical_name
+        dest_b = out / "testing" / "ce-2.8" / canonical_name
         shutil.copy2(source, dest_a)
         shutil.copy2(source, dest_b)
         self.assertEqual(dest_a.read_bytes(), dest_b.read_bytes())  # bytes/sha256 agree
@@ -1158,77 +959,8 @@ class RecordIdentityTests(_TempDirTestCase):
             ),
             self.assertRaises(ca.CatalogueAssemblyError) as ctx,
         ):
-            ca._verify_multi_destination_identity(_ENGINE, tree, index)
+            ca.verify_multi_destination_identity(_ENGINE, out, index)
         self.assertIn("multi-destination identity violation", str(ctx.exception))
-
-
-# --------------------------------------------------------------------------- #
-# F4: two protections _stage/_build_source_index document in their own
-# docstrings but the original suite never tested directly.
-# --------------------------------------------------------------------------- #
-
-
-class StagingProtectionTests(_TempDirTestCase):
-    @_requires_engine
-    def test_stage_does_not_collide_same_named_files_from_different_dirs(self) -> None:
-        dir_a = self.tmp / "a"
-        dir_b = self.tmp / "b"
-        dir_a.mkdir()
-        dir_b.mkdir()
-        pkg_a = _canonical_pkg(dir_a, version="1.0.0", local_name="same.pkg")
-        pkg_b = _canonical_pkg(dir_b, version="2.0.0", local_name="same.pkg")
-        target = ca.CatalogueTarget(
-            channel="stable", varver="ce-2.8", pool=(pkg_a, pkg_b)
-        )
-        out = self.tmp / "out"
-        ca.assemble(ca.Plan(targets=(target,)), out, _ENGINE)
-        present = sorted(
-            p.name
-            for p in (out / "stable" / "ce-2.8").glob("*.pkg")
-            if p.name not in {"packagesite.pkg", "data.pkg"}
-        )
-        self.assertEqual(
-            present,
-            ["pfSense-pkg-pfBlockerNG-1.0.0.pkg", "pfSense-pkg-pfBlockerNG-2.0.0.pkg"],
-        )
-
-    @_requires_engine
-    def test_stage_forces_pkg_suffix_for_non_pkg_named_source(self) -> None:
-        odd = _canonical_pkg(
-            self.tmp, version="4.0.0", local_name="asset-without-pkg-suffix.bin"
-        )
-        target = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(odd,))
-        out = self.tmp / "out"
-        ca.assemble(ca.Plan(targets=(target,)), out, _ENGINE)
-        self.assertTrue(
-            (out / "stable" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg").is_file()
-        )
-
-
-class SourceIndexResolutionTests(_TempDirTestCase):
-    @_requires_engine
-    def test_build_source_index_resolves_aliased_paths_to_one_key(self) -> None:
-        real_dir = self.tmp / "real"
-        real_dir.mkdir()
-        pkg = _canonical_pkg(real_dir, version="4.0.0")
-        alias_dir = self.tmp / "alias"
-        alias_dir.symlink_to(real_dir)
-        aliased_path = alias_dir / pkg.name
-        self.assertNotEqual(str(aliased_path), str(pkg))
-        self.assertEqual(aliased_path.resolve(), pkg.resolve())
-
-        target_a = ca.CatalogueTarget(channel="stable", varver="ce-2.8", pool=(pkg,))
-        target_b = ca.CatalogueTarget(
-            channel="testing", varver="ce-2.8", pool=(aliased_path,)
-        )
-        plan = ca.Plan(targets=(target_a, target_b))
-
-        index = ca._build_source_index(plan)
-        self.assertEqual(len(index), 1)
-        destinations = next(iter(index.values()))
-        self.assertEqual(
-            set(destinations), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
-        )
 
 
 if __name__ == "__main__":
