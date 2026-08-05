@@ -13,6 +13,7 @@ build-repo-portable.py's _validate_annotated_project_pkg / _canonical_build_reco
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import itertools
@@ -1023,6 +1024,48 @@ class SteadyStateReplaceTests(_TempDirTestCase):
         self.assertFalse(
             (out / "stable" / ".ce-2.8.catalogue-assembly-backup").exists()
         )
+
+    @_requires_engine
+    def test_stale_backup_clobber_is_announced(self) -> None:
+        """A stale backup is the last-known-good copy of an interrupted run.
+
+        Clobbering it silently leaves an operator no trail back to the content that
+        was destroyed, so the destruction is announced on stderr before it happens.
+        """
+        out = self.tmp / "out"
+        first = _canonical_pkg(self.tmp, version="1.0.0", local_name="first.pkg")
+        ca.assemble(
+            ca.Plan(
+                targets=(
+                    ca.CatalogueTarget(
+                        channel="stable", varver="ce-2.8", pool=(first,)
+                    ),
+                )
+            ),
+            out,
+            _ENGINE,
+        )
+        stale = out / "stable" / ".ce-2.8.catalogue-assembly-backup"
+        stale.mkdir()
+        (stale / "pfSense-pkg-pfBlockerNG-0.9.0.pkg").write_bytes(b"last known good")
+
+        second = _canonical_pkg(self.tmp, version="2.0.0", local_name="second.pkg")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            ca.assemble(
+                ca.Plan(
+                    targets=(
+                        ca.CatalogueTarget(
+                            channel="stable", varver="ce-2.8", pool=(second,)
+                        ),
+                    )
+                ),
+                out,
+                _ENGINE,
+            )
+        self.assertIn(str(stale), stderr.getvalue())
+        self.assertIn("stale", stderr.getvalue().lower())
+        self.assertFalse(stale.exists())
 
     @_requires_engine
     def test_replace_leaves_other_channels_untouched(self) -> None:

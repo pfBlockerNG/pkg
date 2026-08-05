@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -312,6 +313,14 @@ def _publish(tree_root: Path, out_dir: Path, plan: Plan) -> None:
             if dest.exists():
                 backup = dest.parent / f".{dest.name}{_BACKUP_SUFFIX}"
                 if backup.exists():
+                    # A backup surviving into another run is debris from a run that died
+                    # between the aside-move and the cleanup, so it may hold the only
+                    # remaining copy of that catalogue. Destroying it is still the right
+                    # move (it blocks this run), but never silently.
+                    sys.stderr.write(
+                        f"==> WARNING: discarding stale catalogue backup {backup} "
+                        f"(debris from an interrupted run; its contents are lost)\n"
+                    )
                     shutil.rmtree(backup)
                 shutil.move(str(dest), str(backup))
                 backups.append((dest, backup))
