@@ -11,8 +11,12 @@ stdlib-only, Python 3.11. The engine is loaded by the caller via
 ``publish_catalogues.load_engine`` and handed in as the already-built ``Engine`` —
 this module never loads it a second time. Emission (manifest reading, ABI/collision
 checks, the catalog descriptor) is entirely the engine's ``build_repo``; this module
-adds only staging, whole-tree atomicity, and the multi-destination byte/checksum/
-provenance identity post-condition build_repo itself has no reason to know about.
+adds only staging, a recoverable publish step, and the multi-destination byte/
+checksum/provenance identity post-condition build_repo itself has no reason to know
+about. Publishing is RECOVERABLE, not atomic (see ``assemble``'s docstring for the
+precise guarantee and its one honest gap) — the durable transaction boundary for the
+published site is the caller's (S4's) git commit of ``out_dir``, not anything this
+module does on disk.
 """
 
 from __future__ import annotations
@@ -90,13 +94,36 @@ class Plan:
 
 
 def assemble(plan: Plan, out_dir: str | Path, engine: Engine) -> None:
-    """Assemble every catalogue in ``plan`` and publish atomically to ``out_dir``.
+    """Assemble every catalogue in ``plan`` and publish it into ``out_dir``.
 
-    Assembles the WHOLE tree into a scratch root first (via the engine's own
-    ``build_repo``, one call per catalogue — never move/rename/mutate a caller path).
-    Only once every catalogue has emitted successfully, AND the multi-destination
-    identity post-condition holds, does anything land in ``out_dir``. Any failure
-    before that point leaves ``out_dir`` exactly as it was.
+    Phase 1 — build. The WHOLE tree is assembled into a scratch root first (via the
+    engine's own ``build_repo``, one call per catalogue — never move/rename/mutate a
+    caller path), staged on the SAME filesystem as ``out_dir`` (a sibling of
+    ``out_dir``'s parent) so every move in phase 2 below is a single ``rename``
+    syscall rather than a cross-device copy. Nothing reaches ``out_dir`` until every
+    catalogue has built successfully AND the multi-destination identity
+    post-condition holds.
+
+    Phase 2 — publish. This is RECOVERABLE, not atomic: each target is published one
+    rename at a time (existing content, if any, moved aside to a sibling backup, then
+    the new content renamed into place). If every target lands, the backups are
+    discarded. If any single step fails partway through the plan, every target this
+    call already published is rolled back — restored from its backup, or removed if
+    it was newly created (no prior backup) — before the exception is re-raised. So a
+    failure ANYWHERE (phase 1, phase 2, or the identity check between them) leaves
+    ``out_dir`` byte-identical to its state when this call started, including the
+    case where the failing step is a target's own replace-move, after that same
+    target's aside-to-backup move already ran.
+
+    The one honest gap: this guarantee assumes the rollback's OWN moves succeed. A
+    fault DURING rollback itself (e.g. the disk fills exactly there) is an
+    unrecoverable double-fault no amount of application-level bookkeeping can paper
+    over on a non-transactional filesystem; it raises rather than silently claiming
+    success. This module also commits nothing durable itself — the durable
+    transaction boundary for the published site is the caller's (S4's) git commit of
+    ``out_dir``. A run that raises here never reaches that commit, so the
+    *repository* is unaffected regardless; the rollback above exists to keep a
+    live/served ``out_dir`` correct too, for the window before that commit happens.
     """
     out_dir = Path(out_dir)
     if out_dir.exists() and not out_dir.is_dir():
@@ -108,7 +135,15 @@ def assemble(plan: Plan, out_dir: str | Path, engine: Engine) -> None:
     source_index = _build_source_index(plan)
     brp = engine.build_repo_portable
 
-    with tempfile.TemporaryDirectory(prefix="catalogue-assembly-") as scratch_str:
+    # dir=out_dir.parent (not the platform temp root): the publish step below moves
+    # everything from this scratch tree into out_dir, and staying on the SAME
+    # filesystem turns every one of those moves into a single atomic os.rename
+    # instead of a cross-device copy+delete that can fail midway and leave a partial
+    # directory on either side.
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="catalogue-assembly-", dir=out_dir.parent
+    ) as scratch_str:
         scratch = Path(scratch_str)
         tree_root = scratch / "tree"
         tree_root.mkdir()
@@ -251,19 +286,47 @@ def _verify_multi_destination_identity(
                 )
 
 
+_BACKUP_SUFFIX = ".catalogue-assembly-backup"
+
+
 def _publish(tree_root: Path, out_dir: Path, plan: Plan) -> None:
     """Move every assembled catalogue from the scratch tree into ``out_dir``.
 
     Only ever called after every catalogue in ``plan`` built successfully and the
-    multi-destination identity check passed — nothing here can run for a failed
-    assembly. Each catalogue's prior directory (if any) is removed immediately before
-    its replacement is moved in, so a catalogue not present in ``plan`` is never
-    touched.
+    multi-destination identity check passed. Recoverable, not atomic (see
+    ``assemble``'s docstring for the full guarantee): each target with existing
+    content is moved aside to a sibling backup before its replacement is moved in;
+    a target with no prior content is tracked as freshly created instead. On any
+    failure, every target already published in THIS call is rolled back — in
+    reverse order — before the exception is re-raised, so a catalogue not present in
+    ``plan`` is never touched, and one present in ``plan`` ends up exactly as it was
+    if this call does not fully succeed.
     """
-    for target in plan.targets:
-        src = tree_root / target.channel / target.varver
-        dest = out_dir / target.channel / target.varver
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.move(str(src), str(dest))
+    backups: list[tuple[Path, Path]] = []
+    created: list[Path] = []
+    try:
+        for target in plan.targets:
+            src = tree_root / target.channel / target.varver
+            dest = out_dir / target.channel / target.varver
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                backup = dest.parent / f".{dest.name}{_BACKUP_SUFFIX}"
+                if backup.exists():
+                    shutil.rmtree(backup)
+                shutil.move(str(dest), str(backup))
+                backups.append((dest, backup))
+            else:
+                created.append(dest)
+            shutil.move(str(src), str(dest))
+    except Exception:
+        for dest in reversed(created):
+            if dest.exists():
+                shutil.rmtree(dest)
+        for dest, backup in reversed(backups):
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.move(str(backup), str(dest))
+        raise
+    else:
+        for _dest, backup in backups:
+            shutil.rmtree(backup)
