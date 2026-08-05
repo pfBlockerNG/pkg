@@ -123,12 +123,19 @@ def _run_result(
     *,
     dependency_assets: tuple[pc.VerifiedAsset, ...] = (),
     canonical_assets: tuple[pc.VerifiedAsset, ...] | None = None,
+    build_route_rows: tuple[dict, ...] | None = None,
 ) -> pc.RunResult:
+    """Build a RunResult. ``build_route_rows`` defaults to exactly the matrix_row
+    of every canonical asset (the normal, fully-matched case) — pass it
+    explicitly to test a mismatch between the ROUTE matrix and the assets."""
+    assets = canonical_assets if canonical_assets is not None else (asset,)
+    if build_route_rows is None:
+        build_route_rows = tuple(a.record["matrix_row"] for a in assets if a.record)
     return pc.RunResult(
         intake=intake,
-        canonical_assets=canonical_assets if canonical_assets is not None else (asset,),
+        canonical_assets=assets,
         dependency_assets=dependency_assets,
-        build_route_rows=(),
+        build_route_rows=build_route_rows,
         route_only_rows=(),
     )
 
@@ -175,6 +182,63 @@ def _tagged(
     run_result = _run_result(intake, asset, dependency_assets=dependency_assets)
     varver = record["route"].split("/", 1)[1]
     return intake, run_result, record, varver
+
+
+# The live ROUTE matrix (read-version-matrix.sh --print-route, per the F2 fix
+# round): ce-2.8/CE/FreeBSD 15, plus-26.03 and plus-26.07/Plus/FreeBSD 16. Only
+# the CE row carries extra_pkgs (py311-charset-normalizer) — the two Plus rows
+# carry none.
+def _route_row_ce_28(**overrides: object) -> dict:
+    return _matrix_row(**overrides)
+
+
+def _route_row_plus(pfsense_version: str, **overrides: object) -> dict:
+    row = {
+        "channel": "Plus",
+        "variant": "Plus",
+        "freebsd_version": "16.0-RELEASE",
+        "freebsd_major": "16",
+    }
+    row.update(overrides)
+    return _matrix_row(pfsense_version=pfsense_version, **row)
+
+
+def _three_varver_run(
+    destinations: tuple[str, ...],
+    *,
+    source_tag: str = "v4.0.0",
+    sha256_ce: str = "1" * 64,
+    sha256_plus_1: str = "2" * 64,
+    sha256_plus_2: str = "3" * 64,
+    dependency_assets: tuple[pc.VerifiedAsset, ...] = (),
+):
+    """Mirror the live ROUTE matrix: one dispatch, three canonical assets across
+    ce-2.8, plus-26.03, plus-26.07. Returns (intake, run_result, records) where
+    ``records`` maps varver -> its build record."""
+    primary = destinations[0]
+    release_id = "1"
+    intake = pc.parse_intake(
+        _REPO, release_id, source_tag, json.dumps(list(destinations)), "10:1"
+    )
+    row_ce = _route_row_ce_28()
+    row_plus_1 = _route_row_plus("26.03")
+    row_plus_2 = _route_row_plus("26.07")
+    record_ce = _record(channel=primary, row=row_ce, source_tag=source_tag)
+    record_plus_1 = _record(channel=primary, row=row_plus_1, source_tag=source_tag)
+    record_plus_2 = _record(channel=primary, row=row_plus_2, source_tag=source_tag)
+    asset_ce = _asset(record_ce, sha256=sha256_ce)
+    asset_plus_1 = _asset(record_plus_1, sha256=sha256_plus_1)
+    asset_plus_2 = _asset(record_plus_2, sha256=sha256_plus_2)
+    assets = (asset_ce, asset_plus_1, asset_plus_2)
+    run_result = _run_result(
+        intake, asset_ce, canonical_assets=assets, dependency_assets=dependency_assets
+    )
+    records = {
+        "ce-2.8": record_ce,
+        "plus-26.03": record_plus_1,
+        "plus-26.07": record_plus_2,
+    }
+    return intake, run_result, records
 
 
 def _seed_ledger() -> dict:
@@ -561,22 +625,65 @@ class DecideTaggedTests(unittest.TestCase):
         with self.assertRaises(cs.CatalogueStateError):
             cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
 
-    def test_multi_canonical_asset_rejected(self) -> None:
+    def test_zero_canonical_assets_rejected(self) -> None:
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing"]', "10:1")
+        run_result = pc.RunResult(
+            intake=intake,
+            canonical_assets=(),
+            dependency_assets=(),
+            build_route_rows=(),
+            route_only_rows=(),
+        )
+        with self.assertRaisesRegex(
+            cs.CatalogueStateError, "at least one canonical package"
+        ):
+            cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
+
+    def test_two_canonical_assets_same_varver_rejected(self) -> None:
         """A genuine multi-varver RunResult (S1's own
         test_verify_run_multi_varver_with_dependency_matching_build_row proves this
-        is legitimate production output — one dispatch building ce-2.8 AND ce-2.9)
-        must be rejected outright by decide()'s single-canonical-asset guard, never
-        silently processed as if only the first leg existed."""
-        row_a = _matrix_row(pfsense_version="2.8")
-        row_b = _matrix_row(pfsense_version="2.9")
-        record_a = _record(channel="testing", row=row_a, source_tag="v4.0.1.b1")
-        record_b = _record(channel="testing", row=row_b, source_tag="v4.0.1.b1")
+        is legitimate production output — the live ROUTE matrix has three build
+        rows) is legitimate. What is NOT legitimate: two canonical assets both
+        claiming the SAME varver — that is the real duplicate the old single-
+        asset guard should have been catching."""
+        row = _matrix_row()
+        record_a = _record(channel="testing", row=row, source_tag="v4.0.1.b1")
+        record_b = _record(channel="testing", row=row, source_tag="v4.0.1.b1")
         asset_a = _asset(record_a, sha256="1" * 64)
         asset_b = _asset(record_b, sha256="2" * 64)
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing"]', "10:1")
         run_result = _run_result(intake, asset_a, canonical_assets=(asset_a, asset_b))
+        with self.assertRaisesRegex(cs.CatalogueStateError, "same varver"):
+            cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
+
+    def test_canonical_asset_varver_absent_from_route_rejected(self) -> None:
+        _, run_result_orig, _record, _varver = _tagged(("testing",))
+        run_result = pc.RunResult(
+            intake=run_result_orig.intake,
+            canonical_assets=run_result_orig.canonical_assets,
+            dependency_assets=(),
+            build_route_rows=(),  # no ROUTE row at all for the asset's varver
+            route_only_rows=(),
+        )
         with self.assertRaisesRegex(
-            cs.CatalogueStateError, "exactly one canonical package"
+            cs.CatalogueStateError, "absent from the run's ROUTE build rows"
+        ):
+            cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
+
+    def test_route_build_row_with_no_canonical_asset_rejected(self) -> None:
+        """A partial release cannot publish a half-complete tree: a ROUTE build
+        row with no matching canonical asset rejects the whole run."""
+        _, run_result_orig, record, _varver = _tagged(("testing",))
+        extra_row = _matrix_row(pfsense_version="2.9")
+        run_result = pc.RunResult(
+            intake=run_result_orig.intake,
+            canonical_assets=run_result_orig.canonical_assets,
+            dependency_assets=(),
+            build_route_rows=(record["matrix_row"], extra_row),
+            route_only_rows=(),
+        )
+        with self.assertRaisesRegex(
+            cs.CatalogueStateError, "ROUTE build row.*no canonical asset"
         ):
             cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
 
@@ -667,6 +774,81 @@ class DecideOutcomeTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(cs.CatalogueStateError, r"^edge/"):
             cs.decide(state, both, engine=_ENGINE)
+
+    def test_three_varver_run_one_diverges_rejects_whole_run(self) -> None:
+        _, first_run, _records = _three_varver_run(("testing",), source_tag="v4.0.1.b1")
+        state = _advance(_seed_ledger(), first_run)
+        before = copy.deepcopy(state)
+        # plus-26.07 (processed LAST in sorted-varver order) diverges; ce-2.8 and
+        # plus-26.03 match exactly — proves a late divergence still aborts the
+        # whole run, not just its own leg, and the ledger stays untouched.
+        _, second_run, _records2 = _three_varver_run(
+            ("testing",), source_tag="v4.0.1.b1", sha256_plus_2="9" * 64
+        )
+        with self.assertRaisesRegex(cs.CatalogueStateError, "different bytes"):
+            cs.decide(state, second_run, engine=_ENGINE)
+        self.assertEqual(state, before)
+
+    def test_two_varvers_published_third_new_is_advance_not_noop(self) -> None:
+        """Two varvers already published identically; the third is genuinely
+        new — the aggregate decision must be an ADVANCE covering only the new
+        leg, never a NOOP (which would silently drop it)."""
+        row_ce = _route_row_ce_28()
+        row_plus_1 = _route_row_plus("26.03")
+        tag = "v4.0.1.b1"
+        intake_partial = pc.parse_intake(_REPO, "1", tag, '["testing"]', "10:1")
+        record_ce = _record(channel="testing", row=row_ce, source_tag=tag)
+        record_plus_1 = _record(channel="testing", row=row_plus_1, source_tag=tag)
+        asset_ce = _asset(record_ce, sha256="1" * 64)
+        asset_plus_1 = _asset(record_plus_1, sha256="2" * 64)
+        partial_run = _run_result(
+            intake_partial, asset_ce, canonical_assets=(asset_ce, asset_plus_1)
+        )
+        state = _advance(_seed_ledger(), partial_run)
+
+        # The full three-varver run: ce-2.8 and plus-26.03 identical to what is
+        # already published; plus-26.07 is new.
+        _, full_run, _records = _three_varver_run(("testing",), source_tag=tag)
+        decision = cs.decide(state, full_run, engine=_ENGINE)
+        self.assertEqual(decision.kind, "advance")
+        self.assertEqual(
+            {(c, v) for c, v, _e in decision.channel_entries},
+            {("testing", "plus-26.07")},
+        )
+        new_state = cs.apply(state, decision, engine=_ENGINE).state
+        self.assertEqual(
+            set(new_state["channels"]["testing"]),
+            {"ce-2.8", "plus-26.03", "plus-26.07"},
+        )
+
+    def test_three_varver_multi_destination_publishes_all(self) -> None:
+        """The positive case that matters most: a realistic three-varver run
+        (mirroring the live ROUTE matrix) across three destinations — the
+        resulting ledger holds all three varvers in all three channels,
+        ``dependency_unions`` is correct per varver, and only ce-2.8 (the only
+        ROUTE row with extra_pkgs) carries a dependency."""
+        dep = _dependency_asset(
+            name="py311-charset-normalizer", version="3.4.0", sha256="d" * 64
+        )
+        destinations = ("stable", "testing", "edge")
+        _, run_result, records = _three_varver_run(
+            destinations, dependency_assets=(dep,)
+        )
+        result = _advance_full(_seed_ledger(), run_result)
+        for channel in destinations:
+            self.assertEqual(
+                set(result.state["channels"][channel]),
+                {"ce-2.8", "plus-26.03", "plus-26.07"},
+            )
+            for varver, record in records.items():
+                entries = result.state["channels"][channel][varver]
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0]["record"], record)
+            union_ce = result.dependency_unions[(channel, "ce-2.8")]
+            self.assertEqual(len(union_ce), 1)
+            self.assertEqual(union_ce[0]["name"], "py311-charset-normalizer")
+            self.assertEqual(result.dependency_unions[(channel, "plus-26.03")], ())
+            self.assertEqual(result.dependency_unions[(channel, "plus-26.07")], ())
 
 
 # --------------------------------------------------------------------------- #

@@ -126,6 +126,7 @@ class Engine:
     src_root: Path
     pfb_pkg: ModuleType
     nightly_provenance: ModuleType
+    build_repo_portable: ModuleType
 
 
 def load_engine(src_root: str | Path | None = None) -> Engine:
@@ -164,6 +165,7 @@ def load_engine(src_root: str | Path | None = None) -> Engine:
         src_root=publish_engine.src_root,
         pfb_pkg=publish_engine.pfb_pkg,
         nightly_provenance=nightly_provenance,
+        build_repo_portable=publish_engine.build_repo_portable,
     )
 
 
@@ -553,6 +555,37 @@ def _dependency_candidates(
     return sorted(candidates, key=lambda d: d["name"])
 
 
+def _dependency_assets_for_varver(
+    engine: Engine, dependency_assets: Sequence[VerifiedAsset], freebsd_major: str
+) -> list[VerifiedAsset]:
+    """This varver's slice of the run's dependency assets, matched by ABI major —
+    the same match ``publish_catalogues.verify_run``'s own axis-9 check already
+    performs, reused verbatim (``_pkg_matches_abi``). A dependency built for one
+    FreeBSD major never lands in a varver on a different major: the live ROUTE
+    matrix's own shape is the proof — ce-2.8/FreeBSD 15 carries
+    py311-charset-normalizer via ``extra_pkgs``; the two FreeBSD-16 Plus varvers
+    carry none.
+    """
+    row_abi = f"FreeBSD:{freebsd_major}:*"
+    return [
+        dep
+        for dep in dependency_assets
+        if engine.build_repo_portable._pkg_matches_abi(dep.manifest, row_abi)
+    ]
+
+
+def _varver_for_route_row(engine: Engine, row: Mapping[str, object]) -> str:
+    """One ROUTE build row's varver, via ``build_repo_portable.catalog_name_from_version``
+    — the exact function that routes a built package into a catalog directory, so
+    it always agrees with a matching canonical asset's own ``record["route"]``
+    (built from ``pfb_pkg._route_for``, the same ``variant.lower()-major.minor``
+    formula) for any row/asset pair S1 has already matched.
+    """
+    return engine.build_repo_portable.catalog_name_from_version(
+        row["pfsense_version"], row["variant"]
+    )
+
+
 def decide(
     state: Mapping[str, object], run_result: RunResult, *, engine: Engine | None = None
 ) -> Decision:
@@ -561,18 +594,32 @@ def decide(
     Nightly runs use ``decide_nightly`` — Nightly's acceptance rules are
     ``nightly_provenance.complete``'s domain, not this function's.
 
-    Fan-out is routing only: the run carries exactly one verified canonical asset,
-    and its bytes/record are routed unchanged into every listed destination
+    A tagged run carries ONE canonical asset PER varver — the live ROUTE matrix
+    has multiple build rows (e.g. ce-2.8, plus-26.03, plus-26.07), and S1's own
+    ``verify_run`` legitimately emits a multi-varver ``RunResult`` for one
+    dispatch (proved by its own
+    ``test_verify_run_multi_varver_with_dependency_matching_build_row``). This
+    function runs the single-varver reconciliation once per (asset, varver),
+    aggregating every varver's ``channel_entries`` into ONE ``Decision`` — NEVER
+    partial: any per-varver divergence raises immediately, before any
+    ``Decision`` is constructed, so the whole run rejects and the ledger stays
+    untouched; the result is a NOOP only when EVERY varver's EVERY listed
+    destination already matches, and an ADVANCE otherwise, carrying only the
+    (channel, varver) gaps that actually need filling — a varver already fully
+    published alongside a genuinely new one produces an ADVANCE for just the new
+    leg, never a NOOP and never a silently dropped leg.
+
+    Fan-out within one varver is routing only: its canonical asset's bytes/
+    record are routed unchanged into every listed destination
     (``run_result.intake.destinations``, the closed tagged-tuple set
     ``publish_catalogues.parse_intake`` already enforces). Because every
-    destination's candidate entry is built from that SAME asset, Edge-follows-
-    Testing (the design doc's rule that an Edge entry must reference the exact
-    same sha256 as the Testing entry when destinations is ``("testing", "edge")``)
-    holds by construction within one run; the per-destination divergence check
-    below additionally rejects a STALE, already-published entry at any listed
-    channel (including "edge") whose bytes or provenance disagree with what this
-    run verified — covering an independently (re)built asset landing under an
-    equal (name, version) at a channel already served by an earlier run.
+    destination's candidate entry for that varver is built from the SAME asset,
+    Edge-follows-Testing (the design doc's rule that an Edge entry must
+    reference the exact same sha256 as the Testing entry when destinations is
+    ``("testing", "edge")``) holds by construction within one varver; the
+    per-destination divergence check below additionally rejects a STALE,
+    already-published entry at any listed channel (including "edge") whose
+    bytes or provenance disagree with what this run verified.
     """
     eng = _engine(engine)
     normalized = validate_state(dict(state), engine=eng)
@@ -581,84 +628,119 @@ def decide(
         raise CatalogueStateError(
             "decide() handles only tagged runs; use decide_nightly for a nightly run"
         )
-    if len(run_result.canonical_assets) != 1:
+    if not run_result.canonical_assets:
         raise CatalogueStateError(
-            "a tagged run must verify exactly one canonical package"
+            "a tagged run must verify at least one canonical package"
         )
-    asset = run_result.canonical_assets[0]
-    record = asset.record
-    if record is None:
-        raise CatalogueStateError("canonical asset has no provenance record")
 
-    name = record["emitted_identity"]
-    version = record["canonical_package_version"]
-    sha256 = asset.sha256
-    route = record["route"]
-    varver = route.split("/", 1)[1]
+    assets_by_varver: dict[str, VerifiedAsset] = {}
+    for asset in run_result.canonical_assets:
+        record = asset.record
+        if record is None:
+            raise CatalogueStateError("canonical asset has no provenance record")
+        varver = record["route"].split("/", 1)[1]
+        if varver in assets_by_varver:
+            raise CatalogueStateError(
+                f"two canonical assets claim the same varver {varver!r}"
+            )
+        assets_by_varver[varver] = asset
+
+    route_varvers = {
+        _varver_for_route_row(eng, row) for row in run_result.build_route_rows
+    }
+    missing_route_rows = set(assets_by_varver) - route_varvers
+    if missing_route_rows:
+        raise CatalogueStateError(
+            "canonical asset varver(s) absent from the run's ROUTE build rows: "
+            f"{sorted(missing_route_rows)!r}"
+        )
+    missing_assets = route_varvers - set(assets_by_varver)
+    if missing_assets:
+        raise CatalogueStateError(
+            f"ROUTE build row(s) with no canonical asset: {sorted(missing_assets)!r}"
+        )
 
     channels = normalized["channels"]
-    dependencies_by_channel = {
-        channel: _dependency_candidates(run_result.dependency_assets, channel, varver)
-        for channel in intake.destinations
-    }
-    present_matches: list[str] = []
-    for channel in intake.destinations:
-        varver_map = channels[channel]
-        existing_list = varver_map.get(varver, [])
-        existing = next(
-            (e for e in existing_list if e["name"] == name and e["version"] == version),
-            None,
+    all_channel_entries: list[tuple[str, str, dict[str, object]]] = []
+    for varver in sorted(assets_by_varver):
+        asset = assets_by_varver[varver]
+        record = asset.record
+        name = record["emitted_identity"]
+        version = record["canonical_package_version"]
+        sha256 = asset.sha256
+        major = record["matrix_row"]["freebsd_major"]
+        varver_dependency_assets = _dependency_assets_for_varver(
+            eng, run_result.dependency_assets, major
         )
-        if existing is None:
-            continue
-        if existing["sha256"] != sha256:
-            raise CatalogueStateError(
-                f"{channel}/{varver}: {name}@{version} is already published with different bytes "
-                f"(sha256 {existing['sha256']} != {sha256})"
-            )
-        if (
-            existing["record"] != record
-            or existing["dependencies"] != dependencies_by_channel[channel]
-        ):
-            raise CatalogueStateError(
-                f"{channel}/{varver}: {name}@{version} is already published with different provenance"
-            )
-        present_matches.append(channel)
+        dependencies_by_channel = {
+            channel: _dependency_candidates(varver_dependency_assets, channel, varver)
+            for channel in intake.destinations
+        }
 
-    if len(present_matches) == len(intake.destinations):
+        present_matches: list[str] = []
+        for channel in intake.destinations:
+            varver_map = channels[channel]
+            existing_list = varver_map.get(varver, [])
+            existing = next(
+                (
+                    e
+                    for e in existing_list
+                    if e["name"] == name and e["version"] == version
+                ),
+                None,
+            )
+            if existing is None:
+                continue
+            if existing["sha256"] != sha256:
+                raise CatalogueStateError(
+                    f"{channel}/{varver}: {name}@{version} is already published with different bytes "
+                    f"(sha256 {existing['sha256']} != {sha256})"
+                )
+            if (
+                existing["record"] != record
+                or existing["dependencies"] != dependencies_by_channel[channel]
+            ):
+                raise CatalogueStateError(
+                    f"{channel}/{varver}: {name}@{version} is already published with different provenance"
+                )
+            present_matches.append(channel)
+
+        if len(present_matches) == len(intake.destinations):
+            continue
+
+        filename = asset.canonical_name
+        entry_candidate = {
+            "name": name,
+            "version": version,
+            "sha256": sha256,
+            "record": dict(record),
+        }
+        for channel in intake.destinations:
+            if channel in present_matches:
+                continue
+            path = f"{channel}/{varver}/{filename}"
+            all_channel_entries.append(
+                (
+                    channel,
+                    varver,
+                    {
+                        **entry_candidate,
+                        "path": path,
+                        "dependencies": dependencies_by_channel[channel],
+                        "release_id": intake.release_id,
+                        "release_tag": intake.release_tag,
+                        "source_run_id": intake.source_run_id,
+                    },
+                )
+            )
+
+    if not all_channel_entries:
         return Decision(kind="noop", generation_read=normalized["generation"])
-
-    filename = asset.canonical_name
-    entry_candidate = {
-        "name": name,
-        "version": version,
-        "sha256": sha256,
-        "record": dict(record),
-    }
-    channel_entries: list[tuple[str, str, dict[str, object]]] = []
-    for channel in intake.destinations:
-        if channel in present_matches:
-            continue
-        path = f"{channel}/{varver}/{filename}"
-        channel_entries.append(
-            (
-                channel,
-                varver,
-                {
-                    **entry_candidate,
-                    "path": path,
-                    "dependencies": dependencies_by_channel[channel],
-                    "release_id": intake.release_id,
-                    "release_tag": intake.release_tag,
-                    "source_run_id": intake.source_run_id,
-                },
-            )
-        )
 
     return Decision(
         kind="advance",
         generation_read=normalized["generation"],
-        channel_entries=tuple(channel_entries),
+        channel_entries=tuple(all_channel_entries),
         updated_by={
             "source_repository": intake.source_repository,
             "source_run_id": intake.source_run_id,
