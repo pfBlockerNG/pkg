@@ -645,6 +645,10 @@ def decide(
             )
         assets_by_varver[varver] = asset
 
+    # Duplicate ROUTE rows are not re-checked here. verify_run rejects them before any
+    # real RunResult exists; a hand-built one (as the test suites construct) bypasses
+    # that, but this reduction keeps only the varver string, so a duplicate collapses
+    # into the set without changing the outcome.
     route_varvers = {
         _varver_for_route_row(eng, row) for row in run_result.build_route_rows
     }

@@ -376,6 +376,54 @@ class HostileLedgerTests(unittest.TestCase):
         self.state = _advance(_seed_ledger(), run_result)
         self.entry = self.state["channels"]["testing"][self.varver][0]
 
+    def _with_dependencies(self, deps: list[dict[str, object]]) -> dict:
+        state = copy.deepcopy(self.state)
+        state["channels"]["testing"][self.varver][0]["dependencies"] = deps
+        return state
+
+    def _dep(self, **overrides: object) -> dict[str, object]:
+        dep: dict[str, object] = {
+            "name": "py311-charset-normalizer",
+            "version": "3.4.0",
+            "sha256": "a" * 64,
+            "path": f"testing/{self.varver}/py311-charset-normalizer-3.4.0.pkg",
+        }
+        dep.update(overrides)
+        return dep
+
+    def test_dependency_entry_accepted_as_baseline(self) -> None:
+        """Guards the two rejection tests below against passing vacuously."""
+        cs.validate_state(self._with_dependencies([self._dep()]), engine=_ENGINE)
+
+    def test_dependency_entry_unknown_field_rejected(self) -> None:
+        bad = self._with_dependencies([self._dep(record={})])
+        with self.assertRaises(cs.CatalogueStateError) as ctx:
+            cs.validate_state(bad, engine=_ENGINE)
+        self.assertIn("exact fields required", str(ctx.exception))
+
+    def test_dependency_entry_missing_field_rejected(self) -> None:
+        dep = self._dep()
+        del dep["sha256"]
+        with self.assertRaises(cs.CatalogueStateError) as ctx:
+            cs.validate_state(self._with_dependencies([dep]), engine=_ENGINE)
+        self.assertIn("exact fields required", str(ctx.exception))
+
+    def test_duplicate_dependency_name_rejected(self) -> None:
+        """Two entries for one dependency name would make the retention union
+        ambiguous about which version a retained canonical build shipped with."""
+        bad = self._with_dependencies(
+            [
+                self._dep(),
+                self._dep(
+                    version="3.5.0",
+                    path=f"testing/{self.varver}/py311-charset-normalizer-3.5.0.pkg",
+                ),
+            ]
+        )
+        with self.assertRaises(cs.CatalogueStateError) as ctx:
+            cs.validate_state(bad, engine=_ENGINE)
+        self.assertIn("duplicate dependency name", str(ctx.exception))
+
     def test_not_an_object_rejected(self) -> None:
         with self.assertRaises(cs.CatalogueStateError):
             cs.validate_state("not-an-object", engine=_ENGINE)
