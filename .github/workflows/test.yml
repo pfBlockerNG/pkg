@@ -15,6 +15,13 @@ jobs:
       - name: Check shell sources and workflows
         run: |
           set -eu
+          # nullglob (issue #2146 R2): tests/*.sh may legitimately match nothing —
+          # R1/R2 deleted its last two members (test_landing_matrix_abi.sh,
+          # test_no_special_builtin_truncation.sh; both pinned the retired
+          # publish.yml). Without this, an unmatched bash glob is left as the
+          # literal string "tests/*.sh" and every loop/shellcheck call below fails
+          # on a nonexistent file of that literal name.
+          shopt -s nullglob
           for file in scripts/setup-hooks.sh tests/*.sh; do
             sh -n "$file"
           done

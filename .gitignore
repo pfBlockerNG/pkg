@@ -1,8 +1,2 @@
 __pycache__/
 *.pyc
-
-# catalogue_assembly.py debris. Both live INSIDE the tree the publisher commits, so a
-# run killed between creation and cleanup would otherwise stage .pkg files into main:
-# the scratch tree staged beside out_dir, and a catalogue moved aside during publish.
-catalogue-assembly-*/
-.*.catalogue-assembly-backup/

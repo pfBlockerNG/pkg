@@ -359,7 +359,19 @@ class VarverValidationTests(_TempDirTestCase):
 
     @_requires_engine
     def test_varver_too_long_rejected(self) -> None:
-        self._assert_varver_rejected("a" * 300)
+        # Message-specific (issue #2146 R2 gate finding): a bare assertRaises
+        # here passes even if _MAX_VARVER_LENGTH were widened past 300, because
+        # a 300-char varver still raises CatalogueAssemblyError downstream —
+        # from _catalogue_dir's "catalogue directory does not exist" check, not
+        # from THIS length guard — so a widened cap would go unnoticed. Pinning
+        # the guard's own message text is what makes this test fail if the cap
+        # stops firing for a 300-char varver specifically.
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "a" * 300, engine=_ENGINE
+            )
+        self.assertIn("exceeds", str(ctx.exception))
+        self.assertIn("255 characters", str(ctx.exception))
 
     def _assert_varver_rejected(self, varver: str) -> None:
         with self.assertRaises(ca.CatalogueAssemblyError):

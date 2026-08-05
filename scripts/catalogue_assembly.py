@@ -142,12 +142,19 @@ def regenerate_catalogue(
     Writes directly into ``site_root`` (via ``build_repo``'s own
     ``catalog_name=f"{channel}/{varver}"`` routing) — no scratch tree, no backup,
     no rollback. ``build_repo``'s own ``_write_catalog_dir`` reads every staged
-    source's bytes before wiping/rebuilding the destination, so a failure here
-    (a corrupt pool member, a mixed/concrete ABI) never leaves a half-written
-    catalogue: either every input validates and the directory is wiped+rebuilt
-    whole, or an engine error propagates UNWRAPPED and the directory is
-    untouched — the same all-or-nothing guarantee the retired backup/rollback
-    code used to provide by hand.
+    source's bytes before wiping/rebuilding the destination, so a VALIDATION
+    fault (a corrupt pool member, a mixed/concrete ABI, an unreadable archive)
+    always raises before anything is deleted, leaving the directory untouched.
+
+    That is not the only fault window, though: a write-back fault AFTER the
+    wipe (mid-loop I/O error, disk full, process kill) can still leave the
+    directory in a genuine third state — wiped and partially rebuilt, missing
+    some of ``meta.conf``/``data.pkg``/``packagesite.pkg``/its ``.pkg`` files.
+    This function does not contain that window by itself; it propagates
+    whatever the engine raises, UNWRAPPED, exactly as for a validation fault.
+    Containment is the CALLER's job: the caller must treat any exception from
+    this call as fatal to the whole run and abort before staging, committing,
+    or pushing anything — a half-written catalogue must never reach a commit.
     """
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
