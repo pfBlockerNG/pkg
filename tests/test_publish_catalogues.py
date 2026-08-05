@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -1063,6 +1064,67 @@ class RunVerificationTests(unittest.TestCase):
         with self.assertRaises(pc.RunVerificationError) as ctx:
             pc.verify_run(_ENGINE, intake, [asset], [])
         self.assertIn("must not be empty", str(ctx.exception))
+
+
+# --------------------------------------------------------------------------- #
+# Engine-symbol allowlist and the canonical-record narrowing accessor.
+# --------------------------------------------------------------------------- #
+
+
+class EngineSymbolAllowlistTests(unittest.TestCase):
+    """Every engine symbol this module dereferences must be in the allowlist.
+
+    _verify_dependency_asset reads pfb_pkg._VARIANT / _PF_VERSION, which are private
+    engine names. Left off _REQUIRED_PFB_PKG_ATTRS, an engine that renamed either one
+    would load cleanly and then die on an uncaught AttributeError at the first
+    dependency asset, instead of failing fast and by name at load_engine().
+    """
+
+    def _module_missing(self, *absent: str) -> ModuleType:
+        stub = ModuleType("pfb_pkg_stub")
+        for name in pc._REQUIRED_PFB_PKG_ATTRS:
+            if name not in absent:
+                setattr(stub, name, object())
+        return stub
+
+    def test_missing_variant_pattern_is_named_by_load(self) -> None:
+        with self.assertRaises(pc.EngineError) as ctx:
+            pc._require_attrs(
+                self._module_missing("_VARIANT"), pc._REQUIRED_PFB_PKG_ATTRS, "pfb_pkg"
+            )
+        self.assertIn("_VARIANT", str(ctx.exception))
+
+    def test_missing_pf_version_pattern_is_named_by_load(self) -> None:
+        with self.assertRaises(pc.EngineError) as ctx:
+            pc._require_attrs(
+                self._module_missing("_PF_VERSION"),
+                pc._REQUIRED_PFB_PKG_ATTRS,
+                "pfb_pkg",
+            )
+        self.assertIn("_PF_VERSION", str(ctx.exception))
+
+    @_requires_engine
+    def test_real_engine_carries_every_allowlisted_symbol(self) -> None:
+        pc._require_attrs(_ENGINE.pfb_pkg, pc._REQUIRED_PFB_PKG_ATTRS, "pfb_pkg")
+
+
+class CanonicalRecordAccessorTests(unittest.TestCase):
+    """_canonical_record turns the canonical/record pairing into a named error."""
+
+    def test_canonical_asset_without_record_rejected(self) -> None:
+        asset = _fabricated_asset(
+            None, asset_class="canonical", declared_name="recordless.pkg"
+        )
+        with self.assertRaises(pc.RunVerificationError) as ctx:
+            pc._canonical_record(asset)
+        self.assertIn("expected a canonical asset with a record", str(ctx.exception))
+
+    def test_dependency_asset_rejected(self) -> None:
+        asset = _fabricated_asset(
+            None, asset_class="dependency", declared_name="dep.pkg"
+        )
+        with self.assertRaises(pc.RunVerificationError):
+            pc._canonical_record(asset)
 
 
 if __name__ == "__main__":

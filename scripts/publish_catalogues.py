@@ -73,6 +73,11 @@ _REQUIRED_PFB_PKG_ATTRS = (
     "read_compact_manifest",
     "load_build_record",
     "pkg_version_sort_key",
+    # Private engine patterns _verify_dependency_asset dereferences. Allowlisted so an
+    # engine that renames one fails by name here, not on an uncaught AttributeError at
+    # the first dependency asset.
+    "_VARIANT",
+    "_PF_VERSION",
 )
 _REQUIRED_BUILD_REPO_PORTABLE_ATTRS = (
     "BuildRepoError",
