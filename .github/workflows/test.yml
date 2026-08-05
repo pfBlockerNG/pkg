@@ -30,3 +30,58 @@ jobs:
             echo "--- $test"
             dash "$test"
           done
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Checkout pfBlockerNG (the engine this suite runs against)
+        uses: actions/checkout@v6
+        with:
+          repository: pfBlockerNG/pfBlockerNG
+          path: pfBlockerNG-src
+          # A shallow, sparse checkout: the suite only ever imports
+          # scripts/{pfb_pkg,build-repo-portable,release_version,
+          # nightly_provenance}.py — not the full tree.
+          fetch-depth: 1
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install --quiet ruff
+
+      - name: ruff check + format
+        run: |
+          ruff check scripts tests
+          ruff format --check scripts tests
+
+      - name: Run the test suite (must not silently skip the engine-gated tests)
+        # PFB_SRC missing/incomplete makes every @_requires_engine test SKIP rather
+        # than fail — a suite run without it is misleadingly green over a mostly
+        # untested tree (112 of 159 tests gated on PFB_SRC as of this job's
+        # authoring). Fail loudly on any skip instead of trusting a bare `OK`.
+        env:
+          PFB_SRC: ${{ github.workspace }}/pfBlockerNG-src
+        run: |
+          set -eu
+          OUTPUT="$(python3 -m unittest discover -s tests -v 2>&1)" || {
+            printf '%s\n' "$OUTPUT"
+            echo "::error::test suite failed"
+            exit 1
+          }
+          printf '%s\n' "$OUTPUT"
+          SUMMARY="$(printf '%s\n' "$OUTPUT" | tail -1)"
+          case "$SUMMARY" in
+            OK) ;;
+            *)
+              echo "::error::expected a clean 'OK' with zero skips (engine-gated tests silently skipped — PFB_SRC checkout is missing or incomplete); got: ${SUMMARY}"
+              exit 1
+              ;;
+          esac

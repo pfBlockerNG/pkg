@@ -874,6 +874,71 @@ def ca_default_keep() -> int:
 
 
 # --------------------------------------------------------------------------- #
+# publish() must actually WIRE catalogue_assembly.verify_multi_destination_
+# identity, not merely have access to a function that works in isolation
+# (test_catalogue_assembly.py's own job, unaffected by whether anything here
+# still calls it).
+# --------------------------------------------------------------------------- #
+
+
+class IdentityPostConditionTests(_TempDirTestCase):
+    @_requires_engine
+    def test_multi_destination_divergence_aborts_publish(self) -> None:
+        """Patches regenerate_catalogue to, after doing its real work, overwrite
+        ONE of two fanned-out destinations (same canonical_name, same path shape)
+        with a structurally valid but DIFFERENT record — same name/version, a
+        different source_sha — simulating a genuine divergence the identity check
+        exists to catch. run() must abort with the exact
+        CatalogueAssemblyError the identity check itself raises."""
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir,
+            channel="testing",
+            rows=(ROW_CE,),
+            source_tag="v4.0.1.b1",
+            include_dependency=False,
+        )
+        divergent_dir = self.tmp / "divergent"
+        divergent_dir.mkdir()
+        divergent_record = _record(
+            channel="testing", row=ROW_CE, source_tag="v4.0.1.b1", source_sha="b" * 40
+        )
+        divergent_path, _digest = _wrap_canonical_pkg(
+            divergent_dir, divergent_record, local_name="divergent.pkg"
+        )
+        divergent_bytes = divergent_path.read_bytes()
+
+        real_regenerate = pr.ca.regenerate_catalogue
+
+        def corrupting_regenerate(site_root, channel, varver, *, engine):
+            real_regenerate(site_root, channel, varver, engine=engine)
+            if channel == "edge":
+                target = (
+                    Path(site_root)
+                    / channel
+                    / varver
+                    / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+                )
+                target.write_bytes(divergent_bytes)
+
+        with (
+            mock.patch.object(
+                pr.ca, "regenerate_catalogue", side_effect=corrupting_regenerate
+            ),
+            self.assertRaises(pr.ca.CatalogueAssemblyError) as ctx,
+        ):
+            _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                channel="testing",
+                destinations='["testing","edge"]',
+                tag="v4.0.1.b1",
+            )
+        self.assertIn("multi-destination identity violation", str(ctx.exception))
+
+
+# --------------------------------------------------------------------------- #
 # main() — CLI wrapper: argv wiring, exit codes, stdout/stderr shape.
 # --------------------------------------------------------------------------- #
 
