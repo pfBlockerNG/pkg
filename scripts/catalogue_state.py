@@ -38,12 +38,16 @@ Retention. The keep-count for one (channel, varver) is resolved by
 ``DEFAULT_RETENTION_KEEP``. A later ticket that pins EOL'd varvers (ones we have also
 EOL'd) to keep=1 only has to teach that one function a lookup; no ledger reshaping.
 
-Scope note (deliberate — see the S2 handoff for rationale). Only the canonical
-pfBlockerNG package is tracked with retained generations per (channel, varver);
-every ledger entry singular language in the design doc ("the Edge entry", "an
-asset") matches this. Dependency-package mirroring is a tree-assembly (S3) concern
-once that layer exists to decide how dependencies are laid out per varver; this
-ledger does not track dependency-package history.
+Dependencies (#2146 F1). Every canonical ledger entry additionally carries the
+dependency assets it shipped with (name/version/sha256/path) — the exact set S1
+verified alongside it in the same run. Dependencies have no independent retention
+count of their own: retention keeps the UNION of dependencies referenced by the
+retained canonical set for one (channel, varver), computed fresh from whichever
+canonical entries retention kept — never a separately pruned/aged dependency
+history. ``apply`` exposes that union per (channel, varver) directly in its
+return value (``ApplyResult.dependency_unions``) so a caller can hand it to
+``catalogue_assembly.CatalogueTarget.dependencies`` without re-deriving it from
+the ledger's entries.
 
 stdlib-only, Python 3.11. The engine (pfb_pkg.py + nightly_provenance.py, which in
 turn pulls in release_version.py) is loaded from a pfBlockerNG source-repo checkout
@@ -66,16 +70,17 @@ from typing import Literal
 try:
     from scripts.publish_catalogues import Engine as _PublishEngine
     from scripts.publish_catalogues import EngineError as _PublishEngineError
-    from scripts.publish_catalogues import RunResult
+    from scripts.publish_catalogues import RunResult, VerifiedAsset
     from scripts.publish_catalogues import load_engine as _load_publish_engine
 except ImportError:  # script directory is also a direct import root
     from publish_catalogues import Engine as _PublishEngine
     from publish_catalogues import EngineError as _PublishEngineError
-    from publish_catalogues import RunResult
+    from publish_catalogues import RunResult, VerifiedAsset
     from publish_catalogues import load_engine as _load_publish_engine
 
 __all__ = [
     "DEFAULT_RETENTION_KEEP",
+    "ApplyResult",
     "CatalogueStateError",
     "Decision",
     "Engine",
@@ -189,10 +194,12 @@ _ASSET_FIELDS = {
     "sha256",
     "path",
     "record",
+    "dependencies",
     "release_id",
     "release_tag",
     "source_run_id",
 }
+_DEPENDENCY_FIELDS = {"name", "version", "sha256", "path"}
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Mirrors build-repo-portable.py's _CATALOG_NAME_SEGMENT_RE (single varver segment):
@@ -302,6 +309,53 @@ def _validate_asset_path(path: object, channel: str, varver: str) -> str:
     return path
 
 
+def _validate_dependency_entry(
+    channel: str, varver: str, entry: object
+) -> dict[str, object]:
+    """Validate one dependency-asset entry (#2146 F1): name/version/sha256/path
+    only — no record, no release identity. A dependency is not independently
+    versioned by this ledger; it is only ever "what this canonical build shipped
+    with", tracked so retention can compute the dependency union (see ``apply``)."""
+    if not isinstance(entry, dict):
+        raise CatalogueStateError("ledger dependency entry must be an object")
+    _exact_fields(entry, _DEPENDENCY_FIELDS, "ledger dependency entry")
+    name = entry["name"]
+    version = entry["version"]
+    sha256 = entry["sha256"]
+    if not isinstance(name, str) or not name:
+        raise CatalogueStateError(
+            "ledger dependency entry name must be a non-empty string"
+        )
+    if not isinstance(version, str) or not version:
+        raise CatalogueStateError(
+            "ledger dependency entry version must be a non-empty string"
+        )
+    if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+        raise CatalogueStateError(
+            "ledger dependency entry sha256 must be 64 lowercase hex characters"
+        )
+    path = _validate_asset_path(entry["path"], channel, varver)
+    return {"name": name, "version": version, "sha256": sha256, "path": path}
+
+
+def _validate_dependencies(
+    channel: str, varver: str, dependencies_raw: object
+) -> list[dict[str, object]]:
+    if not isinstance(dependencies_raw, list):
+        raise CatalogueStateError("ledger entry dependencies must be an array")
+    dependencies: list[dict[str, object]] = []
+    seen_names: set[str] = set()
+    for dep in dependencies_raw:
+        validated_dep = _validate_dependency_entry(channel, varver, dep)
+        if validated_dep["name"] in seen_names:
+            raise CatalogueStateError(
+                f"duplicate dependency name in ledger entry: {validated_dep['name']!r}"
+            )
+        seen_names.add(validated_dep["name"])
+        dependencies.append(validated_dep)
+    return dependencies
+
+
 def _validate_asset_entry(
     engine: Engine, channel: str, varver: str, entry: object
 ) -> dict[str, object]:
@@ -352,6 +406,7 @@ def _validate_asset_entry(
         raise CatalogueStateError(
             "ledger entry record route does not match its ledger location"
         )
+    dependencies = _validate_dependencies(channel, varver, entry["dependencies"])
 
     return {
         "name": name,
@@ -359,6 +414,7 @@ def _validate_asset_entry(
         "sha256": sha256,
         "path": path,
         "record": validated_record,
+        "dependencies": dependencies,
         "release_id": release_id,
         "release_tag": release_tag,
         "source_run_id": source_run_id,
@@ -477,6 +533,26 @@ class Decision:
 # --------------------------------------------------------------------------- #
 
 
+def _dependency_candidates(
+    dependency_assets: Sequence[VerifiedAsset], channel: str, varver: str
+) -> list[dict[str, object]]:
+    """This run's dependency-entry candidates for one destination channel.
+
+    Every listed destination gets the SAME dependency assets (they fan out with
+    the canonical asset, same as its bytes) — only ``path`` differs per channel.
+    """
+    candidates = [
+        {
+            "name": dep.manifest["name"],
+            "version": dep.manifest["version"],
+            "sha256": dep.sha256,
+            "path": f"{channel}/{varver}/{dep.canonical_name}",
+        }
+        for dep in dependency_assets
+    ]
+    return sorted(candidates, key=lambda d: d["name"])
+
+
 def decide(
     state: Mapping[str, object], run_result: RunResult, *, engine: Engine | None = None
 ) -> Decision:
@@ -521,6 +597,10 @@ def decide(
     varver = route.split("/", 1)[1]
 
     channels = normalized["channels"]
+    dependencies_by_channel = {
+        channel: _dependency_candidates(run_result.dependency_assets, channel, varver)
+        for channel in intake.destinations
+    }
     present_matches: list[str] = []
     for channel in intake.destinations:
         varver_map = channels[channel]
@@ -536,7 +616,10 @@ def decide(
                 f"{channel}/{varver}: {name}@{version} is already published with different bytes "
                 f"(sha256 {existing['sha256']} != {sha256})"
             )
-        if existing["record"] != record:
+        if (
+            existing["record"] != record
+            or existing["dependencies"] != dependencies_by_channel[channel]
+        ):
             raise CatalogueStateError(
                 f"{channel}/{varver}: {name}@{version} is already published with different provenance"
             )
@@ -564,6 +647,7 @@ def decide(
                 {
                     **entry_candidate,
                     "path": path,
+                    "dependencies": dependencies_by_channel[channel],
                     "release_id": intake.release_id,
                     "release_tag": intake.release_tag,
                     "source_run_id": intake.source_run_id,
@@ -604,9 +688,13 @@ def decide_nightly(
     with THIS LEDGER's current Nightly generation (never the handoff's own
     generation — see the module docstring), independently recompute the expected
     input digest from the handoff's own pinned ``source_sha``/``ports_sha``/
-    ``matrix_digest`` (never trust the handoff's ``allocation.input_digest`` on
-    its own — an artifact substitution should still be caught), and translate
-    ``complete``'s output into a ``Decision``.
+    ``matrix_digest`` rather than trusting the handoff's ``allocation.input_digest``
+    field on its own, and translate ``complete``'s output into a ``Decision``.
+    This recompute is an INTERNAL CONSISTENCY check, not tamper resistance: all
+    four inputs come from the same handoff document, so a consistently-tampered
+    handoff defeats it. What it does catch is accidental corruption or a stale/
+    partial field — the allocation and the pinned inputs disagreeing with each
+    other within one document.
     """
     eng = _engine(engine)
     normalized = validate_state(dict(state), engine=eng)
@@ -712,13 +800,48 @@ def _prune_retained(
     )
 
 
+def _dependency_union(
+    entries: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, object], ...]:
+    """Union of every dependency referenced by any of ``entries`` — the RETAINED
+    canonical set for one (channel, varver), after retention has already pruned
+    it (#2146 F1). Deduped by full identity (name, version, sha256, path): a
+    retained older canonical entry's dependency survives here alongside the
+    newest run's, even when the two disagree on dependency version — that union
+    IS the whole dependency-retention design, no separate count exists.
+    """
+    seen: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for entry in entries:
+        for dep in entry["dependencies"]:
+            key = (dep["name"], dep["version"], dep["sha256"], dep["path"])
+            seen[key] = dict(dep)
+    return tuple(sorted(seen.values(), key=lambda d: (d["name"], d["version"])))
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    """``apply``'s full outcome.
+
+    ``state`` is the new ledger — persist it exactly like ``apply`` used to
+    return directly. ``dependency_unions`` is a pre-computed
+    ``{(channel, varver): (dependency entry, ...)}`` map covering every tagged
+    (channel, varver) in the resulting ledger, each value already the retained-
+    set union described in the module docstring — the exact
+    ``catalogue_assembly.CatalogueTarget.dependencies`` input, so a caller never
+    re-derives it from ``state`` itself.
+    """
+
+    state: dict[str, object]
+    dependency_unions: Mapping[tuple[str, str], tuple[dict[str, object], ...]]
+
+
 def apply(
     state: Mapping[str, object],
     decision: Decision,
     *,
     engine: Engine | None = None,
     keep_count_for: Callable[[str, str], int] | None = None,
-) -> dict[str, object]:
+) -> ApplyResult:
     """Fold an ADVANCE decision into a new ledger state. Never mutates ``state``.
 
     Refuses a NOOP decision (nothing to commit) and a decision computed against a
@@ -791,4 +914,10 @@ def apply(
         "updated_by": new_updated_by,
         "channels": channels,
     }
-    return validate_state(new_state, engine=eng)
+    validated_new_state = validate_state(new_state, engine=eng)
+    dependency_unions = {
+        (channel, varver): _dependency_union(entries)
+        for channel in _TAGGED_CHANNELS
+        for varver, entries in validated_new_state["channels"][channel].items()
+    }
+    return ApplyResult(state=validated_new_state, dependency_unions=dependency_unions)

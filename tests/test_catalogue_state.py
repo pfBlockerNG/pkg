@@ -117,18 +117,51 @@ def _asset(record: dict, *, sha256: str = "1" * 64) -> pc.VerifiedAsset:
     )
 
 
-def _run_result(intake: pc.Intake, asset: pc.VerifiedAsset) -> pc.RunResult:
+def _run_result(
+    intake: pc.Intake,
+    asset: pc.VerifiedAsset,
+    *,
+    dependency_assets: tuple[pc.VerifiedAsset, ...] = (),
+    canonical_assets: tuple[pc.VerifiedAsset, ...] | None = None,
+) -> pc.RunResult:
     return pc.RunResult(
         intake=intake,
-        canonical_assets=(asset,),
-        dependency_assets=(),
+        canonical_assets=canonical_assets if canonical_assets is not None else (asset,),
+        dependency_assets=dependency_assets,
         build_route_rows=(),
         route_only_rows=(),
     )
 
 
+def _dependency_asset(
+    *,
+    name: str = "py311-charset-normalizer",
+    version: str = "3.4.0",
+    sha256: str = "d" * 64,
+) -> pc.VerifiedAsset:
+    declared = f"{name}-{version}.pkg"
+    return pc.VerifiedAsset(
+        asset_class="dependency",
+        declared_name=declared,
+        canonical_name=declared,
+        work_path=Path(declared),
+        sha256=sha256,
+        manifest={
+            "name": name,
+            "version": version,
+            "abi": "FreeBSD:15:*",
+            "origin": f"textproc/{name}",
+        },
+        record=None,
+    )
+
+
 def _tagged(
-    destinations: tuple[str, ...], *, sha256: str = "1" * 64, **record_overrides: object
+    destinations: tuple[str, ...],
+    *,
+    sha256: str = "1" * 64,
+    dependency_assets: tuple[pc.VerifiedAsset, ...] = (),
+    **record_overrides: object,
 ):
     """Build (intake, run_result, record, varver) for one closed-set tagged tuple."""
     primary = destinations[0]
@@ -139,7 +172,7 @@ def _tagged(
     )
     record = _record(channel=primary, source_tag=tag, **record_overrides)
     asset = _asset(record, sha256=sha256)
-    run_result = _run_result(intake, asset)
+    run_result = _run_result(intake, asset, dependency_assets=dependency_assets)
     varver = record["route"].split("/", 1)[1]
     return intake, run_result, record, varver
 
@@ -148,9 +181,16 @@ def _seed_ledger() -> dict:
     return cs.empty_catalogue_state(engine=_ENGINE)
 
 
-def _advance(state: dict, run_result: pc.RunResult, **apply_kwargs: object) -> dict:
+def _advance_full(
+    state: dict, run_result: pc.RunResult, **apply_kwargs: object
+) -> cs.ApplyResult:
+    """Like _advance, but returns the full ApplyResult (state + dependency_unions)."""
     decision = cs.decide(state, run_result, engine=_ENGINE)
     return cs.apply(state, decision, engine=_ENGINE, **apply_kwargs)
+
+
+def _advance(state: dict, run_result: pc.RunResult, **apply_kwargs: object) -> dict:
+    return _advance_full(state, run_result, **apply_kwargs).state
 
 
 def _nightly_allocation(
@@ -374,9 +414,15 @@ class HostileLedgerTests(unittest.TestCase):
             )
 
     def test_path_not_under_channel_varver_rejected(self) -> None:
+        """A realistic canonical filename (not a throwaway "x.pkg") recorded under
+        the WRONG channel prefix — the prefix check must catch this on its own;
+        a generic filename would let a downstream filename-shape check catch it
+        by coincidence instead, proving nothing about the prefix check itself."""
+        realistic_name = self.entry["path"].rsplit("/", 1)[1]
         with self.assertRaises(cs.CatalogueStateError):
             cs.validate_state(
-                self._with_bad_path(f"edge/{self.varver}/x.pkg"), engine=_ENGINE
+                self._with_bad_path(f"edge/{self.varver}/{realistic_name}"),
+                engine=_ENGINE,
             )
 
     def test_path_wrong_extension_rejected(self) -> None:
@@ -415,6 +461,32 @@ class HostileLedgerTests(unittest.TestCase):
     def test_varver_key_with_slash_rejected(self) -> None:
         bad = copy.deepcopy(self.state)
         bad["channels"]["testing"]["ce-2.8/evil"] = []
+        with self.assertRaises(cs.CatalogueStateError):
+            cs.validate_state(bad, engine=_ENGINE)
+
+    def test_entry_record_route_mismatch_rejected(self) -> None:
+        """The entry's own record has a route for a DIFFERENT varver (ce-2.9) than
+        the ledger location it is filed under (self.varver, ce-2.8) — same name/
+        version (same source_tag, so the version string is unaffected)."""
+        mismatched_row = _matrix_row(pfsense_version="2.9")
+        mismatched_record = _record(
+            channel="testing", row=mismatched_row, source_tag=self.record["source_tag"]
+        )
+        bad = copy.deepcopy(self.state)
+        bad_entry = dict(bad["channels"]["testing"][self.varver][0])
+        bad_entry["record"] = mismatched_record
+        bad["channels"]["testing"][self.varver][0] = bad_entry
+        with self.assertRaises(cs.CatalogueStateError):
+            cs.validate_state(bad, engine=_ENGINE)
+
+    def test_entry_name_version_mismatch_record_rejected(self) -> None:
+        """The entry's own "version" field disagrees with its record's
+        canonical_package_version — the record itself stays otherwise valid and
+        correctly placed."""
+        bad = copy.deepcopy(self.state)
+        bad_entry = dict(bad["channels"]["testing"][self.varver][0])
+        bad_entry["version"] = "9.9.9"
+        bad["channels"]["testing"][self.varver][0] = bad_entry
         with self.assertRaises(cs.CatalogueStateError):
             cs.validate_state(bad, engine=_ENGINE)
 
@@ -457,7 +529,7 @@ class DecideTaggedTests(unittest.TestCase):
         self.assertEqual(
             {c for c, _v, _e in decision.channel_entries}, set(destinations)
         )
-        state = cs.apply(_seed_ledger(), decision, engine=_ENGINE)
+        state = cs.apply(_seed_ledger(), decision, engine=_ENGINE).state
         for channel in destinations:
             entries = state["channels"][channel][varver]
             self.assertEqual(len(entries), 1)
@@ -489,6 +561,25 @@ class DecideTaggedTests(unittest.TestCase):
         with self.assertRaises(cs.CatalogueStateError):
             cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
 
+    def test_multi_canonical_asset_rejected(self) -> None:
+        """A genuine multi-varver RunResult (S1's own
+        test_verify_run_multi_varver_with_dependency_matching_build_row proves this
+        is legitimate production output — one dispatch building ce-2.8 AND ce-2.9)
+        must be rejected outright by decide()'s single-canonical-asset guard, never
+        silently processed as if only the first leg existed."""
+        row_a = _matrix_row(pfsense_version="2.8")
+        row_b = _matrix_row(pfsense_version="2.9")
+        record_a = _record(channel="testing", row=row_a, source_tag="v4.0.1.b1")
+        record_b = _record(channel="testing", row=row_b, source_tag="v4.0.1.b1")
+        asset_a = _asset(record_a, sha256="1" * 64)
+        asset_b = _asset(record_b, sha256="2" * 64)
+        intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing"]', "10:1")
+        run_result = _run_result(intake, asset_a, canonical_assets=(asset_a, asset_b))
+        with self.assertRaisesRegex(
+            cs.CatalogueStateError, "exactly one canonical package"
+        ):
+            cs.decide(_seed_ledger(), run_result, engine=_ENGINE)
+
 
 @_requires_engine
 class DecideOutcomeTests(unittest.TestCase):
@@ -514,7 +605,7 @@ class DecideOutcomeTests(unittest.TestCase):
         decision = cs.decide(state, both, engine=_ENGINE)
         self.assertEqual(decision.kind, "advance")
         self.assertEqual({c for c, _v, _e in decision.channel_entries}, {"edge"})
-        new_state = cs.apply(state, decision, engine=_ENGINE)
+        new_state = cs.apply(state, decision, engine=_ENGINE).state
         self.assertEqual(
             new_state["channels"]["edge"][varver][0]["sha256"],
             new_state["channels"]["testing"][varver][0]["sha256"],
@@ -537,6 +628,20 @@ class DecideOutcomeTests(unittest.TestCase):
             sha256="1" * 64,
             source_tag=record["source_tag"],
             freebsd_ports_sha="c" * 64,
+        )
+        with self.assertRaisesRegex(cs.CatalogueStateError, "different provenance"):
+            cs.decide(state, run_result_2, engine=_ENGINE)
+
+    def test_reject_divergent_dependencies(self) -> None:
+        """Same canonical bytes, but a different dependency set — also "different
+        provenance": #2146 F1 folds dependency identity into the same divergence
+        check as the record itself."""
+        dep_a = _dependency_asset(version="3.4.0", sha256="d" * 64)
+        dep_b = _dependency_asset(version="3.5.0", sha256="e" * 64)
+        _, run_result, record, _ = _tagged(("testing",), dependency_assets=(dep_a,))
+        state = _advance(_seed_ledger(), run_result)
+        _, run_result_2, _r2, _v2 = _tagged(
+            ("testing",), source_tag=record["source_tag"], dependency_assets=(dep_b,)
         )
         with self.assertRaisesRegex(cs.CatalogueStateError, "different provenance"):
             cs.decide(state, run_result_2, engine=_ENGINE)
@@ -594,6 +699,23 @@ class ApplyTests(unittest.TestCase):
         bad_decision = dataclasses.replace(decision, nightly_state=_NP.empty_state())
         with self.assertRaises(cs.CatalogueStateError):
             cs.apply(_seed_ledger(), bad_decision, engine=_ENGINE)
+
+    def test_apply_invalid_keep_count_rejected(self) -> None:
+        # Seed the ledger with an unrelated already-published entry first, so
+        # wiping the (channel, varver) under test down to zero doesn't ALSO
+        # coincidentally trip the "empty ledger must have empty updated_by"
+        # invariant (generation 0) — this isolates the keep-count guard itself.
+        _, seed_run, _r, _v = _tagged(("stable", "testing"))
+        state = _advance(_seed_ledger(), seed_run)
+        _, run_result, _r2, _v2 = _tagged(("edge",))
+        decision = cs.decide(state, run_result, engine=_ENGINE)
+        with self.assertRaises(cs.CatalogueStateError):
+            cs.apply(
+                state,
+                decision,
+                engine=_ENGINE,
+                keep_count_for=lambda channel, varver: 0,
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -676,6 +798,81 @@ class RetentionTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Dependency tracking + union retention (#2146 F1).
+# --------------------------------------------------------------------------- #
+
+
+@_requires_engine
+class DependencyTrackingTests(unittest.TestCase):
+    def test_dependency_recorded_on_canonical_entry(self) -> None:
+        dep = _dependency_asset(
+            name="py311-charset-normalizer", version="3.4.0", sha256="d" * 64
+        )
+        _, run_result, _record, varver = _tagged(("testing",), dependency_assets=(dep,))
+        state = _advance(_seed_ledger(), run_result)
+        entry = state["channels"]["testing"][varver][0]
+        self.assertEqual(len(entry["dependencies"]), 1)
+        dep_entry = entry["dependencies"][0]
+        self.assertEqual(dep_entry["name"], "py311-charset-normalizer")
+        self.assertEqual(dep_entry["version"], "3.4.0")
+        self.assertEqual(dep_entry["sha256"], "d" * 64)
+        self.assertEqual(
+            dep_entry["path"], f"testing/{varver}/py311-charset-normalizer-3.4.0.pkg"
+        )
+
+    def _publish_with_dep(
+        self, state: dict, suffix: str, *, dep_version: str, dep_sha256: str, keep: int
+    ) -> tuple[cs.ApplyResult, str]:
+        row = _matrix_row()
+        tag = f"v4.0.1.b{suffix}"
+        record = _record(channel="testing", source_tag=tag, row=row)
+        asset = _asset(record, sha256=f"{suffix}" * 64)
+        dep = _dependency_asset(version=dep_version, sha256=dep_sha256)
+        intake = pc.parse_intake(_REPO, "1", tag, '["testing"]', "10:1")
+        run_result = _run_result(intake, asset, dependency_assets=(dep,))
+        result = _advance_full(
+            state, run_result, keep_count_for=lambda channel, varver: keep
+        )
+        varver = record["route"].split("/", 1)[1]
+        return result, varver
+
+    def test_dependency_union_survives_retention(self) -> None:
+        """A retained OLDER canonical entry whose dependency differs from the
+        newest run's — both dependency versions must survive in the union
+        (#2146 F1's live example: ce-2.8 alone carries extra_pkgs)."""
+        result1, varver = self._publish_with_dep(
+            _seed_ledger(), "1", dep_version="3.4.0", dep_sha256="d" * 64, keep=2
+        )
+        result2, varver = self._publish_with_dep(
+            result1.state, "2", dep_version="3.5.0", dep_sha256="e" * 64, keep=2
+        )
+        # Both canonical versions are retained under keep=2.
+        self.assertEqual(
+            {e["version"] for e in result2.state["channels"]["testing"][varver]},
+            {"4.0.1.b1", "4.0.1.b2"},
+        )
+        union = result2.dependency_unions[("testing", varver)]
+        self.assertEqual({d["version"] for d in union}, {"3.4.0", "3.5.0"})
+
+    def test_dependency_union_drops_when_canonical_evicted(self) -> None:
+        """Under keep=1, the older canonical entry (and ONLY its unique
+        dependency) is evicted — the union reflects the RETAINED set, not every
+        dependency ever seen."""
+        result1, varver = self._publish_with_dep(
+            _seed_ledger(), "1", dep_version="3.4.0", dep_sha256="d" * 64, keep=1
+        )
+        result2, varver = self._publish_with_dep(
+            result1.state, "2", dep_version="3.5.0", dep_sha256="e" * 64, keep=1
+        )
+        self.assertEqual(
+            {e["version"] for e in result2.state["channels"]["testing"][varver]},
+            {"4.0.1.b2"},
+        )
+        union = result2.dependency_unions[("testing", varver)]
+        self.assertEqual({d["version"] for d in union}, {"3.5.0"})
+
+
+# --------------------------------------------------------------------------- #
 # decide_nightly() — reuse of nightly_provenance.complete.
 # --------------------------------------------------------------------------- #
 
@@ -702,7 +899,7 @@ class DecideNightlyTests(unittest.TestCase):
         decision = cs.decide_nightly(
             state, handoff, run_id="777:1", source_repository=_REPO, engine=_ENGINE
         )
-        state = cs.apply(state, decision, engine=_ENGINE)
+        state = cs.apply(state, decision, engine=_ENGINE).state
         decision2 = cs.decide_nightly(
             state, handoff, run_id="777:1", source_repository=_REPO, engine=_ENGINE
         )
@@ -720,7 +917,7 @@ class DecideNightlyTests(unittest.TestCase):
         decision = cs.decide_nightly(
             state, handoff1, run_id="777:1", source_repository=_REPO, engine=_ENGINE
         )
-        state = cs.apply(state, decision, engine=_ENGINE)
+        state = cs.apply(state, decision, engine=_ENGINE).state
         handoff2 = _nightly_handoff(
             allocation,
             source_sha="a" * 40,
@@ -739,7 +936,7 @@ class DecideNightlyTests(unittest.TestCase):
         decision = cs.decide_nightly(
             state, handoff1, run_id="777:1", source_repository=_REPO, engine=_ENGINE
         )
-        state = cs.apply(state, decision, engine=_ENGINE)
+        state = cs.apply(state, decision, engine=_ENGINE).state
 
         other_source_sha = "c" * 40
         other_input_digest = _NP.combined_nightly_input_digest(
