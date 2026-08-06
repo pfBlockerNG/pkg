@@ -1,10 +1,9 @@
 # CLAUDE.md — pfBlockerNG/pkg
 
-`pfBlockerNG/pkg` hosts and deploys the self-hosted FreeBSD `pkg` repository to
-GitHub Pages (ADR-17). Its `.github/workflows/publish.yml` builds the current
-`devel` `.pkg` (via `pfBlockerNG/pfBlockerNG`'s `build-pkg-portable.py`), folds
-in every Release `.pkg`, regenerates the arch-less catalog, and deploys to
-`pfblockerng.github.io/pkg`.
+`pfBlockerNG/pkg` hosts the generated self-hosted FreeBSD `pkg` repository on
+GitHub Pages (ADR-17). The source repository, `pfBlockerNG/pfBlockerNG`, builds
+the page tree and commits it here; this repository contains no publisher or
+deployment workflow.
 
 As a `pfBlockerNG`-org repo, this **inherits `pfBlockerNG/pfBlockerNG`'s
 `CLAUDE.md` + project/user `.claude/settings.json` as the org default** (see its
