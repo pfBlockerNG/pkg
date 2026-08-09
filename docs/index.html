@@ -1,0 +1,111 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>pfBlockerNG — self-hosted pkg repository</title><style>
+:root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--fg:#e6edf3;--mut:#8b949e;--acc:#2f81f7;--warn:#d29922;--edge:#a371f7;--red:#f85149;--code:#0b0f14}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:980px;margin:0 auto;padding:2rem 1.25rem 4rem}
+header h1{margin:0 0 .25rem;font-size:2rem}
+header p{margin:0;color:var(--mut)}
+h2{margin:2.5rem 0 1rem;font-size:1.3rem;border-bottom:1px solid var(--bd);padding-bottom:.4rem}
+h3{margin:1.6rem 0 .5rem;font-size:1.05rem}
+.cards{display:grid;gap:1rem;grid-template-columns:minmax(0,1fr)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:1rem 1.1rem}
+.card h3{margin:0 0 .15rem;font-size:1.1rem}
+.card .ver{color:var(--mut);font-size:.9rem;margin:0 0 .6rem}
+.card .blurb{color:var(--mut);font-size:.92rem;margin:.15rem 0 .8rem}
+pre{background:var(--code);border:1px solid var(--bd);border-radius:8px;padding:.7rem .8rem;overflow:auto;
+  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
+code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  background:#1f2630;padding:.1em .35em;border-radius:5px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--bd);white-space:nowrap}
+th{color:var(--mut);font-weight:600}
+td.num{font-variant-numeric:tabular-nums;color:var(--mut)}
+.badge{display:inline-block;font-size:.72rem;padding:.05rem .45rem;border-radius:20px;
+  border:1px solid var(--bd);color:var(--mut)}
+details summary{cursor:pointer;color:var(--mut);font-size:.85rem;margin-top:.5rem}
+a.browse{display:inline-block;padding:.5rem .9rem;border:1px solid var(--acc);border-radius:8px;font-weight:600}
+table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
+table.autoindex td.num{white-space:nowrap}
+footer{margin-top:3rem;color:var(--mut);font-size:.85rem;border-top:1px solid var(--bd);padding-top:1rem}
+.empty{color:var(--mut);font-style:italic}
+.card.stable{border-color:var(--acc)}
+.card.testing{border-color:var(--warn)}
+.card.edge{border-color:var(--edge)}
+.card.nightly{border-color:var(--red)}
+.card.nightly .badge{border-color:var(--red);color:var(--red)}
+.warn{color:var(--warn)}
+.snip{position:relative}
+.snip>pre{padding-right:3.6rem}
+.copy{position:absolute;top:.45rem;right:.45rem;z-index:1;
+  font:600 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  color:var(--mut);background:#1f2630;border:1px solid var(--bd);border-radius:6px;
+  padding:.3rem .5rem;cursor:pointer}
+.copy:hover{color:var(--fg);border-color:var(--acc)}
+.copy.copied{color:#3fb950;border-color:#3fb950}
+</style></head><body><div class="wrap"><header><h1>pfBlockerNG</h1><p>Self-hosted FreeBSD <code>pkg</code> repository for pfSense&nbsp;CE &amp; pfSense&nbsp;Plus.</p></header><p>Install pfBlockerNG straight from this repository: pick a channel below and run its commands on your firewall (as <code>root</code>). Every channel installs the same canonical package (<code>pfSense-pkg-pfBlockerNG</code>) from its own repository &mdash; see Trust &amp; channel model below for how the four relate.</p><h2>Channels</h2><div class="cards"><div class="card stable"><h3>Stable</h3><p class="ver"><span class="empty">not yet published</span></p><p class="blurb">Final tagged releases (<code>X.Y.Z</code>) from a maintained release line. Production use.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre>fetch -qo - https://pfblockerng.github.io/pkg/add-repo.sh \
+  | sh -s -- --base-url https://pfblockerng.github.io/pkg --channel stable
+pkg install pfSense-pkg-pfBlockerNG</pre></div><details><summary>Manual conf (advanced)</summary><p class="blurb">The bootstrap auto-detects this; in a hand-written conf, replace <code>&lt;varver&gt;</code> (the edition-version: <code>ce-2.8</code>, <code>plus-26.03</code>, &hellip;) with your box's value.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre># Generated at boot by pfblockerng_repo_generate (ADR-39) — do not edit; re-run add-repo.sh to change.
+# pfBlockerNG (stable channel) — self-hosted pkg repository (ADR-17).
+# NONE-signed: trust anchor is HTTPS to the host (no signing key). The URL is
+# fully resolved for this box&#x27;s edition/version (ADR-39; arch-less/NO_ARCH,
+# issue #1806); the boot rc.d hook updates it on a pfSense OS upgrade.
+# priority 100 sits above the base Netgate `pfSense` repo so cross-repo
+# resolution (pkg install/upgrade, GUI Install) selects the pfBlockerNG build.
+pfblockerng-stable: {
+  url: &quot;https://pfblockerng.github.io/pkg/stable/&lt;varver&gt;&quot;,
+  mirror_type: none,
+  signature_type: none,
+  priority: 100,
+  enabled: yes
+}</pre></div></details></div><div class="card testing"><h3>Testing</h3><p class="ver"><span class="empty">not yet published</span></p><p class="blurb">Nonzero-patch prereleases (<code>X.Y.Z.aN</code>/<code>bN</code>/<code>rN</code>, Z &ne; 0) validating the next Stable of the current line. For users verifying an upcoming fix.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre>fetch -qo - https://pfblockerng.github.io/pkg/add-repo.sh \
+  | sh -s -- --base-url https://pfblockerng.github.io/pkg --channel testing
+pkg install pfSense-pkg-pfBlockerNG</pre></div><details><summary>Manual conf (advanced)</summary><p class="blurb">The bootstrap auto-detects this; in a hand-written conf, replace <code>&lt;varver&gt;</code> (the edition-version: <code>ce-2.8</code>, <code>plus-26.03</code>, &hellip;) with your box's value.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre># Generated at boot by pfblockerng_repo_generate (ADR-39) — do not edit; re-run add-repo.sh to change.
+# pfBlockerNG (testing channel) — self-hosted pkg repository (ADR-17).
+# NONE-signed: trust anchor is HTTPS to the host (no signing key). The URL is
+# fully resolved for this box&#x27;s edition/version (ADR-39; arch-less/NO_ARCH,
+# issue #1806); the boot rc.d hook updates it on a pfSense OS upgrade.
+# priority 100 sits above the base Netgate `pfSense` repo so cross-repo
+# resolution (pkg install/upgrade, GUI Install) selects the pfBlockerNG build.
+pfblockerng-testing: {
+  url: &quot;https://pfblockerng.github.io/pkg/testing/&lt;varver&gt;&quot;,
+  mirror_type: none,
+  signature_type: none,
+  priority: 100,
+  enabled: yes
+}</pre></div></details></div><div class="card edge"><h3>Edge</h3><p class="ver">Latest <code>4.0.0.a21</code></p><p class="blurb">Patch-zero prereleases (<code>X.Y.0.aN</code>/<code>bN</code>/<code>rN</code>) opening the next release family. Earliest adopters.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre>fetch -qo - https://pfblockerng.github.io/pkg/add-repo.sh \
+  | sh -s -- --base-url https://pfblockerng.github.io/pkg --channel edge
+pkg install pfSense-pkg-pfBlockerNG</pre></div><details><summary>Manual conf (advanced)</summary><p class="blurb">The bootstrap auto-detects this; in a hand-written conf, replace <code>&lt;varver&gt;</code> (the edition-version: <code>ce-2.8</code>, <code>plus-26.03</code>, &hellip;) with your box's value.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre># Generated at boot by pfblockerng_repo_generate (ADR-39) — do not edit; re-run add-repo.sh to change.
+# pfBlockerNG (edge channel) — self-hosted pkg repository (ADR-17).
+# NONE-signed: trust anchor is HTTPS to the host (no signing key). The URL is
+# fully resolved for this box&#x27;s edition/version (ADR-39; arch-less/NO_ARCH,
+# issue #1806); the boot rc.d hook updates it on a pfSense OS upgrade.
+# priority 100 sits above the base Netgate `pfSense` repo so cross-repo
+# resolution (pkg install/upgrade, GUI Install) selects the pfBlockerNG build.
+pfblockerng-edge: {
+  url: &quot;https://pfblockerng.github.io/pkg/edge/&lt;varver&gt;&quot;,
+  mirror_type: none,
+  signature_type: none,
+  priority: 100,
+  enabled: yes
+}</pre></div></details></div><div class="card nightly"><h3>Nightly <span class="badge">not for daily use</span></h3><p class="ver"><span class="empty">not yet published</span></p><p class="blurb">Untagged snapshot builds (<code>YYYYMMDD[_N]</code>) from a pinned source SHA, rebuilt only when inputs change. <span class="warn">Bleeding edge</span> &mdash; the only guarantee is that CI passed. Bare date versions intentionally sort above semantic versions: moving off Nightly is an explicit repository-qualified downgrade.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre>fetch -qo - https://pfblockerng.github.io/pkg/add-repo.sh \
+  | sh -s -- --base-url https://pfblockerng.github.io/pkg --channel nightly
+pkg install pfSense-pkg-pfBlockerNG</pre></div><details><summary>Manual conf (advanced)</summary><p class="blurb">The bootstrap auto-detects this; in a hand-written conf, replace <code>&lt;varver&gt;</code> (the edition-version: <code>ce-2.8</code>, <code>plus-26.03</code>, &hellip;) with your box's value.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre># Generated at boot by pfblockerng_repo_generate (ADR-39) — do not edit; re-run add-repo.sh to change.
+# pfBlockerNG (nightly channel) — self-hosted pkg repository (ADR-17).
+# NONE-signed: trust anchor is HTTPS to the host (no signing key). The URL is
+# fully resolved for this box&#x27;s edition/version (ADR-39; arch-less/NO_ARCH,
+# issue #1806); the boot rc.d hook updates it on a pfSense OS upgrade.
+# priority 100 sits above the base Netgate `pfSense` repo so cross-repo
+# resolution (pkg install/upgrade, GUI Install) selects the pfBlockerNG build.
+pfblockerng-nightly: {
+  url: &quot;https://pfblockerng.github.io/pkg/nightly/&lt;varver&gt;&quot;,
+  mirror_type: none,
+  signature_type: none,
+  priority: 100,
+  enabled: yes
+}</pre></div></details></div></div><h2>Trust &amp; channel model</h2><h3>One tagged artifact, several catalogues</h3><p class="blurb">Stable, Testing, and Edge may intentionally serve the exact same canonical package &mdash; same name, same version, same bytes &mdash; because a single tagged release always fans out to every channel its tag kind reaches: a Stable final lands in Stable, Testing, and Edge; a Testing prerelease lands in Testing and Edge; an Edge patch-zero prerelease lands in Edge alone. Edge's own latest simply moves ahead numerically once a new release family opens there &mdash; the fan-out itself never depends on what else has been published. This is catalogue placement, not separate builds, and not a repository-priority policy.</p><h3>Trust model</h3><p class="blurb">Every repository conf sets <code>signature_type: none</code> &mdash; there is no catalogue-signing key. The trust anchor is HTTPS/TLS to this Pages host.</p><h3>Single-repository subscription</h3><p class="blurb">A box subscribes to exactly one channel repository at a time. The four channel repos share one equal priority (<code>100</code>), above the base Netgate <code>pfSense</code> repo (priority <code>0</code>); live <code>pkg</code> resolution at equal priority ignores version ordering between repos, and upgrades of an installed package never leave its origin repository &mdash; so enabling a second project channel repo is not how channel selection works. This is safe because each channel catalogue strictly contains everything its slower channels carry: Edge holds every package Testing does, and Testing holds every package Stable does, so a Stable final always lands in Stable, Testing, and Edge; a Testing prerelease always lands in Testing and Edge; an Edge patch-zero prerelease lands in Edge alone. One subscription therefore already has every package a box could need, because <code>pkg</code> orders versions numerically, component-wise &mdash; never by release date: if Edge holds <code>4.0.0.a2</code> and a later <code>3.2.16.a3</code> or <code>3.2.17</code> is published into it, the latest in Edge stays <code>4.0.0.a2</code>, and the older build stays in the Edge catalogue as in-repo rollback material. Switching forward (to a higher version) is replacing the enabled conf with the faster channel's and upgrading normally. Rolling back is an explicit repository-qualified downgrade/reinstall &mdash; available within the same repo on a faster channel (containment keeps the older build around), or after switching the conf to a slower channel. Removing a channel means removing its conf. Identical name/version across catalogues remains valid only because the bytes and provenance are identical.</p><h3>Retention</h3><p class="blurb">Each <code>&lt;channel&gt;/&lt;varver&gt;/</code> catalogue retains the newest 5 canonical packages; a faster channel additionally retains any canonical package one of its slower channels still retains, so containment (Edge &supe; Testing &supe; Stable) survives retention, not only fan-out. Dependency packages are not pruned.</p><h3>Netgate identity</h3><p class="blurb">The canonical package shares its name with the pfBlockerNG package Netgate ships in its own <code>pfSense</code> repo &mdash; provenance differs. Every build published here carries <code>commit</code>/<code>created</code> annotations linking it to the source commit that produced it; repository priority decides which build <code>pkg</code> selects when both are enabled.</p><h3>Channel switching</h3><p class="blurb">Switching channels is two steps, and the second one is not optional. <code>https://pfblockerng.github.io/pkg/add-repo.sh</code> run with <code>--channel &lt;ch&gt;</code> moves the <em>subscription</em>: it writes that channel's conf and retires every other project conf. It does not move the <em>installed package</em> &mdash; <code>pkg</code> keeps an installed package pinned to its origin repository and offers no upgrade across repositories, so a box that only gains a conf silently keeps running its old build. <code>https://pfblockerng.github.io/pkg/migrate-channel.sh</code> run with the same <code>--channel &lt;ch&gt;</code> performs the repository-qualified operation that actually moves it, replaces a legacy suffixed identity (<code>-devel</code>, <code>-nightly</code>) with the canonical package, and verifies the result before reporting success. There is no in-UI channel switcher by design.</p><div class="snip"><button class="copy" type="button" aria-label="Copy to clipboard">Copy</button><pre>fetch -qo - https://pfblockerng.github.io/pkg/add-repo.sh \
+  | sh -s -- --base-url https://pfblockerng.github.io/pkg --channel &lt;ch&gt;
+fetch -qo - https://pfblockerng.github.io/pkg/migrate-channel.sh \
+  | sh -s -- --channel &lt;ch&gt;</pre></div><h2>Published packages</h2><h3>pfSense CE</h3><div class="tablewrap"><table><thead><tr><th>pfSense</th><th>Channel</th><th>Version</th><th>ABI</th><th>PHP</th><th>Python</th><th>Published</th><th>Commit</th><th>Size</th></tr></thead><tbody><tr><td>2.9</td><td>edge</td><td><a href="./edge/ce-2.9/pfSense-pkg-pfBlockerNG-4.0.0.a21.pkg">4.0.0.a21</a></td><td><code>FreeBSD:15:*</code></td><td class="num">8.3</td><td class="num">3.11</td><td class="num">2026-08-09 16:53 UTC</td><td><span class="empty">&mdash;</span></td><td class="num">1.9 MiB</td></tr><tr><td>2.8</td><td>edge</td><td><a href="./edge/ce-2.8/pfSense-pkg-pfBlockerNG-4.0.0.a21.pkg">4.0.0.a21</a></td><td><code>FreeBSD:15:*</code></td><td class="num">8.3</td><td class="num">3.11</td><td class="num">2026-08-09 16:53 UTC</td><td><span class="empty">&mdash;</span></td><td class="num">1.9 MiB</td></tr></tbody></table></div><h3>pfSense Plus</h3><div class="tablewrap"><table><thead><tr><th>pfSense</th><th>Channel</th><th>Version</th><th>ABI</th><th>PHP</th><th>Python</th><th>Published</th><th>Commit</th><th>Size</th></tr></thead><tbody><tr><td>26.07</td><td>edge</td><td><a href="./edge/plus-26.07/pfSense-pkg-pfBlockerNG-4.0.0.a21.pkg">4.0.0.a21</a></td><td><code>FreeBSD:16:*</code></td><td class="num">8.5</td><td class="num">3.11</td><td class="num">2026-08-09 16:53 UTC</td><td><span class="empty">&mdash;</span></td><td class="num">1.9 MiB</td></tr><tr><td>26.03</td><td>edge</td><td><a href="./edge/plus-26.03/pfSense-pkg-pfBlockerNG-4.0.0.a21.pkg">4.0.0.a21</a></td><td><code>FreeBSD:16:*</code></td><td class="num">8.5</td><td class="num">3.11</td><td class="num">2026-08-09 16:53 UTC</td><td><span class="empty">&mdash;</span></td><td class="num">1.9 MiB</td></tr></tbody></table></div><h2>Repository files</h2><p class="blurb">Browse every channel, version and ABI &mdash; and the raw pkg(8) catalogs your firewall fetches &mdash; in a directory-style listing.</p><p><a class="browse" href="./browse.html">&#128193; Browse the repository &rarr;</a></p><footer><a href="https://github.com/pfBlockerNG/pfBlockerNG">Source</a> &middot; <a href="https://github.com/pfBlockerNG/pfBlockerNG/releases">Releases</a> &middot; <a href="https://github.com/pfBlockerNG/pkg">This repository</a></footer></div><script>(function(){function fb(t,cb){var a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';a.style.top='-1000px';a.style.opacity='0';document.body.appendChild(a);a.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){ok=false;}document.body.removeChild(a);if(ok)cb();}function flash(b){b.textContent='Copied';b.classList.add('copied');setTimeout(function(){b.textContent='Copy';b.classList.remove('copied');},1500);}document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.copy');if(!b)return;var p=b.parentNode.querySelector('pre');if(!p)return;var t=p.textContent,done=function(){flash(b);};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done).catch(function(){fb(t,done);});}else{fb(t,done);}});})();</script></body></html>
