@@ -115,12 +115,18 @@ pfb_emit_embedded_hook() {
 # regenerator (ADR-39). Installed by install.sh.
 #
 # WHAT IT DOES (and nothing more): for each pfBlockerNG pkg-repo conf file that
-# EXISTS, it detects this box's pfSense edition/version and UNCONDITIONALLY
-# overwrites the conf with the canonical body — a fully-resolved GitHub Pages
-# catalog URL for the box's variant (ADR-17 / ADR-20) plus a marker comment.
-# No pkg call, no network fetch, no snapshot, no parse-and-compare, no
-# reconcile. It is a pure conf REGENERATOR: re-deriving the conf from scratch is
-# strictly simpler — and never wrong — than diffing and patching one in place.
+# EXISTS, it detects this box's pfSense edition/version and overwrites the conf
+# with the canonical body — a fully-resolved catalog URL for the box's variant
+# (ADR-17 / ADR-20) plus a marker comment. No pkg call, no network fetch, no
+# snapshot, no reconcile. It is a conf REGENERATOR: re-deriving the conf from
+# scratch is strictly simpler — and never wrong — than diffing and patching one
+# in place.
+#
+# The one thing it does NOT re-derive is the catalog BASE. With no environment
+# (which is every boot) the base is read back out of the conf's own url, so only
+# the <varver> moves; a fork site, a staging prefix and a `file://` guest
+# catalogue survive a reboot instead of being redirected to the primary Pages
+# site, and a url this hook could not have written is left alone (issue #2459).
 #
 # WHY AT BOOT: a pfSense OS upgrade can change the box's edition/version (which
 # requires a reboot), which moves the catalog subtree. Regenerating every boot
@@ -178,7 +184,17 @@ name="pfblockerng_repo_generate"
 : "${PFB_NIGHTLY_CONF:=/usr/local/etc/pkg/repos/pfblockerng-nightly.conf}"
 : "${PFB_PRODUCT_LABEL:=/etc/product_label}"
 : "${PFB_VERSION_FILE:=/etc/version}"
-: "${PFB_BASE_URL:=https://pfblockerng.github.io/pkg}"
+# The catalog base. NOT defaulted into PFB_BASE_URL: an explicitly exported
+# PFB_BASE_URL (install.sh, the smoke guests, a fork bootstrap) must stay
+# distinguishable from "nothing in the environment", because at boot the base
+# comes from the conf itself — see _base_from_conf() and issue #2459.
+#
+# The fallback below is reached only by a conf that carries no url line at all —
+# today only the off-box test harnesses, since install.sh always supplies a base
+# of its own. Deliberately NOT named PFB_DEFAULT_BASE_URL: gen_landing.py injects
+# a variable of that name into install.sh, and the published installer carries
+# this hook embedded in it.
+PFB_FALLBACK_BASE_URL='https://pfblockerng.github.io/pkg'
 
 CONF_PRIORITY=100
 
@@ -202,6 +218,73 @@ _detect_catalog() {
     _dc_mm="$(printf '%s' "${_dc_ver}" | cut -d- -f1 | cut -d. -f1,2)"
     [ -n "${_dc_mm}" ] || return 1
     printf '%s-%s' "${_dc_edition}" "${_dc_mm}"
+}
+
+# Recover the catalog base a conf was last generated from. $1 = conf path,
+# $2 = channel word. The canonical url is "<base>/<channel>/<varver>", so the
+# base is what is left after stripping the two trailing segments — and the
+# channel segment MUST equal this conf's own channel, which is what makes the
+# url recognisably one this hook wrote.
+#
+# WHY (issue #2459): at boot there is no environment, so composing the url from
+# a hardcoded default rewrote every conf to the primary Pages site — a fork
+# site, a staging prefix and a `file://` guest catalogue all silently became
+# https://pfblockerng.github.io/pkg, redirecting where the box fetches packages
+# from. Reading the base back out of the conf keeps the OS-upgrade job the hook
+# exists for (move the <varver>) without moving anything else.
+#
+# Prints the base on success. Returns 1 ONLY when the conf carries no url line at
+# all (an install.sh stub pending first generation — the caller falls back to the
+# built-in default); 2 whenever a url IS present but is not one this hook could
+# have written (the caller leaves the conf alone). The discriminator is the
+# presence of the url line, never whether the pattern below matched it:
+# unquoted and single-quoted strings are valid UCL an operator can hand-write,
+# and an unterminated quote is what a botched hand edit leaves behind — treating
+# any of those as a pending stub would rewrite them from the built-in default,
+# which is the redirect this whole guard exists to prevent.
+_base_from_conf() {
+    _bc_conf="$1"
+    _bc_channel="$2"
+    _bc_url="$(sed -n 's/^[[:space:]]*url:[[:space:]]*"\([^"]*\)".*/\1/p' "${_bc_conf}" 2>/dev/null | head -n 1)"
+    if [ -z "${_bc_url}" ]; then
+        # -i: a conf spelling the key `URL:` matches neither the extractor above
+        # nor a case-sensitive presence check, and taking it for a conf with no
+        # url at all would clobber it from the fallback base.
+        grep -qi '^[[:space:]]*url[[:space:]]*:' "${_bc_conf}" 2>/dev/null && return 2
+        return 1
+    fi
+    # One trailing slash is still our shape — a conf frozen as foreign over it
+    # would sit on a stale varver forever after an OS upgrade.
+    _bc_url="${_bc_url%/}"
+    _bc_head="${_bc_url%/*}"
+    [ "${_bc_head}" != "${_bc_url}" ] || return 2
+    # The trailing segment must be shaped like the varver _detect_catalog()
+    # above emits: a `ce-` or `plus-` prefix followed by major.minor. Anything
+    # looser accepts a directory the operator chose (and would then replace it),
+    # or a url carrying a query string or fragment (and would drop credentials
+    # they put there while rewriting the path). Deliberately a shape check and
+    # not an equality one — the point is to recognise OUR url, including the
+    # pre-upgrade varver we are about to move off.
+    _bc_varver="${_bc_url##*/}"
+    case "${_bc_varver}" in
+        ce-[0-9]* | plus-[0-9]*) ;;
+        *) return 2 ;;
+    esac
+    case "${_bc_varver#*-}" in
+        *[!0-9.]*) return 2 ;;
+    esac
+    [ "${_bc_head##*/}" = "${_bc_channel}" ] || return 2
+    _bc_base="${_bc_head%/*}"
+    [ "${_bc_base}" != "${_bc_head}" ] || return 2
+    # The base must carry a whole scheme separator. Without one it is either a
+    # bare scheme — what is left when the channel segment was in fact the host,
+    # e.g. "https://nightly/ce-2.7" — or a one-slash scheme, neither of which
+    # this hook emits and both of which rebuild into a malformed url.
+    case "${_bc_base}" in
+        *://*) ;;
+        *) return 2 ;;
+    esac
+    printf '%s' "${_bc_base}"
 }
 
 # Emit the canonical conf body. $1 = channel word, $2 = repo name, $3 = url.
@@ -236,12 +319,30 @@ _regen_one() {
     _ro_channel="$2"
     _ro_repo="$3"
     [ -f "${_ro_conf}" ] || return 0
+    # Base: an explicit PFB_BASE_URL wins (install.sh drives the hook with one
+    # precisely to MOVE a box onto another base); otherwise it is read back out
+    # of the conf, so a boot with no environment preserves it (issue #2459).
+    if [ -n "${PFB_BASE_URL:-}" ]; then
+        _ro_base="${PFB_BASE_URL%/}"
+    else
+        _ro_base="$(_base_from_conf "${_ro_conf}" "${_ro_channel}")"
+        _ro_rc=$?
+        if [ "${_ro_rc}" -eq 1 ]; then
+            _ro_base="${PFB_FALLBACK_BASE_URL}"
+        elif [ "${_ro_rc}" -ne 0 ]; then
+            printf '[%s] WARNING: %s carries a url this hook did not write (expected <base>/%s/<varver>) — leaving it unchanged; re-run install.sh --channel %s to re-point it\n' \
+                "${name}" "${_ro_conf}" "${_ro_channel}" "${_ro_channel}" >&2
+            return 0
+        fi
+    fi
     _ro_catalog="$(_detect_catalog)" || {
         printf '[%s] WARNING: variant detection failed — leaving %s unchanged\n' \
             "${name}" "${_ro_conf}" >&2
         return 0
     }
-    _ro_url="${PFB_BASE_URL%/}/${_ro_channel}/${_ro_catalog}"
+    # No %/ here: a base derived from the conf is already bare, except for the
+    # degenerate "file://" (a catalogue rooted at /), whose slash is load-bearing.
+    _ro_url="${_ro_base}/${_ro_channel}/${_ro_catalog}"
     if _emit_conf "${_ro_channel}" "${_ro_repo}" "${_ro_url}" > "${_ro_conf}.tmp" 2>/dev/null \
         && mv "${_ro_conf}.tmp" "${_ro_conf}" 2>/dev/null; then
         printf '[%s] INFO: regenerated %s -> %s\n' "${name}" "${_ro_conf}" "${_ro_url}" >&2
