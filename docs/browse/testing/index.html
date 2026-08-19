@@ -1,49 +1,56 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>pfBlockerNG pkg — Index of /testing</title><style>
-:root{--bg:#0d1117;--card:#161b22;--bd:#30363d;--fg:#e6edf3;--mut:#8b949e;--acc:#2f81f7;--warn:#d29922;--edge:#a371f7;--red:#f85149;--code:#0b0f14}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:980px;margin:0 auto;padding:2rem 1.25rem 4rem}
-header h1{margin:0 0 .25rem;font-size:2rem}
-header p{margin:0;color:var(--mut)}
-h2{margin:2.5rem 0 1rem;font-size:1.3rem;border-bottom:1px solid var(--bd);padding-bottom:.4rem}
-h3{margin:1.6rem 0 .5rem;font-size:1.05rem}
-h4{margin:1.2rem 0 .4rem;font-size:.95rem;color:var(--mut)}
-.cards{display:grid;gap:1rem;grid-template-columns:minmax(0,1fr)}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:1rem 1.1rem}
-.card h3{margin:0 0 .15rem;font-size:1.1rem}
-.card .ver{color:var(--mut);font-size:.9rem;margin:0 0 .6rem}
-.card .blurb{color:var(--mut);font-size:.92rem;margin:.15rem 0 .8rem}
-pre{background:var(--code);border:1px solid var(--bd);border-radius:8px;padding:.7rem .8rem;overflow:auto;
-  font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
-code{font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  background:#1f2630;padding:.1em .35em;border-radius:5px}
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#151518"><title>pfBlockerNG pkg — Index of /testing</title><link rel="icon" href="https://pfblockerng.com/assets/logo.svg" type="image/svg+xml"><link rel="stylesheet" href="https://pfblockerng.com/assets/site.css"><style>
+:root{--stable:#2f81f7;--testing:#d29922;--edge:#a371f7;--nightly:#f85149}
+.header-nav a[aria-current="page"]{color:var(--accent)}
+.pkg-shell{max-width:1200px;margin:0 auto;padding:0 clamp(1rem,4vw,3rem) 6rem}
+.pkg-hero{padding:clamp(3.5rem,8vw,6.5rem) 0 clamp(2.5rem,5vw,4rem);border-bottom:1px solid var(--line)}
+.pkg-hero h1{max-width:900px;margin:0;font-size:clamp(2.8rem,7vw,6rem);font-weight:690;
+  letter-spacing:-.055em;line-height:1}
+.pkg-hero .hero-lede{max-width:720px;margin:1.35rem 0 0;color:var(--muted);font-size:clamp(1.05rem,1.5vw,1.25rem)}
+.pkg-section{padding-top:clamp(2.8rem,6vw,5rem)}
+.pkg-section>h2{margin:0 0 1.6rem;font-size:clamp(1.9rem,4vw,3.2rem);letter-spacing:-.04em;line-height:1.05}
+.pkg-section h3{margin:2rem 0 .6rem;font-size:1.25rem}
+.pkg-section h4{margin:1.4rem 0 .45rem;color:var(--muted);font-size:.82rem;letter-spacing:.1em;text-transform:uppercase}
+.cards{display:grid;gap:1rem;grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{--channel:var(--line);min-width:0;padding:clamp(1.25rem,3vw,2rem);border:1px solid var(--line);
+  border-top:4px solid var(--channel);border-radius:var(--radius);background:var(--bg-elevated);
+  box-shadow:0 1px 0 rgb(255 255 255 / 70%) inset}
+.card h3{margin:0 0 .15rem;color:var(--ink);font-size:1.4rem;letter-spacing:-.025em}
+.card .ver{margin:0 0 .75rem;color:var(--muted);font-size:.9rem}
+.card .blurb,.blurb{color:var(--muted);font-size:.94rem}
+.card .blurb{margin:.2rem 0 .9rem}
+pre{border:1px solid var(--line);font-size:13px;line-height:1.5}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
 .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--bd);white-space:nowrap}
-th{color:var(--mut);font-weight:600}
-td.num{font-variant-numeric:tabular-nums;color:var(--mut)}
+th,td{text-align:left;padding:.65rem .75rem;border-bottom:1px solid var(--line);white-space:nowrap}
+th{background:var(--bg-elevated);color:var(--muted);font-weight:720}
+td.num{color:var(--muted);font-variant-numeric:tabular-nums}
 .badge{display:inline-block;font-size:.72rem;padding:.05rem .45rem;border-radius:20px;
-  border:1px solid var(--bd);color:var(--mut)}
-details summary{cursor:pointer;color:var(--mut);font-size:.85rem;margin-top:.5rem}
-a.browse{display:inline-block;padding:.5rem .9rem;border:1px solid var(--acc);border-radius:8px;font-weight:600}
+  border:1px solid;border-color:var(--channel);color:var(--ink)}
+details summary{margin-top:.6rem;color:var(--muted);font-size:.87rem;cursor:pointer}
+a.browse{display:inline-flex;align-items:center;min-height:46px;padding:.65rem 1rem;border:1px solid var(--ink);
+  border-radius:999px;font-weight:740;text-decoration:none}
+a.browse:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
 table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
 table.autoindex td.num{white-space:nowrap}
-footer{margin-top:3rem;color:var(--mut);font-size:.85rem;border-top:1px solid var(--bd);padding-top:1rem}
-.empty{color:var(--mut);font-style:italic}
-.card.stable{border-color:var(--acc)}
-.card.testing{border-color:var(--warn)}
-.card.edge{border-color:var(--edge)}
-.card.nightly{border-color:var(--red)}
-.card.nightly .badge{border-color:var(--red);color:var(--red)}
-.warn{color:var(--warn)}
+.listing-page .pkg-shell{min-height:calc(100vh - 68px)}
+.listing-hero{padding-bottom:2rem}
+.listing-hero h1{font-size:clamp(2.4rem,6vw,4.8rem)}
+.listing-hero p,.listing-note{color:var(--muted)}
+.listing-note{margin-top:2rem;font-size:.88rem}
+.empty{color:var(--muted);font-style:italic}
+.card.stable{--channel:var(--stable)}
+.card.testing{--channel:var(--testing)}
+.card.edge{--channel:var(--edge)}
+.card.nightly{--channel:var(--nightly)}
+.warn{color:var(--ink);font-weight:700}
 .snip{position:relative}
 .snip>pre{padding-right:3.6rem}
 .copy{position:absolute;top:.45rem;right:.45rem;z-index:1;
   font:600 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  color:var(--mut);background:#1f2630;border:1px solid var(--bd);border-radius:6px;
+  color:#d2ccc7;background:#201f23;border:1px solid #575159;border-radius:6px;
   padding:.3rem .5rem;cursor:pointer}
-.copy:hover{color:var(--fg);border-color:var(--acc)}
-.copy.copied{color:#3fb950;border-color:#3fb950}
-</style></head><body><div class="wrap"><header><h1>Index of /testing</h1><p><a href="../../">&larr; pfBlockerNG repository home</a></p></header><div class="tablewrap"><table class="autoindex"><thead><tr><th>Name</th><th>Last modified</th><th>Size</th></tr></thead><tbody><tr><td><a href="../../browse.html">../</a></td><td class="num">&mdash;</td><td class="num">Parent Directory</td></tr><tr><td><a href="./ce-2.8/">ce-2.8/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./ce-2.9/">ce-2.9/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./plus-26.03/">plus-26.03/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./plus-26.07/">plus-26.07/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr></tbody></table></div><footer>Directory listing of the self-hosted pfBlockerNG pkg repository. pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</footer></div></body></html>
+.copy:hover{color:white;border-color:white}
+.copy.copied{color:#56d364;border-color:#56d364}
+@media(max-width:820px){.cards{grid-template-columns:1fr}.pkg-shell{padding-bottom:4rem}}
+@media(prefers-color-scheme:dark){.card{background:rgb(27 26 30 / 72%);box-shadow:none}}
+</style></head><body class="listing-page"><a class="skip-link" href="#main-content">Skip to content</a><header class="site-header"><a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home"><img src="https://pfblockerng.com/assets/logo.svg" alt="" width="34" height="34"><span>pfBlockerNG</span></a><nav class="header-nav" aria-label="Primary"><a href="https://pfblockerng.com/guide/introduction/">Documentation</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a><a href="https://github.com/pfBlockerNG">Organization</a></nav><details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary><nav aria-label="Mobile"><a href="https://pfblockerng.com/guide/introduction/">Documentation</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a><a href="https://github.com/pfBlockerNG">Organization</a></nav></details></header><main id="main-content" class="pkg-shell"><section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p><h1>Index of /testing</h1><p><a href="../../">&larr; pfBlockerNG repository home</a></p></section><section class="pkg-section"><div class="tablewrap"><table class="autoindex"><thead><tr><th>Name</th><th>Last modified</th><th>Size</th></tr></thead><tbody><tr><td><a href="../../browse.html">../</a></td><td class="num">&mdash;</td><td class="num">Parent Directory</td></tr><tr><td><a href="./ce-2.8/">ce-2.8/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./ce-2.9/">ce-2.9/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./plus-26.03/">plus-26.03/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr><tr><td><a href="./plus-26.07/">plus-26.07/</a></td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr></tbody></table></div><p class="listing-note">Directory listing of the self-hosted pfBlockerNG pkg repository. pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p></section></main><footer class="site-footer"><div><strong>pfBlockerNG</strong><span>IP and DNS blocking for pfSense</span></div><nav aria-label="Footer"><a href="https://www.reddit.com/r/pfBlockerNG/">Community</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">Repository</a><a href="https://github.com/pfBlockerNG/pfBlockerNG/releases">Releases</a><a href="https://github.com/pfBlockerNG/pfBlockerNG/blob/devel/LICENSE">Apache 2.0</a></nav></footer></body></html>
