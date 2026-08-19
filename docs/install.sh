@@ -21,12 +21,12 @@
 #   install.sh -h|--help                                  this text
 #
 # Published at ${PFB_BASE_URL}/install.sh; run ON the box:
-#   fetch -qo - https://pfblockerng.github.io/pkg/install.sh | sh -s -- --channel stable
+#   fetch -qo - https://pkg.pfblockerng.com/install.sh | sh -s -- --channel stable
 #
 # Env (all overridable; forks/staging/tests set these):
 #   PKG_BIN           pkg(8) binary path (default: /usr/local/sbin/pkg)
 #   PFBLOCKERNG_ROOT  filesystem root prefix (default: /)
-#   PFB_BASE_URL      catalog base (default: https://pfblockerng.github.io/pkg)
+#   PFB_BASE_URL      catalog base (default: https://pkg.pfblockerng.com)
 #   PFB_SSL_CA_CERT_PATH  CA hash dir exported to pkg (default: <root>/etc/ssl/certs)
 #   PFB_SSL_CA_CERT_FILE  CA bundle exported to pkg (default: <root>/etc/ssl/cert.pem)
 #                         Each half is guarded independently and exported on its own: the
@@ -47,7 +47,7 @@ HOOK_SRC="${SCRIPT_DIR}/rc.d/pfblockerng_repo_generate.sh"
 PKG_BIN="${PKG_BIN:-/usr/local/sbin/pkg}"
 PFBLOCKERNG_ROOT="${PFBLOCKERNG_ROOT:-/}"
 ROOT="${PFBLOCKERNG_ROOT%/}"
-PFB_DEFAULT_BASE_URL='https://pfblockerng.github.io/pkg'
+PFB_DEFAULT_BASE_URL='https://pkg.pfblockerng.com'
 PFB_BASE_URL="${PFB_BASE_URL:-${PFB_DEFAULT_BASE_URL}}"
 
 CANONICAL_PKG="pfSense-pkg-pfBlockerNG"
@@ -109,6 +109,28 @@ PFB_SSL_CA_CERT_FILE="${PFB_SSL_CA_CERT_FILE-${ROOT}/etc/ssl/cert.pem}"
 # Spelled out per combination so every path stays quoted: a single accumulated string
 # would have to be word-split to become separate env(1) operands, which breaks the moment
 # a location contains a space.
+# TRUE when the hash directory holds at least one entry. FreeBSD ships /etc/ssl/certs
+# EMPTY until `certctl rehash` populates it, and libfetch abandons
+# SSL_CTX_set_default_verify_paths() as soon as EITHER variable is set -- so exporting an
+# empty hash dir with no bundle beside it leaves an EMPTY store, strictly worse than
+# exporting nothing (issue #2524). Mirrors pfb_pkgconf_dir_populated() (pfblockerng.inc)
+# and the boot hook's glob loop: any non-dot entry counts, including a dangling symlink,
+# which is what a hash dir is made of.
+_ca_path_populated() {
+    [ -d "$1" ] || return 1
+    _cap_has_entry=0
+    for _cap_entry in "$1"/*; do
+        if [ -e "${_cap_entry}" ] || [ -L "${_cap_entry}" ]; then
+            _cap_has_entry=1
+            break
+        fi
+    done
+    unset _cap_entry
+    [ "${_cap_has_entry}" -eq 1 ] || { unset _cap_has_entry; return 1; }
+    unset _cap_has_entry
+    return 0
+}
+
 _pkg() {
     if [ -d "${PFB_SSL_CA_CERT_PATH}" ] &&
         [ -f "${PFB_SSL_CA_CERT_FILE}" ] && [ -s "${PFB_SSL_CA_CERT_FILE}" ]; then
@@ -116,7 +138,7 @@ _pkg() {
             SSL_CA_CERT_PATH="${PFB_SSL_CA_CERT_PATH}" \
             SSL_CA_CERT_FILE="${PFB_SSL_CA_CERT_FILE}" \
             "${PKG_BIN}" "$@" </dev/null
-    elif [ -d "${PFB_SSL_CA_CERT_PATH}" ]; then
+    elif _ca_path_populated "${PFB_SSL_CA_CERT_PATH}"; then
         env ASSUME_ALWAYS_YES=yes \
             SSL_CA_CERT_PATH="${PFB_SSL_CA_CERT_PATH}" \
             "${PKG_BIN}" "$@" </dev/null
@@ -272,7 +294,7 @@ name="pfblockerng_repo_generate"
 # of its own. Deliberately NOT named PFB_DEFAULT_BASE_URL: gen_landing.py injects
 # a variable of that name into install.sh, and the published installer carries
 # this hook embedded in it.
-PFB_FALLBACK_BASE_URL='https://pfblockerng.github.io/pkg'
+PFB_FALLBACK_BASE_URL='https://pkg.pfblockerng.com'
 
 CONF_PRIORITY=100
 
@@ -307,7 +329,7 @@ _detect_catalog() {
 # WHY (issue #2459): at boot there is no environment, so composing the url from
 # a hardcoded default rewrote every conf to the primary Pages site — a fork
 # site, a staging prefix and a `file://` guest catalogue all silently became
-# https://pfblockerng.github.io/pkg, redirecting where the box fetches packages
+# https://pkg.pfblockerng.com, redirecting where the box fetches packages
 # from. Reading the base back out of the conf keeps the OS-upgrade job the hook
 # exists for (move the <varver>) without moving anything else.
 #
