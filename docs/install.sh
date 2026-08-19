@@ -29,8 +29,10 @@
 #   PFB_BASE_URL      catalog base (default: https://pfblockerng.github.io/pkg)
 #   PFB_SSL_CA_CERT_PATH  CA hash dir exported to pkg (default: <root>/etc/ssl/certs)
 #   PFB_SSL_CA_CERT_FILE  CA bundle exported to pkg (default: <root>/etc/ssl/cert.pem)
-#                         Exported only when the path is a directory and the bundle is a
-#                         non-empty regular file; set either to "" to opt that half out.
+#                         Each half is guarded independently and exported on its own: the
+#                         path when it is a directory, the bundle when it is a non-empty
+#                         regular file. A box failing one guard still gets the other. Set
+#                         either to "" to opt that half out.
 #
 # Exit codes: see usage() below (kept in sync — the header is the interface doc).
 
@@ -165,15 +167,16 @@ pfb_emit_embedded_hook() {
     cat <<'PFB_HOOK_HEREDOC'
 #!/bin/sh
 # /usr/local/etc/rc.d/pfblockerng_repo_generate.sh — boot-time repo-conf
-# regenerator (ADR-39). Installed by install.sh.
+# regenerator (ADR-39) AND consented pkg.conf CA re-applier (issue #2518).
+# Installed by install.sh.
 #
-# WHAT IT DOES (and nothing more): for each pfBlockerNG pkg-repo conf file that
-# EXISTS, it detects this box's pfSense edition/version and overwrites the conf
-# with the canonical body — a fully-resolved catalog URL for the box's variant
-# (ADR-17 / ADR-20) plus a marker comment. No pkg call, no network fetch, no
-# snapshot, no reconcile. It is a conf REGENERATOR: re-deriving the conf from
-# scratch is strictly simpler — and never wrong — than diffing and patching one
-# in place.
+# JOB 1 — WHAT IT DOES (and nothing more): for each pfBlockerNG pkg-repo conf
+# file that EXISTS, it detects this box's pfSense edition/version and
+# overwrites the conf with the canonical body — a fully-resolved catalog URL
+# for the box's variant (ADR-17 / ADR-20) plus a marker comment. No pkg call,
+# no network fetch, no snapshot, no reconcile. It is a conf REGENERATOR:
+# re-deriving the conf from scratch is strictly simpler — and never wrong —
+# than diffing and patching one in place.
 #
 # The one thing it does NOT re-derive is the catalog BASE. With no environment
 # (which is every boot) the base is read back out of the conf's own url, so only
@@ -181,9 +184,22 @@ pfb_emit_embedded_hook() {
 # catalogue survive a reboot instead of being redirected to the primary Pages
 # site, and a url this hook could not have written is left alone (issue #2459).
 #
+# JOB 2 — consented pkg.conf CA re-apply (issue #2518): on Plus,
+# pfSense-repo-setup deletes and regenerates /usr/local/etc/pkg.conf on
+# upgrades and branch switches, appending a PKG_ENV block that pins
+# SSL_CA_CERT_FILE to a Netgate-only bundle. libpkg applies that block with
+# setenv(key, value, 1), so only an added SSL_CA_CERT_PATH line — which
+# PKG_ENV never sets — survives it and restores the public roots third-party
+# repos need. Because the wipe can happen at any OS upgrade or branch switch,
+# and boot follows both, this hook re-applies that one line every boot when
+# the admin has consented (config field, checked live — never cached). See
+# _pkgconf_ca_reapply() below; this job is UNLIKE job 1 in every other way —
+# patch-in-place, not regenerate, and consent-gated rather than unconditional.
+#
 # WHY AT BOOT: a pfSense OS upgrade can change the box's edition/version (which
-# requires a reboot), which moves the catalog subtree. Regenerating every boot
-# keeps the conf aligned with no upgrade hook to register.
+# requires a reboot), which moves the catalog subtree, and can also wipe
+# pkg.conf via pfSense-repo-setup. Regenerating/re-applying every boot keeps
+# both aligned with no upgrade hook to register.
 #
 # rc.d ordering: REQUIRE FILESYSTEMS (so /usr/local is mounted) and
 # BEFORE NETWORKING (so the conf is correct before anything that could invoke
@@ -237,6 +253,15 @@ name="pfblockerng_repo_generate"
 : "${PFB_NIGHTLY_CONF:=/usr/local/etc/pkg/repos/pfblockerng-nightly.conf}"
 : "${PFB_PRODUCT_LABEL:=/etc/product_label}"
 : "${PFB_VERSION_FILE:=/etc/version}"
+
+# JOB 2 paths (issue #2518) — see _pkgconf_ca_reapply().
+: "${PFB_PKG_CONF:=/usr/local/etc/pkg.conf}"
+: "${PFB_CONFIG_XML:=/cf/conf/config.xml}"
+: "${PFB_SSL_CA_CERT_PATH:=/etc/ssl/certs}"
+: "${PFB_PKG_DIRTY:=/var/run/pkg.dirty}"
+: "${PFB_LOCKF:=/usr/bin/lockf}"
+: "${PFB_UPGRADE_LOCK:=/tmp/pfSense-upgrade.lock}"
+
 # The catalog base. NOT defaulted into PFB_BASE_URL: an explicitly exported
 # PFB_BASE_URL (install.sh, the smoke guests, a fork bootstrap) must stay
 # distinguishable from "nothing in the environment", because at boot the base
@@ -405,6 +430,242 @@ _regen_one() {
     fi
 }
 
+# JOB 2 (issue #2518): re-apply the consented SSL_CA_CERT_PATH line to pkg.conf
+# after pfSense-repo-setup wipes it. Every guard below fails CLOSED and quiet —
+# this runs at boot for the overwhelmingly common CE case, where none of it
+# applies, so a miss must never print or wedge boot. Never reverts: consent-off
+# simply skips the patch, and pfSense-repo-setup's own rewrite drops a
+# previously-applied line anyway — revocation is handled synchronously by the
+# PHP side, not by this hook running backwards.
+_pkgconf_ca_reapply() {
+    [ "${PFB_UPGRADE_LOCK_HELD:-1}" = 1 ] || return 0
+    grep -q 'Plus' "${PFB_PRODUCT_LABEL}" 2>/dev/null || return 0
+    [ -e "${PFB_PKG_DIRTY}" ] && return 0
+    # Consent gate, fail-closed. pfb_pkg_ca_consent is a registered config field
+    # read on the PHP side at installedpackages/pfblockerng/config/0 --
+    # PfbConfig::read('gen/pfb_pkg_ca_consent') -- meaning the element must be a
+    # DIRECT CHILD of the FIRST <config> block under the single <pfblockerng>
+    # section (config/0): never nested under a <row> or any other wrapper, and
+    # never a later <config> row. <config> is NOT unique tree-wide (every
+    # installed package gets one under <installedpackages>), so a whole-file
+    # grep for the element can key on the WRONG <config> block and disagree
+    # with the PHP side about whether the admin consented.
+    #
+    # Scoped instead: take the FIRST <pfblockerng>...</pfblockerng> range, then
+    # within it the FIRST <config>...</config> block -- that is exactly
+    # config/0 -- then require the element AT DEPTH 1 of that block (a running
+    # open/close-tag count, not just "present somewhere inside"), on a line BY
+    # ITSELF (full-line match; the value compares case-insensitively --
+    # PfbToggle::fromLegacy() also accepts On/ON). Every opening line ALSO
+    # checks for its OWN closing tag before advancing the scope -- a self-closed
+    # `<pfblockerng></pfblockerng>` / `<config></config>`, or a whole element on
+    # one line, closes on the SAME line it opens. Earlier revisions of this awk
+    # used `next` before that same-line check and LATCHED the scope open to
+    # EOF, which is what let a same-named sibling field, a second <config> row,
+    # or a nested <row> wrapper read as consent when PfbConfig disagreed
+    # (issue #2518 B2).
+    #
+    # What this guarantees: config/0's own direct-child element, and only that
+    # element, ever supplies "on" -- a sibling package's field, a later
+    # <config> row, and a <row>-nested (or any deeper-nested) copy are all
+    # refused. What it does NOT guarantee: a literal "<pfblockerng>" (or
+    # "<config>") substring belonging to a DIFFERENT, EARLIER package in the
+    # document exhausts the "first occurrence" search this hook does
+    # (seen_pb/seen_cfg never re-arm), so a decoy ahead of the real block can
+    # cause a FALSE NEGATIVE -- never a false positive -- and the cron tick
+    # still re-applies on that box; pfSense's own config writer never emits
+    # such a decoy or reorders sections, so this is a defensive bound, not an
+    # expected case. Nor is it sound against an XML attribute on the
+    # <pfblockerng> open tag, a CDATA-wrapped value, or the whole element
+    # collapsed onto one line (PfbConfig reads all three as consent, this hook
+    # matches none of them) -- tracking any of those in POSIX sh is
+    # disproportionate to the risk, and pfSense's own config writer emits none
+    # of them (verified against a live config.xml); each is a bounded,
+    # documented miss (boot skip only -- the cron tick still re-applies),
+    # pinned by its own spec row. Also NOT sound against a MULTI-LINE XML
+    # comment that happens to wrap the element inside config/0 -- tracking
+    # multi-line comment state in POSIX sh is disproportionate to that risk
+    # too, and pfSense's own config writer emits no XML comments at all.
+    _pcr_consent="$(awk '
+            !seen_pb && /<pfblockerng>/ {
+                in_pb = 1; seen_pb = 1
+                if ($0 ~ /<\/pfblockerng>/) { in_pb = 0 }
+                next
+            }
+            in_pb && /<\/pfblockerng>/ { in_pb = 0; next }
+            in_pb && !seen_cfg && /<config>/ {
+                in_cfg = 1; seen_cfg = 1; cfg_depth = 0
+                if ($0 ~ /<\/config>/) { in_cfg = 0 }
+                next
+            }
+            in_cfg && /<\/config>/ { in_cfg = 0; next }
+            in_cfg {
+                if (cfg_depth == 0 && /^[[:space:]]*<pfb_pkg_ca_consent>[Oo][Nn]<\/pfb_pkg_ca_consent>[[:space:]]*$/) {
+                    print "on"; exit
+                }
+                _line = $0
+                _self_closing = gsub(/<[A-Za-z_][A-Za-z0-9_.:-]*[[:space:]][^<>]*\/>/, "&", _line)
+                _line = $0
+                _opens = gsub(/<[A-Za-z_][A-Za-z0-9_.:-]*([[:space:]][^<>]*)?>/, "&", _line)
+                _line = $0
+                _closes = gsub(/<\/[A-Za-z_][A-Za-z0-9_.:-]*[[:space:]]*>/, "&", _line)
+                cfg_depth += (_opens - _closes - _self_closing)
+                if (cfg_depth < 0) { cfg_depth = 0 }
+            }
+        ' "${PFB_CONFIG_XML}" 2>/dev/null)"
+    [ "${_pcr_consent}" = 'on' ] || { unset _pcr_consent; return 0; }
+    unset _pcr_consent
+
+    # -h before -f: a symlink also passes -f, and the tmp+mv patch below would
+    # replace the LINK's identity rather than editing through it to its target.
+    [ -h "${PFB_PKG_CONF}" ] && return 0
+    [ -f "${PFB_PKG_CONF}" ] || return 0
+
+    # FreeBSD ships /etc/ssl/certs empty until `certctl rehash` populates it;
+    # exporting an empty hash dir to pkg LOOKS fixed but verifies nothing, so
+    # refuse rather than patch a file that only appears to work. Glob-based
+    # (no `ls | wc -l`): with no match dash leaves the pattern word literal, so
+    # -e/-L on it is false and the loop body never sets the flag. A bare `*`
+    # glob under POSIX never matches a dotfile, which matches the PHP side
+    # exactly: pfb_pkgconf_dir_populated() counts only non-dot scandir()
+    # entries (issue #2518 nitpick N-dotfile-guard), so a directory holding
+    # e.g. only ".DS_Store" is NOT populated on either side -- no patch,
+    # matching the PHP read.
+    [ -d "${PFB_SSL_CA_CERT_PATH}" ] || return 0
+    _pcr_has_entry=0
+    for _pcr_entry in "${PFB_SSL_CA_CERT_PATH}"/*; do
+        if [ -e "${_pcr_entry}" ] || [ -L "${_pcr_entry}" ]; then
+            _pcr_has_entry=1
+            break
+        fi
+    done
+    unset _pcr_entry
+    [ "${_pcr_has_entry}" -eq 1 ] || { unset _pcr_has_entry; return 0; }
+    unset _pcr_has_entry
+
+    # CA-path character whitelist, mirroring PHP's pfb_pkgconf_ca_add() guard
+    # `^/[A-Za-z0-9._/+-]+$` exactly (including that a bare "/" is refused: it
+    # has nothing after the leading slash). A '#' landing inside the PKG_ENV
+    # block would make libucl treat the rest of the line as a comment and
+    # silently truncate the CA path; a space or quote corrupts the block --
+    # refuse rather than write either. `/?*` requires the leading slash plus
+    # at least one more character (rejects the bare-slash case); the second
+    # case matches any string containing a character outside the whitelist
+    # (the idiom this file already uses at the varver check above).
+    case "${PFB_SSL_CA_CERT_PATH}" in
+        /?*) ;;
+        *) return 0 ;;
+    esac
+    case "${PFB_SSL_CA_CERT_PATH}" in
+        *[!A-Za-z0-9._/+-]*) return 0 ;;
+    esac
+
+    # Shape guard: refuse anything but exactly what pfSense-repo-setup writes.
+    # Never touch a file already patched (SSL_CA_CERT_PATH present anywhere) or
+    # hand-edited into an unrecognised shape — each check below is one clause
+    # of that shape, checked independently so a near-miss is still refused.
+    grep -q 'SSL_CA_CERT_PATH' "${PFB_PKG_CONF}" 2>/dev/null && return 0
+    # grep -c on an unreadable file prints nothing to stdout and exits nonzero;
+    # an unguarded `[ "$_pcr_open_count" -eq 1 ]` then errors with a literal
+    # "Illegal number:" on stderr, contradicting this file's own "never print"
+    # intent (issue #2518 nitpick N-illegal-number) -- `|| _pcr_open_count=0`
+    # defaults it on ANY grep failure (unreadable file or a genuine zero
+    # matches; either way the -eq 1 check below correctly refuses).
+    _pcr_open_count="$(grep -c '^PKG_ENV {$' "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_open_count=0
+    [ "${_pcr_open_count:-0}" -eq 1 ] || { unset _pcr_open_count; return 0; }
+    unset _pcr_open_count
+    # The block: from the (unique) opener to the first column-0 `}` after it.
+    # If no such `}` exists this range runs to EOF and its last line is not
+    # `}` — the "later line equal to `}`" check that catches an unclosed block.
+    _pcr_block="$(sed -n '/^PKG_ENV {$/,/^}$/p' "${PFB_PKG_CONF}" 2>/dev/null)"
+    [ "$(printf '%s\n' "${_pcr_block}" | tail -n 1)" = '}' ] || { unset _pcr_block; return 0; }
+    _pcr_ca_file="$(printf '%s\n' "${_pcr_block}" | sed -n 's/^	SSL_CA_CERT_FILE=//p')"
+    [ "$(printf '%s\n' "${_pcr_ca_file}" | wc -l | tr -d ' ')" -eq 1 ] \
+        || { unset _pcr_block _pcr_ca_file; return 0; }
+    case "${_pcr_ca_file}" in
+        /?*) ;;
+        *) unset _pcr_block _pcr_ca_file; return 0 ;;
+    esac
+    case "${_pcr_ca_file}" in
+        *[!A-Za-z0-9._/+-]*) unset _pcr_block _pcr_ca_file; return 0 ;;
+    esac
+    [ -f "${_pcr_ca_file}" ] && [ -r "${_pcr_ca_file}" ] && [ -s "${_pcr_ca_file}" ] \
+        || { unset _pcr_block _pcr_ca_file; return 0; }
+    unset _pcr_ca_file
+    # Refuse a block whose "close" is really a NESTED sub-object's own `}`
+    # (issue #2518 nitpick N-nested-brace): the sed range above stops at the
+    # FIRST column-0 `}` after the opener, same as the insertion awk below --
+    # so a `SOMETHING {` sub-block occurring before the true close makes that
+    # `}` look like PKG_ENV's own, and the line below would be inserted INSIDE
+    # the sub-object instead (looks patched, verifies nothing: libpkg would set
+    # the key on the sub-object, not PKG_ENV). Rule: strip the block's own
+    # opening and closing lines; the remaining lines must be brace-BALANCED (as
+    # many "...{"-opening lines as bare "}" lines) -- a nested open with no
+    # matching nested close inside that middle means the "close" found above is
+    # not PKG_ENV's own.
+    _pcr_mid="$(printf '%s\n' "${_pcr_block}" | sed '1d;$d')"
+    _pcr_mid_opens="$(printf '%s\n' "${_pcr_mid}" | grep -c '{$' 2>/dev/null)" || _pcr_mid_opens=0
+    _pcr_mid_closes="$(printf '%s\n' "${_pcr_mid}" | grep -cx '}' 2>/dev/null)" || _pcr_mid_closes=0
+    if [ "${_pcr_mid_opens:-0}" -ne "${_pcr_mid_closes:-0}" ]; then
+        unset _pcr_block _pcr_mid _pcr_mid_opens _pcr_mid_closes
+        return 0
+    fi
+    unset _pcr_block _pcr_mid _pcr_mid_opens _pcr_mid_closes
+
+    # Patch: insert the one line immediately before the block's closing `}`,
+    # nothing else touched. tmp+mv mirrors _regen_one()'s idiom, with two extra
+    # steps the PHP appender already gets for free (issue #2518 nitpicks
+    # N-mode / N-trailing-newline):
+    #   - `cp -p` seeds the temp with the ORIGINAL file's permission bits
+    #     before the `>` redirect below truncates it -- truncation keeps the
+    #     inode (and its mode); a fresh `>` on a name that did not exist would
+    #     not, which is why the patched file used to land at the process
+    #     umask instead of pkg.conf's own mode (PHP's fileperms()+chmod()
+    #     already preserves this).
+    #   - awk's `print` always terminates its last output line, which would
+    #     otherwise turn a pkg.conf whose last byte is `}` (no trailing
+    #     newline) into one that has one; the tail-c1 check + reprint below
+    #     restores that exact newline-less state when the original had it
+    #     (PHP round-trips the input bytes exactly; see
+    #     testAddPatchesWhenFinalBraceHasNoTrailingNewline).
+    _pcr_original_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" \
+        || { unset _pcr_original_sum; return 0; }
+    _pcr_tmp="${PFB_PKG_CONF}.tmp"
+    _pcr_had_no_trailing_nl=0
+    [ -n "$(tail -c1 "${PFB_PKG_CONF}" 2>/dev/null)" ] && _pcr_had_no_trailing_nl=1
+    if cp -p "${PFB_PKG_CONF}" "${_pcr_tmp}" 2>/dev/null \
+        && awk -v ins="	SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}" '
+            $0 == "PKG_ENV {" { seen_open = 1 }
+            seen_open && !done && $0 == "}" { print ins; done = 1 }
+            { print }
+        ' "${PFB_PKG_CONF}" > "${_pcr_tmp}" 2>/dev/null; then
+        if [ "${_pcr_had_no_trailing_nl}" -eq 1 ]; then
+            printf '%s' "$(cat "${_pcr_tmp}" 2>/dev/null)" > "${_pcr_tmp}" 2>/dev/null
+        fi
+        if [ -e "${PFB_PKG_DIRTY}" ]; then
+            _pcr_live_sum=''
+        else
+            _pcr_live_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_live_sum=''
+        fi
+        if [ -z "${_pcr_live_sum}" ] || [ "${_pcr_live_sum}" != "${_pcr_original_sum}" ]; then
+            rm -f "${_pcr_tmp}" 2>/dev/null
+            unset _pcr_tmp _pcr_had_no_trailing_nl _pcr_original_sum _pcr_live_sum
+            return 0
+        fi
+        if mv "${_pcr_tmp}" "${PFB_PKG_CONF}" 2>/dev/null; then
+            printf '[%s] INFO: patched %s with the consented SSL_CA_CERT_PATH\n' "${name}" "${PFB_PKG_CONF}" >&2
+        else
+            rm -f "${_pcr_tmp}" 2>/dev/null
+            printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_PKG_CONF}" >&2
+        fi
+    else
+        rm -f "${_pcr_tmp}" 2>/dev/null
+        printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_PKG_CONF}" >&2
+    fi
+    unset _pcr_tmp _pcr_had_no_trailing_nl _pcr_original_sum _pcr_live_sum
+    return 0
+}
+
 # Regenerate each channel's conf independently (channel keyed by conf path). Only
 # the channel(s) the box actually subscribed to are touched — _regen_one()'s
 # orphan guard skips every absent conf, so a box on one channel stays on that one
@@ -414,8 +675,21 @@ pfblockerng_repo_generate_start() {
     _regen_one "${PFB_TESTING_CONF}" 'testing' 'pfblockerng-testing'
     _regen_one "${PFB_EDGE_CONF}"    'edge'    'pfblockerng-edge'
     _regen_one "${PFB_NIGHTLY_CONF}" 'nightly' 'pfblockerng-nightly'
+    _pkgconf_ca_reapply
     return 0
 }
+
+# pfSense-upgrade holds this same lock while pfSense-repo-setup rewrites pkg.conf.
+# Re-exec keeps verification and replacement inside one supported-writer critical section.
+if [ "${PFB_UPGRADE_LOCK_HELD:-}" != 1 ] && [ -x "${PFB_LOCKF}" ]; then
+    PFB_UPGRADE_LOCK_HELD=1
+    export PFB_UPGRADE_LOCK_HELD
+    if "${PFB_LOCKF}" -s -t 0 "${PFB_UPGRADE_LOCK}" /bin/sh "$0" "$@"; then
+        exit 0
+    fi
+    PFB_UPGRADE_LOCK_HELD=0
+    export PFB_UPGRADE_LOCK_HELD
+fi
 
 # Run as an rc.d service when rc.subr is present (the pfSense box); otherwise run
 # the regeneration directly (off-box: install.sh's bootstrap + the shellspec
