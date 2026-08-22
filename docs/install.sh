@@ -33,6 +33,12 @@
 #                         path when it is a directory, the bundle when it is a non-empty
 #                         regular file. A box failing one guard still gets the other. Set
 #                         either to "" to opt that half out.
+#   PFB_WEBGUI_RESTART    webConfigurator restart script (default: /etc/rc.restart_webgui),
+#                         run once when this install run just changed login.conf (issue
+#                         #2623); a missing/non-executable path is a silent skip (no-op
+#                         off-box), and setting it to the empty string opts out (`-`, not
+#                         `:-`, like the CA knobs). Never runs on an idempotent re-run or
+#                         an upgrade — those never touch login.conf again.
 #
 # Exit codes: see usage() below (kept in sync — the header is the interface doc).
 
@@ -106,6 +112,10 @@ die() {
 PFB_SSL_CA_CERT_PATH="${PFB_SSL_CA_CERT_PATH-${ROOT}/etc/ssl/certs}"
 PFB_SSL_CA_CERT_FILE="${PFB_SSL_CA_CERT_FILE-${ROOT}/etc/ssl/cert.pem}"
 
+# webConfigurator restart knob (issue #2623) -- semantics in the header above; the
+# change-gate lives at the hook invocation below.
+PFB_WEBGUI_RESTART="${PFB_WEBGUI_RESTART-${ROOT}/etc/rc.restart_webgui}"
+
 # Spelled out per combination so every path stays quoted: a single accumulated string
 # would have to be word-split to become separate env(1) operands, which breaks the moment
 # a location contains a space.
@@ -113,9 +123,9 @@ PFB_SSL_CA_CERT_FILE="${PFB_SSL_CA_CERT_FILE-${ROOT}/etc/ssl/cert.pem}"
 # EMPTY until `certctl rehash` populates it, and libfetch abandons
 # SSL_CTX_set_default_verify_paths() as soon as EITHER variable is set -- so exporting an
 # empty hash dir with no bundle beside it leaves an EMPTY store, strictly worse than
-# exporting nothing (issue #2524). Mirrors pfb_pkgconf_dir_populated() (pfblockerng.inc)
-# and the boot hook's glob loop: any non-dot entry counts, including a dangling symlink,
-# which is what a hash dir is made of.
+# exporting nothing (issue #2524). Mirrors the boot hook's populated-directory glob loop
+# and pfb_pkg_exec()'s glob() guard: any non-dot entry counts, including a dangling
+# symlink, which is what a hash dir is made of.
 _ca_path_populated() {
     [ -d "$1" ] || return 1
     _cap_has_entry=0
@@ -229,7 +239,7 @@ pfb_emit_embedded_hook() {
     cat <<'PFB_HOOK_HEREDOC'
 #!/bin/sh
 # /usr/local/etc/rc.d/pfblockerng_repo_generate.sh — boot-time repo-conf
-# regenerator (ADR-39) AND consented pkg.conf CA re-applier (issue #2518).
+# regenerator (ADR-39) AND consent-gated login.conf CA carrier (issue #2617).
 # Installed by install.sh.
 #
 # JOB 1 — WHAT IT DOES (and nothing more): for each pfBlockerNG pkg-repo conf
@@ -246,22 +256,21 @@ pfb_emit_embedded_hook() {
 # catalogue survive a reboot instead of being redirected to the primary Pages
 # site, and a url this hook could not have written is left alone (issue #2459).
 #
-# JOB 2 — consented pkg.conf CA re-apply (issue #2518): on Plus,
-# pfSense-repo-setup deletes and regenerates /usr/local/etc/pkg.conf on
-# upgrades and branch switches, appending a PKG_ENV block that pins
-# SSL_CA_CERT_FILE to a Netgate-only bundle. libpkg applies that block with
-# setenv(key, value, 1), so only an added SSL_CA_CERT_PATH line — which
-# PKG_ENV never sets — survives it and restores the public roots third-party
-# repos need. Because the wipe can happen at any OS upgrade or branch switch,
-# and boot follows both, this hook re-applies that one line every boot when
-# the admin has consented (config field, checked live — never cached). See
-# _pkgconf_ca_reapply() below; this job is UNLIKE job 1 in every other way —
-# patch-in-place, not regenerate, and consent-gated rather than unconditional.
+# JOB 2 — consent-gated login.conf CA carry (issue #2617, DEFAULT-ON — owner
+# ruling): carries SSL_CA_CERT_PATH into the `default` login class's setenv
+# (_logincap_setenv_add()) unless the admin has explicitly opted out (config
+# field pfb_pkg_ca_consent, read live every call — never cached; see
+# _login_ca_consent() below), in which case it is removed
+# (_logincap_setenv_remove()). This supersedes the pkg.conf PKG_ENV patcher
+# from issue #2518: that approach was retired because pfSense-repo-setup
+# rewrites pkg.conf at arbitrary times (OS upgrades, branch switches) this hook
+# cannot serialise against, whereas nothing on the box rewrites login.conf.
 #
 # WHY AT BOOT: a pfSense OS upgrade can change the box's edition/version (which
-# requires a reboot), which moves the catalog subtree, and can also wipe
-# pkg.conf via pfSense-repo-setup. Regenerating/re-applying every boot keeps
-# both aligned with no upgrade hook to register.
+# requires a reboot and moves the catalog subtree), and can also revert
+# login.conf to its stock shape. Boot follows either, and /etc/pfSense-rc
+# recompiles login.conf.db on every boot regardless, so reconciling here keeps
+# the carried variable aligned with no extra upgrade hook to register.
 #
 # rc.d ordering: REQUIRE FILESYSTEMS (so /usr/local is mounted) and
 # BEFORE NETWORKING (so the conf is correct before anything that could invoke
@@ -316,13 +325,13 @@ name="pfblockerng_repo_generate"
 : "${PFB_PRODUCT_LABEL:=/etc/product_label}"
 : "${PFB_VERSION_FILE:=/etc/version}"
 
-# JOB 2 paths (issue #2518) — see _pkgconf_ca_reapply().
-: "${PFB_PKG_CONF:=/usr/local/etc/pkg.conf}"
+# JOB 2 paths (issue #2617) — see _login_ca_consent().
 : "${PFB_CONFIG_XML:=/cf/conf/config.xml}"
 : "${PFB_SSL_CA_CERT_PATH:=/etc/ssl/certs}"
-: "${PFB_PKG_DIRTY:=/var/run/pkg.dirty}"
-: "${PFB_LOCKF:=/usr/bin/lockf}"
-: "${PFB_UPGRADE_LOCK:=/tmp/pfSense-upgrade.lock}"
+
+# login.conf editor paths (issue #2617) — see _logincap_setenv_add() below.
+: "${PFB_LOGIN_CONF:=/etc/login.conf}"
+: "${PFB_CAP_MKDB:=/usr/bin/cap_mkdb}"
 
 # The catalog base. NOT defaulted into PFB_BASE_URL: an explicitly exported
 # PFB_BASE_URL (install.sh, the smoke guests, a fork bootstrap) must stay
@@ -492,62 +501,45 @@ _regen_one() {
     fi
 }
 
-# JOB 2 (issue #2518): re-apply the consented SSL_CA_CERT_PATH line to pkg.conf
-# after pfSense-repo-setup wipes it. Every guard below fails CLOSED and quiet —
-# this runs at boot for the overwhelmingly common CE case, where none of it
-# applies, so a miss must never print or wedge boot. The boot path never
-# reverts; the explicit ca-revoke command below handles an on-to-off transition.
-_pkgconf_ca_reapply() {
-    PFB_CA_REAPPLY_CONSENT=off
-    [ "${PFB_UPGRADE_LOCK_HELD:-1}" = 1 ] || return 0
-    grep -q 'Plus' "${PFB_PRODUCT_LABEL}" 2>/dev/null || return 0
-    # Consent gate, fail-closed. pfb_pkg_ca_consent is a registered config field
-    # read on the PHP side at installedpackages/pfblockerng/config/0 --
-    # PfbConfig::read('gen/pfb_pkg_ca_consent') -- meaning the element must be a
-    # DIRECT CHILD of the FIRST <config> block under the single <pfblockerng>
-    # section (config/0): never nested under a <row> or any other wrapper, and
-    # never a later <config> row. <config> is NOT unique tree-wide (every
-    # installed package gets one under <installedpackages>), so a whole-file
-    # grep for the element can key on the WRONG <config> block and disagree
-    # with the PHP side about whether the admin consented.
-    #
-    # Scoped instead: take the FIRST <pfblockerng>...</pfblockerng> range, then
-    # within it the FIRST <config>...</config> block -- that is exactly
-    # config/0 -- then require the element AT DEPTH 1 of that block (a running
-    # open/close-tag count, not just "present somewhere inside"), on a line BY
-    # ITSELF (full-line match; the value compares case-insensitively --
-    # PfbToggle::fromLegacy() also accepts On/ON). Every opening line ALSO
-    # checks for its OWN closing tag before advancing the scope -- a self-closed
-    # `<pfblockerng></pfblockerng>` / `<config></config>`, or a whole element on
-    # one line, closes on the SAME line it opens. Earlier revisions of this awk
-    # used `next` before that same-line check and LATCHED the scope open to
-    # EOF, which is what let a same-named sibling field, a second <config> row,
-    # or a nested <row> wrapper read as consent when PfbConfig disagreed
-    # (issue #2518 B2).
-    #
-    # What this guarantees: config/0's own direct-child element, and only that
-    # element, ever supplies "on" -- a sibling package's field, a later
-    # <config> row, and a <row>-nested (or any deeper-nested) copy are all
-    # refused. What it does NOT guarantee: a literal "<pfblockerng>" (or
-    # "<config>") substring belonging to a DIFFERENT, EARLIER package in the
-    # document exhausts the "first occurrence" search this hook does
-    # (seen_pb/seen_cfg never re-arm), so a decoy ahead of the real block can
-    # cause a FALSE NEGATIVE -- never a false positive -- on every hook call;
-    # pfSense's own config writer never emits such a decoy or reorders sections,
-    # so this is a defensive bound, not an
-    # expected case. Nor is it sound against an XML attribute on the
-    # <pfblockerng> open tag, a CDATA-wrapped value, or the whole element
-    # collapsed onto one line (PfbConfig reads all three as consent, this hook
-    # matches none of them) -- tracking any of those in POSIX sh is
-    # disproportionate to the risk, and pfSense's own config writer emits none
-    # of them (verified against a live config.xml); each is a bounded,
-    # documented miss across hook calls,
-    # pinned by its own spec row. Also NOT sound against a MULTI-LINE XML
-    # comment that happens to wrap the element inside config/0 -- tracking
-    # multi-line comment state in POSIX sh is disproportionate to that risk
-    # too, and pfSense's own config writer emits no XML comments at all.
-    _pcr_consent="$(awk '
-            !seen_pb && /<pfblockerng>/ {
+# JOB 2 (issue #2617): read the admin's consent for carrying SSL_CA_CERT_PATH
+# into login.conf. Prints `on`, `off`, or `skip`; DEFAULT-ON (owner ruling) --
+# an absent ELEMENT means the registered default, which is now On. PHP writes
+# an empty token for an explicit Off and the literal token "on" for an
+# explicit On, so "present but empty" is an explicit opt-out, never "absent".
+# A missing/unreadable config.xml is `skip`, not On: consent is unknowable
+# there, and a pfSense box cannot boot without /cf/conf/config.xml, so the
+# only runs that hit this are off-box (a ROOT-staged install.sh, a dev host)
+# -- exactly the runs that must never edit the host's real login.conf.
+#
+# pfb_pkg_ca_consent is a registered config field read on the PHP side at
+# installedpackages/pfblockerng/config/0 -- PfbConfig::read('gen/pfb_pkg_ca_consent')
+# -- meaning the element must be a DIRECT CHILD of the FIRST <config> block
+# under the single <pfblockerng> section (config/0): never nested under a
+# <row> or any other wrapper, and never a later <config> row. <config> is NOT
+# unique tree-wide (every installed package gets one under
+# <installedpackages>), so a whole-file grep for the element can key on the
+# WRONG <config> block and disagree with the PHP side. Scoped instead: the
+# FIRST <pfblockerng>...</pfblockerng> range, then within it the FIRST
+# <config>...</config> block (config/0), then the element AT DEPTH 0 of that
+# block on a line BY ITSELF (case-insensitive value; PfbToggle::fromLegacy()
+# also accepts On/ON); every opening line also checks for its own closing tag
+# before advancing scope, so a self-closed or one-line element closes on the
+# line it opens rather than latching the scope open to EOF.
+#
+# Hardening (issue #2617, decoy-vs-default-on): under the OLD fail-closed
+# default a scoping miss was a bounded FALSE NEGATIVE; under default-on the
+# same miss reads as "absent" = On -- a FALSE POSITIVE against an explicit
+# opt-out. The opening match is therefore line-anchored (only a "<pfblockerng>"
+# or "<pfblockerng ...attrs...>" starting its own line opens the scope, so a
+# decoy embedded in another element's text never does), and an attribute on
+# the open tag is accepted. Remaining accepted bounded misses, all shapes
+# pfSense's own config writer never emits: an attribute on the consent element
+# itself, and a CDATA value containing a literal "</config>" ahead of the
+# element -- each would read as "absent" = On against an explicit opt-out.
+_login_ca_consent() {
+    [ -r "${PFB_CONFIG_XML}" ] || { printf 'skip'; return 0; }
+    _lcc_consent="$(awk '
+            !seen_pb && /^[[:space:]]*<pfblockerng([[:space:]][^>]*)?>/ {
                 in_pb = 1; seen_pb = 1
                 if ($0 ~ /<\/pfblockerng>/) { in_pb = 0 }
                 next
@@ -563,6 +555,12 @@ _pkgconf_ca_reapply() {
                 if (cfg_depth == 0 && /^[[:space:]]*<pfb_pkg_ca_consent>[Oo][Nn]<\/pfb_pkg_ca_consent>[[:space:]]*$/) {
                     print "on"; exit
                 }
+                if (cfg_depth == 0 && /^[[:space:]]*<pfb_pkg_ca_consent>[^<]*<\/pfb_pkg_ca_consent>[[:space:]]*$/) {
+                    print "off"; exit
+                }
+                if (cfg_depth == 0 && /^[[:space:]]*<pfb_pkg_ca_consent\/>[[:space:]]*$/) {
+                    print "off"; exit
+                }
                 _line = $0
                 _self_closing = gsub(/<[A-Za-z_][A-Za-z0-9_.:-]*[[:space:]][^<>]*\/>/, "&", _line)
                 _line = $0
@@ -573,219 +571,376 @@ _pkgconf_ca_reapply() {
                 if (cfg_depth < 0) { cfg_depth = 0 }
             }
         ' "${PFB_CONFIG_XML}" 2>/dev/null)"
-    [ "${_pcr_consent}" = 'on' ] || { unset _pcr_consent; return 0; }
-    unset _pcr_consent
-    PFB_CA_REAPPLY_CONSENT=on
-    [ -e "${PFB_PKG_DIRTY}" ] && return 0
+    case "${_lcc_consent}" in
+        off) printf 'off' ;;
+        *) printf 'on' ;;
+    esac
+    unset _lcc_consent
+}
 
-    # -h before -f: a symlink also passes -f, and the tmp+mv patch below would
-    # replace the LINK's identity rather than editing through it to its target.
-    [ -h "${PFB_PKG_CONF}" ] && return 0
-    [ -f "${PFB_PKG_CONF}" ] || return 0
-
-    # FreeBSD ships /etc/ssl/certs empty until `certctl rehash` populates it;
-    # exporting an empty hash dir to pkg LOOKS fixed but verifies nothing, so
-    # refuse rather than patch a file that only appears to work. Glob-based
-    # (no `ls | wc -l`): with no match dash leaves the pattern word literal, so
-    # -e/-L on it is false and the loop body never sets the flag. A bare `*`
-    # glob under POSIX never matches a dotfile, so a directory holding only
-    # e.g. ".DS_Store" is not considered populated.
-    [ -d "${PFB_SSL_CA_CERT_PATH}" ] || return 0
-    _pcr_has_entry=0
-    for _pcr_entry in "${PFB_SSL_CA_CERT_PATH}"/*; do
-        if [ -e "${_pcr_entry}" ] || [ -L "${_pcr_entry}" ]; then
-            _pcr_has_entry=1
-            break
-        fi
-    done
-    unset _pcr_entry
-    [ "${_pcr_has_entry}" -eq 1 ] || { unset _pcr_has_entry; return 0; }
-    unset _pcr_has_entry
-
-    # CA-path character whitelist: `^/[A-Za-z0-9._/+-]+$`, including that a bare
-    # "/" is refused because it
-    # has nothing after the leading slash). A '#' landing inside the PKG_ENV
-    # block would make libucl treat the rest of the line as a comment and
-    # silently truncate the CA path; a space or quote corrupts the block --
-    # refuse rather than write either. `/?*` requires the leading slash plus
-    # at least one more character (rejects the bare-slash case); the second
-    # case matches any string containing a character outside the whitelist
-    # (the idiom this file already uses at the varver check above).
-    case "${PFB_SSL_CA_CERT_PATH}" in
-        /?*) ;;
+# Reconcile login.conf with the live consent read: on -> carry the CA path
+# (_logincap_setenv_add()); explicitly off -> strip it
+# (_logincap_setenv_remove()); skip (no readable config.xml) -> touch nothing.
+# Propagates the editor's rc.
+_login_ca_reconcile() {
+    case "$(_login_ca_consent)" in
+        on) _logincap_setenv_add ;;
+        off) _logincap_setenv_remove ;;
         *) return 0 ;;
     esac
-    case "${PFB_SSL_CA_CERT_PATH}" in
-        *[!A-Za-z0-9._/+-]*) return 0 ;;
-    esac
+}
 
-    # Shape guard: refuse anything but exactly what pfSense-repo-setup writes.
-    # Never touch a file already patched (SSL_CA_CERT_PATH present anywhere) or
-    # hand-edited into an unrecognised shape — each check below is one clause
-    # of that shape, checked independently so a near-miss is still refused.
-    grep -q 'SSL_CA_CERT_PATH' "${PFB_PKG_CONF}" 2>/dev/null && return 0
-    # grep -c on an unreadable file prints nothing to stdout and exits nonzero;
-    # an unguarded `[ "$_pcr_open_count" -eq 1 ]` then errors with a literal
-    # "Illegal number:" on stderr, contradicting this file's own "never print"
-    # intent (issue #2518 nitpick N-illegal-number) -- `|| _pcr_open_count=0`
-    # defaults it on ANY grep failure (unreadable file or a genuine zero
-    # matches; either way the -eq 1 check below correctly refuses).
-    _pcr_open_count="$(grep -c '^PKG_ENV {$' "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_open_count=0
-    [ "${_pcr_open_count:-0}" -eq 1 ] || { unset _pcr_open_count; return 0; }
-    unset _pcr_open_count
-    # The block: from the (unique) opener to the first column-0 `}` after it.
-    # If no such `}` exists this range runs to EOF and its last line is not
-    # `}` — the "later line equal to `}`" check that catches an unclosed block.
-    _pcr_block="$(sed -n '/^PKG_ENV {$/,/^}$/p' "${PFB_PKG_CONF}" 2>/dev/null)"
-    [ "$(printf '%s\n' "${_pcr_block}" | tail -n 1)" = '}' ] || { unset _pcr_block; return 0; }
-    _pcr_ca_file="$(printf '%s\n' "${_pcr_block}" | sed -n 's/^	SSL_CA_CERT_FILE=//p')"
-    [ "$(printf '%s\n' "${_pcr_ca_file}" | wc -l | tr -d ' ')" -eq 1 ] \
-        || { unset _pcr_block _pcr_ca_file; return 0; }
-    case "${_pcr_ca_file}" in
-        /?*) ;;
-        *) unset _pcr_block _pcr_ca_file; return 0 ;;
-    esac
-    case "${_pcr_ca_file}" in
-        *[!A-Za-z0-9._/+-]*) unset _pcr_block _pcr_ca_file; return 0 ;;
-    esac
-    [ -f "${_pcr_ca_file}" ] && [ -r "${_pcr_ca_file}" ] && [ -s "${_pcr_ca_file}" ] \
-        || { unset _pcr_block _pcr_ca_file; return 0; }
-    unset _pcr_ca_file
-    # Refuse a block whose "close" is really a NESTED sub-object's own `}`
-    # (issue #2518 nitpick N-nested-brace): the sed range above stops at the
-    # FIRST column-0 `}` after the opener, same as the insertion awk below --
-    # so a `SOMETHING {` sub-block occurring before the true close makes that
-    # `}` look like PKG_ENV's own, and the line below would be inserted INSIDE
-    # the sub-object instead (looks patched, verifies nothing: libpkg would set
-    # the key on the sub-object, not PKG_ENV). Rule: strip the block's own
-    # opening and closing lines; the remaining lines must be brace-BALANCED (as
-    # many "...{"-opening lines as bare "}" lines) -- a nested open with no
-    # matching nested close inside that middle means the "close" found above is
-    # not PKG_ENV's own.
-    _pcr_mid="$(printf '%s\n' "${_pcr_block}" | sed '1d;$d')"
-    _pcr_mid_opens="$(printf '%s\n' "${_pcr_mid}" | grep -c '{$' 2>/dev/null)" || _pcr_mid_opens=0
-    _pcr_mid_closes="$(printf '%s\n' "${_pcr_mid}" | grep -cx '}' 2>/dev/null)" || _pcr_mid_closes=0
-    if [ "${_pcr_mid_opens:-0}" -ne "${_pcr_mid_closes:-0}" ]; then
-        unset _pcr_block _pcr_mid _pcr_mid_opens _pcr_mid_closes
+# login.conf `default`-class setenv editor (issue #2617): the actual write side
+# of JOB 2 above -- _login_ca_reconcile() calls _logincap_setenv_add() or
+# _logincap_setenv_remove() depending on the live consent read. Ground truth
+# from a live box:
+#   1. getcap keeps only the FIRST `setenv` per class record; duplicates
+#      compile but are dead.
+#   2. a non-default class with its OWN setenv shadows `default` for its
+#      users; reported, never edited.
+#   3. login.conf.db (compiled by cap_mkdb), not login.conf, is what libc
+#      reads.
+#   4. cap_mkdb validates nothing — the byte-exact write result is the oracle.
+# Wired into onestart via consent (_login_ca_reconcile()); the login-ca-sync
+# and login-ca-revoke verbs below stay direct and consent-independent -- the
+# PHP caller flushes config before invoking either, so it trusts its own
+# read, and a boot reconcile self-heals any mismatch.
+
+# One awk pass over PFB_LOGIN_CONF: a label starts at column 0, a record
+# continues while lines end in `\`. Only the FIRST `default` record counts
+# (rule 1). Prints KEY=value lines read back via _logincap_field().
+_logincap_scan() {
+    _lc_scan_raw="$(awk '
+        {
+            line = $0
+            has_cont = (line ~ /\\$/)
+            if (!prev_cont) {
+                in_def = 0
+                if (line ~ /^[^ \t#]/) {
+                    cur = line
+                    sub(/[:|].*/, "", cur)
+                    if (cur == "default" && !done_def) {
+                        in_def = 1
+                        done_def = 1
+                        label = NR
+                        last = NR
+                        wellformed = (line == "default:\\") ? 1 : 0
+                    }
+                } else {
+                    cur = ""
+                }
+            } else if (in_def) {
+                last = NR
+                if (se_line == 0 && index(line, ":setenv=") > 0) {
+                    se_line = NR
+                    se_text = line
+                    tmp = line
+                    n = 0
+                    while ((p = index(tmp, ":setenv=")) > 0) { n++; tmp = substr(tmp, p + 8) }
+                    p = index(line, ":setenv=")
+                    vs = p + 8
+                    rest = substr(line, vs)
+                    c = index(rest, ":")
+                    if (n == 1 && c > 0) {
+                        v = substr(rest, 1, c - 1)
+                        if (index(v, "\\") == 0) {
+                            se_ok = 1
+                            vstart = vs
+                            vend = vs + c - 1
+                            value = v
+                        }
+                    }
+                }
+            } else if (cur != "" && cur != "default" && index(line, ":setenv=") > 0) {
+                if (index(" " other " ", " " cur " ") == 0) {
+                    other = (other == "" ? cur : other " " cur)
+                }
+            }
+            prev_cont = has_cont
+        }
+        END {
+            printf "WELLFORMED=%d\n", wellformed ? 1 : 0
+            printf "LABEL=%d\n", label + 0
+            printf "LAST=%d\n", last + 0
+            printf "SETENV_LINE=%d\n", se_line + 0
+            printf "SETENV_OK=%d\n", se_ok ? 1 : 0
+            printf "VSTART=%d\n", vstart + 0
+            printf "VEND=%d\n", vend + 0
+            printf "VALUE=%s\n", value
+            printf "LINE=%s\n", se_text
+            printf "OTHER=%s\n", other
+        }
+    ' "${PFB_LOGIN_CONF}" 2>/dev/null)"
+}
+
+# Pull one KEY out of the last _logincap_scan() result.
+_logincap_field() {
+    printf '%s\n' "${_lc_scan_raw}" | sed -n "s/^$1=//p"
+}
+
+# Shared writer: $@ is an awk program (with any -v args) applied over
+# PFB_LOGIN_CONF. A raw value handed in MUST travel via ENVIRON, never -v
+# (which decodes backslash escapes and would corrupt it).
+# One shared value-splice program: replace the chars [vs, ve) on line tgt with
+# $PFB_LC_NEWVAL (via ENVIRON -- `awk -v` would decode escapes in the value).
+# Line tgt must still read exactly as the scan saw it ($PFB_LC_EXPECT): the
+# scan and this transform are separate reads of the file, so a concurrent
+# editor invocation (boot reconcile vs a Software-page save) could land its
+# mv in between -- splicing scan-time offsets into changed content would
+# corrupt the class, while aborting here degrades the race to a clean
+# refusal/lost update that the next boot reconcile repairs.
+# shellcheck disable=SC2016  # awk's own $0/vs/ve, not shell expansion
+_LC_SPLICE='NR==tgt { if ($0 != ENVIRON["PFB_LC_EXPECT"]) exit 9; $0 = substr($0,1,vs-1) ENVIRON["PFB_LC_NEWVAL"] substr($0,ve) } { print }'
+
+_logincap_write() {
+    _lc_tmp="${PFB_LOGIN_CONF}.tmp.$$"
+    if cp -p "${PFB_LOGIN_CONF}" "${_lc_tmp}" 2>/dev/null \
+        && awk "$@" "${PFB_LOGIN_CONF}" > "${_lc_tmp}" 2>/dev/null \
+        && mv "${_lc_tmp}" "${PFB_LOGIN_CONF}" 2>/dev/null; then
+        unset _lc_tmp
         return 0
     fi
-    unset _pcr_block _pcr_mid _pcr_mid_opens _pcr_mid_closes
-
-    # Patch: insert the one line immediately before the block's closing `}`,
-    # nothing else touched. tmp+mv mirrors _regen_one()'s idiom, with two extra
-    # steps for mode and trailing-newline preservation:
-    #   - `cp -p` seeds the temp with the ORIGINAL file's permission bits
-    #     before the `>` redirect below truncates it -- truncation keeps the
-    #     inode (and its mode); a fresh `>` on a name that did not exist would
-    #     not, which is why the patched file used to land at the process
-    #     umask instead of pkg.conf's own mode.
-    #   - awk's `print` always terminates its last output line, which would
-    #     otherwise turn a pkg.conf whose last byte is `}` (no trailing
-    #     newline) into one that has one; the tail-c1 check + reprint below
-    #     restores that exact newline-less state when the original had it.
-    _pcr_original_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" \
-        || { unset _pcr_original_sum; return 0; }
-    _pcr_tmp="${PFB_PKG_CONF}.tmp"
-    _pcr_had_no_trailing_nl=0
-    [ -n "$(tail -c1 "${PFB_PKG_CONF}" 2>/dev/null)" ] && _pcr_had_no_trailing_nl=1
-    if cp -p "${PFB_PKG_CONF}" "${_pcr_tmp}" 2>/dev/null \
-        && awk -v ins="	SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}" '
-            $0 == "PKG_ENV {" { seen_open = 1 }
-            seen_open && !done && $0 == "}" { print ins; done = 1 }
-            { print }
-        ' "${PFB_PKG_CONF}" > "${_pcr_tmp}" 2>/dev/null; then
-        if [ "${_pcr_had_no_trailing_nl}" -eq 1 ]; then
-            printf '%s' "$(cat "${_pcr_tmp}" 2>/dev/null)" > "${_pcr_tmp}" 2>/dev/null
-        fi
-        if [ -e "${PFB_PKG_DIRTY}" ]; then
-            _pcr_live_sum=''
-        else
-            _pcr_live_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_live_sum=''
-        fi
-        if [ -z "${_pcr_live_sum}" ] || [ "${_pcr_live_sum}" != "${_pcr_original_sum}" ]; then
-            rm -f "${_pcr_tmp}" 2>/dev/null
-            unset _pcr_tmp _pcr_had_no_trailing_nl _pcr_original_sum _pcr_live_sum
-            return 0
-        fi
-        if mv "${_pcr_tmp}" "${PFB_PKG_CONF}" 2>/dev/null; then
-            printf '[%s] INFO: patched %s with the consented SSL_CA_CERT_PATH\n' "${name}" "${PFB_PKG_CONF}" >&2
-        else
-            rm -f "${_pcr_tmp}" 2>/dev/null
-            printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_PKG_CONF}" >&2
-        fi
-    else
-        rm -f "${_pcr_tmp}" 2>/dev/null
-        printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_PKG_CONF}" >&2
-    fi
-    unset _pcr_tmp _pcr_had_no_trailing_nl _pcr_original_sum _pcr_live_sum
-    return 0
+    rm -f "${_lc_tmp}" 2>/dev/null
+    unset _lc_tmp
+    return 1
 }
 
-_pkgconf_ca_sync_command() {
-    _pkgconf_ca_reapply
-    _pcr_owned_line="$(printf '\tSSL_CA_CERT_PATH=%s' "${PFB_SSL_CA_CERT_PATH}")"
-    if [ "${PFB_CA_REAPPLY_CONSENT:-off}" = on ] \
-        && ! grep -F -qx "${_pcr_owned_line}" "${PFB_PKG_CONF}" 2>/dev/null; then
-        return 1
+# Unconditional after every successful write (rule 3) -- /etc/pfSense-rc
+# recompiles at boot anyway, so there's no stale-.db state worth tracking.
+_logincap_compile() {
+    if [ -x "${PFB_CAP_MKDB}" ] && ! "${PFB_CAP_MKDB}" "${PFB_LOGIN_CONF}" >/dev/null 2>&1; then
+        printf '[%s] WARNING: could not recompile %s.db -- the change will not take effect until something else compiles it\n' \
+            "${name}" "${PFB_LOGIN_CONF}" >&2
     fi
-    return 0
 }
 
-_pkgconf_ca_revoke() {
-    [ "${PFB_UPGRADE_LOCK_HELD:-}" = 1 ] || return 1
-    [ -e "${PFB_PKG_CONF}" ] && [ ! -h "${PFB_PKG_CONF}" ] \
-        && [ -f "${PFB_PKG_CONF}" ] && [ -r "${PFB_PKG_CONF}" ] || return 1
-    [ ! -e "${PFB_PKG_DIRTY}" ] || return 1
-    _pcr_original_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" || return 1
-    _pcr_open_count="$(grep -c '^PKG_ENV {$' "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_open_count=0
-    [ "${_pcr_open_count:-0}" -eq 1 ] || return 1
-    _pcr_block="$(sed -n '/^PKG_ENV {$/,/^}$/p' "${PFB_PKG_CONF}" 2>/dev/null)" || return 1
-    [ "$(printf '%s\n' "${_pcr_block}" | tail -n 1)" = '}' ] || return 1
-    _pcr_ca_file_count="$(grep -F -c 'SSL_CA_CERT_FILE' "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_ca_file_count=0
-    [ "${_pcr_ca_file_count:-0}" -eq 1 ] || return 1
-    _pcr_ca_file="$(printf '%s\n' "${_pcr_block}" | sed -n 's/^\tSSL_CA_CERT_FILE=//p')"
-    [ "$(printf '%s\n' "${_pcr_ca_file}" | grep -c .)" -eq 1 ] || return 1
-    case "${_pcr_ca_file}" in
+# Ensure SSL_CA_CERT_PATH is carried in the FIRST setenv of the `default`
+# login class.
+_logincap_setenv_add() {
+    # -h before -f: a symlink also passes -f, and _logincap_write()'s tmp+mv
+    # would replace the LINK's identity instead of editing through it.
+    [ -h "${PFB_LOGIN_CONF}" ] && return 1
+    [ -f "${PFB_LOGIN_CONF}" ] || return 1
+
+    case "${PFB_SSL_CA_CERT_PATH}" in
         /?*) ;;
         *) return 1 ;;
     esac
-    case "${_pcr_ca_file}" in
+    case "${PFB_SSL_CA_CERT_PATH}" in
         *[!A-Za-z0-9._/+-]*) return 1 ;;
     esac
-    _pcr_target="$(printf '%s\n' "${_pcr_block}" | grep -F -x -c "	SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}" 2>/dev/null)" || _pcr_target=0
-    _pcr_any_path="$(grep -F -c 'SSL_CA_CERT_PATH' "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_any_path=0
-    _pcr_mid="$(printf '%s\n' "${_pcr_block}" | sed '1d;$d')"
-    _pcr_mid_opens="$(printf '%s\n' "${_pcr_mid}" | grep -c '{$' 2>/dev/null)" || _pcr_mid_opens=0
-    _pcr_mid_closes="$(printf '%s\n' "${_pcr_mid}" | grep -cx '}' 2>/dev/null)" || _pcr_mid_closes=0
-    [ "${_pcr_mid_opens:-0}" -eq "${_pcr_mid_closes:-0}" ] || return 1
-    if [ "${_pcr_any_path}" -eq 0 ]; then
+
+    # Load-bearing (issue #2524): once set, libfetch skips its own default
+    # verify paths, so an empty/missing hash dir would leave no trust store.
+    [ -d "${PFB_SSL_CA_CERT_PATH}" ] || return 1
+    _lc_has_entry=0
+    for _lc_entry in "${PFB_SSL_CA_CERT_PATH}"/*; do
+        if [ -e "${_lc_entry}" ] || [ -L "${_lc_entry}" ]; then
+            _lc_has_entry=1
+            break
+        fi
+    done
+    unset _lc_entry
+    if [ "${_lc_has_entry}" -ne 1 ]; then
+        unset _lc_has_entry
+        return 1
+    fi
+    unset _lc_has_entry
+
+    _logincap_scan
+    _lc_wellformed="$(_logincap_field WELLFORMED)"
+    _lc_se_line="$(_logincap_field SETENV_LINE)"
+    _lc_se_ok="$(_logincap_field SETENV_OK)"
+    if [ "${_lc_wellformed}" != 1 ] || { [ "${_lc_se_line}" != 0 ] && [ "${_lc_se_ok}" != 1 ]; }; then
+        printf '[%s] WARNING: login.conf default class has a shape this editor does not recognise -- not touching it\n' "${name}" >&2
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok
+        return 1
+    fi
+
+    # Rule 2: report a shadowing sibling class by name; not a refusal.
+    _lc_other="$(_logincap_field OTHER)"
+    if [ -n "${_lc_other}" ]; then
+        for _lc_cls in ${_lc_other}; do
+            printf '[%s] WARNING: login.conf class "%s" defines its own setenv, shadowing default for its users -- SSL_CA_CERT_PATH will not reach them; not touching that class\n' \
+                "${name}" "${_lc_cls}" >&2
+        done
+        unset _lc_cls
+    fi
+    unset _lc_other
+
+    _lc_want="SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}"
+
+    if [ "${_lc_se_line}" = 0 ]; then
+        _lc_label="$(_logincap_field LABEL)"
+        PFB_LC_NEWVAL="${_lc_want}"
+        export PFB_LC_NEWVAL
+        # shellcheck disable=SC2016  # awk's own $0/lbl, not shell expansion
+        if _logincap_write -v lbl="${_lc_label}" \
+            'NR==lbl && $0 != "default:\\" { exit 9 } { print } NR==lbl { print "\t:setenv=" ENVIRON["PFB_LC_NEWVAL"] ":\\" }'; then
+            printf '[%s] INFO: added SSL_CA_CERT_PATH to the default class setenv in %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+            _logincap_compile
+            unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_label _lc_want _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok
+            return 0
+        fi
+        printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+        unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_label _lc_want _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok
+        return 1
+    fi
+
+    _lc_value="$(_logincap_field VALUE)"
+    _lc_found_ours=0
+    _lc_found_foreign=0
+    IFS=,
+    set -f
+    for _lc_entry_v in ${_lc_value}; do
+        case "${_lc_entry_v}" in
+            "${_lc_want}") _lc_found_ours=1 ;;
+            SSL_CA_CERT_PATH=*) _lc_found_foreign=1 ;;
+        esac
+    done
+    set +f
+    unset IFS _lc_entry_v
+
+    # Foreign first: getcap applies the list in order with overwrite
+    # semantics, so when ours and a foreign entry coexist the LATER one wins
+    # at login -- a mixed list must warn, never read as a clean no-op.
+    if [ "${_lc_found_foreign}" -eq 1 ]; then
+        printf '[%s] WARNING: login.conf already sets SSL_CA_CERT_PATH to a different value in the default class -- leaving it unchanged, something else owns that variable\n' "${name}" >&2
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_found_ours _lc_found_foreign
         return 0
     fi
-    [ "${_pcr_target}" -eq 1 ] && [ "${_pcr_any_path}" -eq 1 ] || return 1
-    _pcr_tmp="${PFB_PKG_CONF}.tmp"
-    _pcr_had_no_trailing_nl=0
-    [ -n "$(tail -c1 "${PFB_PKG_CONF}" 2>/dev/null)" ] && _pcr_had_no_trailing_nl=1
-    if ! cp -p "${PFB_PKG_CONF}" "${_pcr_tmp}" 2>/dev/null \
-        || ! awk -v target="	SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}" '
-            !removed && $0 == target { removed = 1; next }
-            { print }
-        ' "${PFB_PKG_CONF}" > "${_pcr_tmp}" 2>/dev/null; then
-        rm -f "${_pcr_tmp}" 2>/dev/null
+    if [ "${_lc_found_ours}" -eq 1 ]; then
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_found_ours _lc_found_foreign
+        return 0
+    fi
+
+    _lc_vstart="$(_logincap_field VSTART)"
+    _lc_vend="$(_logincap_field VEND)"
+    if [ -z "${_lc_value}" ]; then
+        PFB_LC_NEWVAL="${_lc_want}"
+    else
+        PFB_LC_NEWVAL="${_lc_value},${_lc_want}"
+    fi
+    PFB_LC_EXPECT="$(_logincap_field LINE)"
+    export PFB_LC_NEWVAL PFB_LC_EXPECT
+    if _logincap_write -v tgt="${_lc_se_line}" -v vs="${_lc_vstart}" -v ve="${_lc_vend}" \
+        "${_LC_SPLICE}"; then
+        printf '[%s] INFO: added SSL_CA_CERT_PATH to the default class setenv in %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+        _logincap_compile
+        unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_found_ours _lc_found_foreign _lc_vstart _lc_vend
+        return 0
+    fi
+    printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+    unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_found_ours _lc_found_foreign _lc_vstart _lc_vend
+    return 1
+}
+
+# Inverse of _logincap_setenv_add(). No CA whitelist/populated-dir check here:
+# an opt-out must succeed even with the CA dir now empty or gone.
+_logincap_setenv_remove() {
+    [ -h "${PFB_LOGIN_CONF}" ] && return 1
+    [ -f "${PFB_LOGIN_CONF}" ] || return 0
+
+    # Fast no-op: never nag about a file that never carried our value.
+    grep -F -q "SSL_CA_CERT_PATH" "${PFB_LOGIN_CONF}" 2>/dev/null || return 0
+
+    _logincap_scan
+    _lc_wellformed="$(_logincap_field WELLFORMED)"
+    _lc_se_line="$(_logincap_field SETENV_LINE)"
+    _lc_se_ok="$(_logincap_field SETENV_OK)"
+    if [ "${_lc_wellformed}" != 1 ] || { [ "${_lc_se_line}" != 0 ] && [ "${_lc_se_ok}" != 1 ]; }; then
+        printf '[%s] WARNING: login.conf default class has a shape this editor does not recognise -- not touching it\n' "${name}" >&2
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok
         return 1
     fi
-    if [ "${_pcr_had_no_trailing_nl}" -eq 1 ]; then
-        printf '%s' "$(cat "${_pcr_tmp}" 2>/dev/null)" > "${_pcr_tmp}" 2>/dev/null || {
-            rm -f "${_pcr_tmp}" 2>/dev/null
-            return 1
+    if [ "${_lc_se_line}" = 0 ]; then
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok
+        return 0
+    fi
+
+    _lc_value="$(_logincap_field VALUE)"
+    _lc_want="SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}"
+    _lc_newval=""
+    IFS=,
+    set -f
+    for _lc_entry_v in ${_lc_value}; do
+        [ "${_lc_entry_v}" = "${_lc_want}" ] && continue
+        if [ -z "${_lc_newval}" ]; then
+            _lc_newval="${_lc_entry_v}"
+        else
+            _lc_newval="${_lc_newval},${_lc_entry_v}"
+        fi
+    done
+    set +f
+    unset IFS _lc_entry_v
+
+    if [ "${_lc_newval}" = "${_lc_value}" ]; then
+        # Not ours -- a foreign value is never stripped, but an opt-out that
+        # leaves the variable exported must say so instead of reporting a
+        # clean success. A list with no SSL_CA_CERT_PATH at all stays silent.
+        case ",${_lc_value}," in
+            *,SSL_CA_CERT_PATH=*)
+                printf '[%s] WARNING: login.conf sets SSL_CA_CERT_PATH to a value this hook did not write -- leaving it in place, the opt-out did not remove it\n' "${name}" >&2
+                ;;
+        esac
+        unset _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_newval
+        return 0
+    fi
+
+    _lc_vstart="$(_logincap_field VSTART)"
+    _lc_vend="$(_logincap_field VEND)"
+
+    if [ -n "${_lc_newval}" ]; then
+        PFB_LC_NEWVAL="${_lc_newval}"
+        PFB_LC_EXPECT="$(_logincap_field LINE)"
+        export PFB_LC_NEWVAL PFB_LC_EXPECT
+        if _logincap_write -v tgt="${_lc_se_line}" -v vs="${_lc_vstart}" -v ve="${_lc_vend}" \
+            "${_LC_SPLICE}"; then
+            printf '[%s] INFO: removed SSL_CA_CERT_PATH from the default class setenv in %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+            _logincap_compile
+            unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_newval _lc_vstart _lc_vend
+            return 0
+        fi
+        printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+        unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_newval _lc_vstart _lc_vend
+        return 1
+    fi
+
+    # newval empty: ours was the only entry, so the field (fs = start of its
+    # ":setenv=" tag) or whole line goes. "whole" is precomputed here, not in
+    # the writeback awk below, because that awk must strip a dangling `\`
+    # from the PRECEDING line in the same pass -- before it has read this
+    # line's own content to know whether the removal empties it.
+    _lc_fs=$((_lc_vstart - 8))
+    _lc_line="$(sed -n "${_lc_se_line}p" "${PFB_LOGIN_CONF}")"
+    _lc_last="$(_logincap_field LAST)"
+    _lc_whole="$(PFB_LC_LINE="${_lc_line}" awk -v fs="${_lc_fs}" -v ve="${_lc_vend}" '
+        BEGIN {
+            line = ENVIRON["PFB_LC_LINE"]
+            pre = substr(line, 1, fs - 1)
+            trail = substr(line, ve + 1)
+            print (pre ~ /^[ \t]*$/ && (trail == "\\" || trail == "")) ? 1 : 0
         }
+    ' 2>/dev/null)"
+
+    # shellcheck disable=SC2016  # awk's own $0/tgt/whole/fs/ve, not shell expansion
+    PFB_LC_EXPECT="$(_logincap_field LINE)"
+    export PFB_LC_EXPECT
+    # shellcheck disable=SC2016  # awk's own $0/tgt/whole/fs/ve, not shell expansion
+    if _logincap_write -v tgt="${_lc_se_line}" -v last="${_lc_last}" -v whole="${_lc_whole}" -v fs="${_lc_fs}" -v ve="${_lc_vend}" \
+        'NR == tgt && $0 != ENVIRON["PFB_LC_EXPECT"] { exit 9 }
+         NR == tgt - 1 && whole == 1 && tgt == last { sub(/\\$/, "") }
+         NR == tgt && whole == 1 { next }
+         NR == tgt && whole == 0 { $0 = substr($0, 1, fs - 1) substr($0, ve) }
+         { print }'; then
+        printf '[%s] INFO: removed SSL_CA_CERT_PATH from the default class setenv in %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+        _logincap_compile
+        unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_newval _lc_vstart _lc_vend _lc_fs _lc_line _lc_last _lc_whole
+        return 0
     fi
-    _pcr_live_sum="$(cksum < "${PFB_PKG_CONF}" 2>/dev/null)" || _pcr_live_sum=''
-    if [ -z "${_pcr_live_sum}" ] || [ "${_pcr_live_sum}" != "${_pcr_original_sum}" ] \
-        || ! mv "${_pcr_tmp}" "${PFB_PKG_CONF}" 2>/dev/null; then
-        rm -f "${_pcr_tmp}" 2>/dev/null
-        return 1
-    fi
-    return 0
+    printf '[%s] WARNING: could not patch %s\n' "${name}" "${PFB_LOGIN_CONF}" >&2
+    unset PFB_LC_NEWVAL PFB_LC_EXPECT _lc_scan_raw _lc_wellformed _lc_se_line _lc_se_ok _lc_value _lc_want _lc_newval _lc_vstart _lc_vend _lc_fs _lc_line _lc_last _lc_whole
+    return 1
 }
 
 # Regenerate each channel's conf independently (channel keyed by conf path). Only
@@ -797,31 +952,16 @@ pfblockerng_repo_generate_start() {
     _regen_one "${PFB_TESTING_CONF}" 'testing' 'pfblockerng-testing'
     _regen_one "${PFB_EDGE_CONF}"    'edge'    'pfblockerng-edge'
     _regen_one "${PFB_NIGHTLY_CONF}" 'nightly' 'pfblockerng-nightly'
-    _pkgconf_ca_reapply
+    _login_ca_reconcile
     return 0
 }
 
-# pfSense-upgrade holds this same lock while pfSense-repo-setup rewrites pkg.conf.
-# Re-exec keeps verification and replacement inside one supported-writer critical section.
-if [ "${PFB_UPGRADE_LOCK_HELD:-}" != 1 ] && [ -x "${PFB_LOCKF}" ]; then
-    PFB_UPGRADE_LOCK_HELD=1
-    export PFB_UPGRADE_LOCK_HELD
-    if "${PFB_LOCKF}" -s -t 0 "${PFB_UPGRADE_LOCK}" /bin/sh "$0" "$@"; then
-        exit 0
-    fi
-    PFB_UPGRADE_LOCK_HELD=0
-    export PFB_UPGRADE_LOCK_HELD
-fi
-
+# login.conf editing verbs (issue #2617): no upgrade lock to take -- login.conf
+# has no supported concurrent rewriter to serialise against, unlike pkg.conf
+# under the retired JOB 2 approach (issue #2518).
 case "${1:-}" in
-    ca-sync|ca-revoke)
-        [ "${PFB_UPGRADE_LOCK_HELD:-}" = 1 ] || exit 1
-        ;;
-esac
-
-case "${1:-}" in
-    ca-sync) _pkgconf_ca_sync_command; exit $? ;;
-    ca-revoke) _pkgconf_ca_revoke; exit $? ;;
+    login-ca-sync) _logincap_setenv_add; exit $? ;;
+    login-ca-revoke) _logincap_setenv_remove; exit $? ;;
 esac
 
 # Run as an rc.d service when rc.subr is present (the pfSense box); otherwise run
@@ -945,6 +1085,17 @@ pfb_channel_install() {
     # path, so every peer conf is aimed at a path that cannot exist: a run against
     # another base (fork, staged prefix) that fails before verify must not have
     # re-pointed a working peer subscription — peers are only ever retired, after.
+    # JOB 2's paths are ROOT-prefixed too (issue #2617): without them a ROOT-staged
+    # run would reconcile the HOST's /etc/login.conf against the HOST's config.xml.
+    # login.conf change-gate (issue #2623): captured around the hook run, never around
+    # the whole script, so an idempotent re-run or a channel move on an already-carried
+    # box (JOB 2 is a no-op the second time) sees no change and never bounces the GUI --
+    # restart on install only. `cksum` reads from stdin so an absent file (a fresh box,
+    # nothing to reconcile yet) never trips `set -e`; it gets its own placeholder so
+    # "absent before, absent after" reads as unchanged rather than a spurious diff.
+    _login_conf="${ROOT}/etc/login.conf"
+    _login_conf_before="$(cksum 2>/dev/null <"${_login_conf}" || printf 'absent\n')"
+
     printf '==> Running the generator hook to resolve the conf now\n'
     _no_conf="${REPOS_DIR}/.pfb-no-such-conf"
     _own_conf_var="PFB_$(printf '%s' "${PFB_CHANNEL}" | tr '[:lower:]' '[:upper:]')_CONF"
@@ -956,7 +1107,26 @@ pfb_channel_install() {
         PFB_BASE_URL="${PFB_BASE_URL}" \
         PFB_PRODUCT_LABEL="${ROOT}/etc/product_label" \
         PFB_VERSION_FILE="${ROOT}/etc/version" \
+        PFB_CONFIG_XML="${ROOT}/cf/conf/config.xml" \
+        PFB_LOGIN_CONF="${ROOT}/etc/login.conf" \
+        PFB_SSL_CA_CERT_PATH="${PFB_SSL_CA_CERT_PATH}" \
         sh "${ON_BOX_HOOK}" onestart </dev/null || true
+
+    _login_conf_after="$(cksum 2>/dev/null <"${_login_conf}" || printf 'absent\n')"
+    if [ "${_login_conf_before}" != "${_login_conf_after}" ] && [ -x "${PFB_WEBGUI_RESTART}" ]; then
+        printf '==> login.conf changed -- restarting the webConfigurator\n'
+        # Export only what a future boot would deliver: the value must actually be in
+        # the post-hook login.conf (a strip run restarts CLEAN -- never re-arm the
+        # variable the admin just revoked) and the CA dir must be populated.
+        # Delimiter-anchored: a capability entry is always followed by `,` or `:`,
+        # so a foreign value merely sharing our path as a prefix never matches.
+        if grep -F -q -e "SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}," -e "SSL_CA_CERT_PATH=${PFB_SSL_CA_CERT_PATH}:" "${_login_conf}" 2>/dev/null \
+            && _ca_path_populated "${PFB_SSL_CA_CERT_PATH}"; then
+            env SSL_CA_CERT_PATH="${PFB_SSL_CA_CERT_PATH}" "${PFB_WEBGUI_RESTART}" </dev/null || true
+        else
+            "${PFB_WEBGUI_RESTART}" </dev/null || true
+        fi
+    fi
 
     if ! grep -q "${CONF_MARKER}" "${CONF_PATH}" 2>/dev/null; then
         [ "${CONF_CREATED}" -eq 1 ] && rm -f "${CONF_PATH}"
