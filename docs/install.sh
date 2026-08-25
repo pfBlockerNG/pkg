@@ -20,13 +20,13 @@
 #   install.sh --channel <stable|testing|edge|nightly>   subscribe + install/converge
 #   install.sh -h|--help                                  this text
 #
-# Published at ${PFB_BASE_URL}/install.sh; run ON the box:
-#   fetch -qo - https://pkg.pfblockerng.com/install.sh | sh -s -- --channel stable
+# Published at https://${PFB_REPO_HOST}/install.sh; run ON the box:
+#   fetch -qo - https://${PFB_REPO_HOST}/install.sh | sh -s -- --channel stable
 #
 # Env (all overridable; forks/staging/tests set these):
 #   PKG_BIN           pkg(8) binary path (default: /usr/local/sbin/pkg)
 #   PFBLOCKERNG_ROOT  filesystem root prefix (default: /)
-#   PFB_BASE_URL      catalog base (default: https://pkg.pfblockerng.com)
+#   PFB_BASE_URL      catalog base (default: http://<PFB_REPO_HOST>)
 #   PFB_SSL_CA_CERT_PATH  CA hash dir exported to pkg (default: <root>/etc/ssl/certs)
 #   PFB_SSL_CA_CERT_FILE  CA bundle exported to pkg (default: <root>/etc/ssl/cert.pem)
 #                         Each half is guarded independently and exported on its own: the
@@ -44,20 +44,38 @@
 
 set -eu
 
-# The hook source lives next to this file's sibling scripts/rc.d/ in a checkout.
+# The hook source lives at the shipped path, under a checkout's src/usr/local/etc/rc.d/
+# sibling of this file's own scripts/ directory (issue #2675).
 # Resolved once at source time — CDPATH='' guard used throughout scripts/, see
 # tests/shell/cdpath_spec.sh.
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
-HOOK_SRC="${SCRIPT_DIR}/rc.d/pfblockerng_repo_generate.sh"
+HOOK_SRC="${SCRIPT_DIR}/../src/usr/local/etc/rc.d/pfblockerng_repo_generate.sh"
 
 PKG_BIN="${PKG_BIN:-/usr/local/sbin/pkg}"
 PFBLOCKERNG_ROOT="${PFBLOCKERNG_ROOT:-/}"
 ROOT="${PFBLOCKERNG_ROOT%/}"
-PFB_DEFAULT_BASE_URL='https://pkg.pfblockerng.com'
+# The pkg repository domain, once. The scheme is chosen per use: the CATALOGUE is fetched
+# over plain HTTP, because pkg on pfSense Plus runs against a Netgate-pinned CA bundle
+# nothing we ship can widen — authenticity rides the catalogue signature instead (issue
+# #2675). Fetching THIS script has no signature to fall back on, so that stays HTTPS.
+PFB_REPO_HOST="${PFB_REPO_HOST:-pkg.pfblockerng.com}"
+PFB_DEFAULT_BASE_URL='http://pkg.pfblockerng.com'
 PFB_BASE_URL="${PFB_BASE_URL:-${PFB_DEFAULT_BASE_URL}}"
+# Normalised once, here at the input boundary, so nothing downstream rewrites a scheme:
+# an operator (or an older doc) handing us https for OUR host would otherwise produce a
+# conf pairing TLS with signature_type: fingerprints — the one combination pkg cannot
+# fetch on Plus. Any other host is left exactly as given.
+case "${PFB_BASE_URL}" in
+    "https://${PFB_REPO_HOST}" | "https://${PFB_REPO_HOST}/"*)
+        PFB_BASE_URL="http://${PFB_BASE_URL#https://}"
+        ;;
+esac
 
 CANONICAL_PKG="pfSense-pkg-pfBlockerNG"
 REPOS_DIR="${ROOT}/usr/local/etc/pkg/repos"
+# Staged like every other on-box path: a ROOT-staged run (the test harnesses, a
+# chroot install) must never write the host's real fingerprint store.
+FINGERPRINT_DIR="${ROOT}/usr/local/etc/pkg/fingerprints/pfblockerng"
 ON_BOX_HOOK="${ROOT}/usr/local/etc/rc.d/pfblockerng_repo_generate.sh"
 CONFIG_XML="${ROOT}/cf/conf/config.xml"
 CONF_MARKER="Generated at boot by pfblockerng_repo_generate"
@@ -300,8 +318,8 @@ Usage:
   install.sh --channel <stable|testing|edge|nightly>   subscribe + install/converge (idempotent)
   install.sh -h|--help                                  this text
 
-Published at ${PFB_BASE_URL}/install.sh; run ON the box:
-  fetch -qo - ${PFB_BASE_URL}/install.sh | sh -s -- --channel <stable|testing|edge|nightly>
+Published at https://${PFB_REPO_HOST}/install.sh; run ON the box:
+  fetch -qo - https://${PFB_REPO_HOST}/install.sh | sh -s -- --channel <stable|testing|edge|nightly>
 
 Installs the boot-time repo-conf generator hook (ADR-39), subscribes this box to the
 named channel ALONE (retiring any other pfBlockerNG channel conf), then installs or
@@ -320,8 +338,9 @@ USAGE
 }
 
 # pfb_emit_embedded_hook — print the rc.d generator hook to stdout. In the repository
-# copy this is a STUB that fails loud: the standalone scripts/rc.d/pfblockerng_repo_generate.sh
-# is the source of truth, used directly from a checkout via HOOK_SRC. The website build
+# copy this is a STUB that fails loud: the standalone
+# src/usr/local/etc/rc.d/pfblockerng_repo_generate.sh is the source of truth, used
+# directly from a checkout via HOOK_SRC. The website build
 # (gen_landing.py) replaces the body between the PFB_EMBED markers with the hook in a
 # single-quoted heredoc, producing the self-contained install.sh served at
 # <base>/install.sh for `fetch | sh`.
@@ -413,6 +432,7 @@ name="pfblockerng_repo_generate"
 : "${PFB_TESTING_CONF:=/usr/local/etc/pkg/repos/pfblockerng-testing.conf}"
 : "${PFB_EDGE_CONF:=/usr/local/etc/pkg/repos/pfblockerng-edge.conf}"
 : "${PFB_NIGHTLY_CONF:=/usr/local/etc/pkg/repos/pfblockerng-nightly.conf}"
+: "${PFB_FINGERPRINT_DIR:=/usr/local/etc/pkg/fingerprints/pfblockerng}"
 : "${PFB_PRODUCT_LABEL:=/etc/product_label}"
 : "${PFB_VERSION_FILE:=/etc/version}"
 
@@ -434,7 +454,11 @@ name="pfblockerng_repo_generate"
 # of its own. Deliberately NOT named PFB_DEFAULT_BASE_URL: gen_landing.py injects
 # a variable of that name into install.sh, and the published installer carries
 # this hook embedded in it.
-PFB_FALLBACK_BASE_URL='https://pkg.pfblockerng.com'
+# The pkg repository domain. Scheme per use site: the catalogue is plain HTTP (pkg's
+# CA store is Netgate-pinned on pfSense Plus, so TLS is not a trust anchor we can rely
+# on there -- the catalogue signature is, issue #2675).
+REPO_HOST='pkg.pfblockerng.com'
+PFB_FALLBACK_BASE_URL="http://${REPO_HOST}"
 
 CONF_PRIORITY=100
 
@@ -524,7 +548,98 @@ _base_from_conf() {
         *://*) ;;
         *) return 2 ;;
     esac
+    # ONE-WAY MIGRATION, and the only scheme rewrite anywhere: a box bootstrapped
+    # before issue #2675 carries an https base in its own conf, and re-emitting that
+    # verbatim would pair TLS with `signature_type: fingerprints` -- precisely the
+    # combination pkg cannot fetch on pfSense Plus, where its CA store is
+    # Netgate-pinned. Only OUR host is moved, and only downward: a fork base, a
+    # staging host, a file:// tree all keep exactly what they had. Generators emit
+    # the base they are handed; nothing else rewrites a scheme.
+    case "${_bc_base}" in
+        "https://${REPO_HOST}" | "https://${REPO_HOST}/"*)
+            printf 'http://%s' "${_bc_base#https://}"
+            return 0
+            ;;
+    esac
     printf '%s' "${_bc_base}"
+}
+
+# The catalogue signing key's public half, as the fingerprint pkg checks: the SHA256 of
+# the DER public key exactly as the catalogue embeds it (issue #2675). Shipped as the
+# hex rather than the key itself because that is all `signature_type: fingerprints`
+# needs on the box -- the key travels inside each signed catalogue.
+# What the conf TELLS pkg, and where this hook WRITES, are two different paths and
+# must stay so: PFB_FINGERPRINT_DIR is staged by every off-box caller (install.sh
+# under ROOT, the specs under their own tmp box), while the emitted conf has to
+# name the path that will exist on the running box -- a chroot install whose conf
+# pointed at the staging directory would find no trusted key once it booted as /.
+CONF_FINGERPRINT_DIR='/usr/local/etc/pkg/fingerprints/pfblockerng'
+CONF_FINGERPRINT_NAME="${REPO_HOST}"
+CONF_FINGERPRINT_SHA256='081df5476f84d8d20417c400f576c355069a4a9979d170bcaae1c9da32778915'
+
+# Install the trusted fingerprint. Runs BEFORE any conf is rewritten: a box that reached
+# a signature-requiring conf without the key that validates it could no longer reach the
+# repository that would fix it. Every failure is non-fatal -- this hook must never wedge
+# boot -- and a conf rewrite that follows a failed write is still safe, because pkg
+# treats an unreadable fingerprint dir as "no trusted key" and refuses the catalogue
+# rather than trusting it.
+_write_fingerprint() {
+    _wf_trusted="${PFB_FINGERPRINT_DIR}/trusted"
+    _wf_file="${_wf_trusted}/${CONF_FINGERPRINT_NAME}"
+    # $$-suffixed and OUTSIDE trusted/: two hooks racing at boot would otherwise
+    # collide on one temp name, and pkg reads every file in trusted/ as a key.
+    _wf_tmp="${PFB_FINGERPRINT_DIR}/.${CONF_FINGERPRINT_NAME}.$$"
+    mkdir -p "${_wf_trusted}" "${PFB_FINGERPRINT_DIR}/revoked" 2>/dev/null || {
+        printf '[%s] WARNING: could not create %s\n' "${name}" "${PFB_FINGERPRINT_DIR}" >&2
+        return 1
+    }
+    if printf 'function: "sha256"\nfingerprint: "%s"\n' "${CONF_FINGERPRINT_SHA256}" >"${_wf_tmp}" 2>/dev/null; then
+        if mv "${_wf_tmp}" "${_wf_file}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    rm -f "${_wf_tmp}" 2>/dev/null
+    printf '[%s] WARNING: could not write %s\n' "${name}" "${_wf_file}" >&2
+    return 1
+}
+
+# The URL a conf points at, for a resolved catalogue base. HTTPS is downgraded to plain
+# HTTP deliberately: pkg on pfSense Plus runs against a Netgate-pinned CA bundle that
+# nothing we ship can widen, so TLS to our host is not a trust anchor we can rely on --
+# authenticity comes from the catalogue signature instead, and package payloads are
+# checksummed by that signed catalogue. Any other scheme is left alone; a file://
+# catalogue has no network in its path at all.
+# The one host whose catalogues our signing key signs. The signed shape keys on the
+# HOST, never the scheme alone: a fork base serves a catalogue our key never touched,
+# so pinning our fingerprint to it would leave that fork unusable -- and downgrading
+# someone else's host to plaintext is not ours to do.
+_conf_signed_host() {
+    case "$1" in
+        "https://${REPO_HOST}" | "https://${REPO_HOST}/"* | \
+            "http://${REPO_HOST}" | "http://${REPO_HOST}/"*) return 0 ;;
+    esac
+    return 1
+}
+
+# Trust comment + signature fields, keyed on the URL: a file:// catalogue is built
+# locally and carries no signature, so requiring one would fail a catalogue that is fine.
+_conf_trust_comment() {
+    if _conf_signed_host "$1"; then
+        printf '%s\n%s\n%s\n' \
+            '# Signed catalogue (issue #2675): the trust anchor is our own ECDSA key, whose' \
+            "# fingerprint the boot rc.d hook installs; the fetch is plain HTTP because pkg's" \
+            '# CA store is Netgate-pinned on pfSense Plus and unreachable from the GUI.'
+    else
+        printf '%s\n' '# Unsigned catalogue: this base is not the signed project host.'
+    fi
+}
+
+_conf_signature_lines() {
+    if _conf_signed_host "$1"; then
+        printf '  signature_type: fingerprints,\n  fingerprints: "%s",' "${CONF_FINGERPRINT_DIR}"
+    else
+        printf '  signature_type: none,'
+    fi
 }
 
 # Emit the canonical conf body. $1 = channel word, $2 = repo name, $3 = url.
@@ -536,15 +651,15 @@ _emit_conf() {
     cat <<EOF
 # Generated at boot by pfblockerng_repo_generate (ADR-39) — do not edit; re-run install.sh --channel ${_ec_channel} to change.
 # pfBlockerNG (${_ec_channel} channel) — self-hosted pkg repository (ADR-17).
-# NONE-signed: trust anchor is HTTPS to the host (no signing key). The URL is
-# fully resolved for this box's edition/version (ADR-39; arch-less/NO_ARCH,
+$(_conf_trust_comment "${_ec_url}")
+# The URL is fully resolved for this box's edition/version (ADR-39; arch-less/NO_ARCH,
 # issue #1806); the boot rc.d hook updates it on a pfSense OS upgrade.
 # priority ${CONF_PRIORITY} sits above the base Netgate \`pfSense\` repo so cross-repo
 # resolution (pkg install/upgrade, GUI Install) selects the pfBlockerNG build.
 ${_ec_repo}: {
   url: "${_ec_url}",
   mirror_type: none,
-  signature_type: none,
+$(_conf_signature_lines "${_ec_url}")
   priority: ${CONF_PRIORITY},
   enabled: yes
 }
@@ -1039,6 +1154,16 @@ _logincap_setenv_remove() {
 # orphan guard skips every absent conf, so a box on one channel stays on that one
 # channel across a reboot (single-repository subscription, issue #2148).
 pfblockerng_repo_generate_start() {
+    # FIRST, and a hard gate: a conf that requires a signature is useless without the
+    # key that validates it, and a box that got one could no longer reach the repository
+    # that would fix it. If the store cannot be written, every conf is left exactly as
+    # it is -- whatever the box had kept working until now.
+    if ! _write_fingerprint; then
+        printf '[%s] WARNING: no trusted fingerprint installed — leaving every conf unchanged\n' \
+            "${name}" >&2
+        _login_ca_reconcile
+        return 0
+    fi
     _regen_one "${PFB_STABLE_CONF}"  'stable'  'pfblockerng-stable'
     _regen_one "${PFB_TESTING_CONF}" 'testing' 'pfblockerng-testing'
     _regen_one "${PFB_EDGE_CONF}"    'edge'    'pfblockerng-edge'
@@ -1130,14 +1255,9 @@ pfb_channel_install() {
         die 1 "'${PKG_BIN}' not found — run this ON a pfSense box, or set PKG_BIN"
 
     # 2. Boot-time generator hook: install/refresh only if missing or different.
-    #    Try the EMBEDDED hook first: the published artifact's own filename IS
-    #    install.sh, so a downloaded copy saved beside a stale on-box hook (in
-    #    /usr/local/etc, where ROOT="") would make "-f SCRIPT_DIR/install.sh"
-    #    true for a non-checkout copy too — trusting that check first would then
-    #    `cmp` the on-box hook against HOOK_SRC, its own collided path, and never
-    #    refresh a stale one. HOOK_SRC (the checkout sibling) is consulted only
-    #    when the embedded hook is the repository stub (pfb_emit_embedded_hook
-    #    fails); die if neither source is available.
+    #    Try the EMBEDDED hook first; HOOK_SRC (the checkout copy under src/) is
+    #    consulted only when the embedded hook is the repository stub
+    #    (pfb_emit_embedded_hook fails). Die if neither source is available.
     _hook_tmp="$(mktemp "${TMPDIR:-/tmp}/pfb-hook.XXXXXX")" || die 1 "mktemp failed while staging the boot hook"
     if pfb_emit_embedded_hook >"${_hook_tmp}" 2>/dev/null; then
         :
@@ -1196,6 +1316,7 @@ pfb_channel_install() {
         PFB_NIGHTLY_CONF="${_no_conf}" \
         "${_own_conf_var}=${CONF_PATH}" \
         PFB_BASE_URL="${PFB_BASE_URL}" \
+        PFB_FINGERPRINT_DIR="${FINGERPRINT_DIR}" \
         PFB_PRODUCT_LABEL="${ROOT}/etc/product_label" \
         PFB_VERSION_FILE="${ROOT}/etc/version" \
         PFB_CONFIG_XML="${ROOT}/cf/conf/config.xml" \
