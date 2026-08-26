@@ -42,18 +42,10 @@ import catalogue_fixtures as tbrp
 import publish_catalogues as pc
 import publish_release as pr
 import tagged_release_handoff as trh
-from _srcrepo import EngineRootError, resolve_src_root
 
-try:
-    _SRC_ROOT = resolve_src_root()
-    _ENGINE = pc.load_engine(_SRC_ROOT)
-    _ENGINE_SKIP_REASON = ""
-except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
-    _SRC_ROOT = None
-    _ENGINE = None
-    _ENGINE_SKIP_REASON = str(exc)
-
-_requires_engine = unittest.skipIf(_ENGINE is None, _ENGINE_SKIP_REASON)
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+_ENGINE = pc.load_engine()
+_requires_engine = unittest.skipIf(False, "")
 
 _REPO = pc.EXPECTED_SOURCE_REPOSITORY
 
@@ -338,7 +330,6 @@ def _run_result(*, canonical: pc.VerifiedAsset, dependency: pc.VerifiedAsset) ->
         intake=pc.parse_intake(_REPO, "1", "v4.0.0.b1", '["edge"]', "10:1"),
         canonical_assets=(canonical,),
         dependency_assets=(dependency,),
-        build_route_rows=(ROW_CE,),
     )
 
 
@@ -964,7 +955,6 @@ class TargetResolutionTests(_TempDirTestCase):
             intake=pc.parse_intake(_REPO, "1", "v4.0.0.b1", '["edge"]', "10:1"),
             canonical_assets=(asset,),
             dependency_assets=(),
-            build_route_rows=(ROW_CE,),
         )
         with self.assertRaises(pc.RunVerificationError) as ctx:
             pr._build_targets(_ENGINE, run_result)

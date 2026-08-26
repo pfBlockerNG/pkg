@@ -36,9 +36,10 @@ def _build(tmp_path: Path, out_name: str, *, sign_key: Path | None, payload: byt
     """Build one signed-or-unsigned catalogue tree; return its packagesite.pkg."""
     in_dir = tmp_path / out_name / "in"
     in_dir.mkdir(parents=True)
-    tbrp.make_pkg(in_dir / "demo-1.0_1.pkg", payload=payload)
+    package = in_dir / "demo-1.0_1.pkg"
+    tbrp.make_pkg(package, payload=payload)
     out = tmp_path / out_name / "out"
-    tbrp.brp.build_repo(in_dir, out, sign_key=sign_key)
+    tbrp.brp.emit_catalog(out, [package], root=out.parent, sign_key=sign_key)
     return out / "packagesite.pkg"
 
 

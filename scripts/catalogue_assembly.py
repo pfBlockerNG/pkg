@@ -19,10 +19,8 @@ identity checks around the engine's catalogue emission.
 from __future__ import annotations
 
 import hashlib
-import os
 import shutil
-import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from publish_catalogues import Engine
@@ -49,9 +47,7 @@ _KNOWN_CHANNELS: frozenset[str] = frozenset({"stable", "testing", "edge", "night
 # guard is this module's own; the engine has no reason to know about NAME_MAX.
 _MAX_VARVER_LENGTH = 255
 
-# The retained-generation count for a (channel, varver) with no special-cased override.
-# A later ticket pinning an EOL'd varver to keep=1 only has to teach
-# `retention_keep_count` a lookup — no caller reshaping.
+# Canonical generations retained per channel/varver.
 DEFAULT_RETENTION_KEEP = 5
 
 # Containment order (slower -> faster): stable subset-of testing subset-of edge (issue #2147's
@@ -65,17 +61,23 @@ _SLOWER_CHANNELS: dict[str, tuple[str, ...]] = {
     "edge": ("stable", "testing"),
     "nightly": (),
 }
-assert set(_SLOWER_CHANNELS) == _KNOWN_CHANNELS, "_SLOWER_CHANNELS must cover every _KNOWN_CHANNELS entry"
+assert set(_SLOWER_CHANNELS) == _KNOWN_CHANNELS, (
+    "_SLOWER_CHANNELS must cover every _KNOWN_CHANNELS entry"
+)
 
 
 def _validate_channel(channel: str) -> None:
     if channel not in _KNOWN_CHANNELS:
-        raise CatalogueAssemblyError(f"unknown channel {channel!r}: must be one of {sorted(_KNOWN_CHANNELS)!r}")
+        raise CatalogueAssemblyError(
+            f"unknown channel {channel!r}: must be one of {sorted(_KNOWN_CHANNELS)!r}"
+        )
 
 
 def _validate_varver(varver: str, engine: Engine) -> None:
     if len(varver) > _MAX_VARVER_LENGTH:
-        raise CatalogueAssemblyError(f"varver exceeds {_MAX_VARVER_LENGTH} characters ({len(varver)}): {varver!r}")
+        raise CatalogueAssemblyError(
+            f"varver exceeds {_MAX_VARVER_LENGTH} characters ({len(varver)}): {varver!r}"
+        )
     brp = engine.catalogue_engine
     try:
         brp._validate_catalog_name(varver, single_segment=True)
@@ -97,31 +99,10 @@ def _catalogue_dir(site_root: Path, channel: str, varver: str, engine: Engine) -
     _validate_varver(varver, engine)
     catalogue_dir = Path(site_root) / channel / varver
     if not catalogue_dir.is_dir():
-        raise CatalogueAssemblyError(f"{channel}/{varver}: catalogue directory does not exist: {catalogue_dir}")
+        raise CatalogueAssemblyError(
+            f"{channel}/{varver}: catalogue directory does not exist: {catalogue_dir}"
+        )
     return catalogue_dir
-
-
-def _stage(paths: Sequence[Path], stage_dir: Path) -> None:
-    """Link (or copy) ``paths`` into a fresh ``stage_dir`` under their own basenames.
-
-    Every ``paths`` entry is already a uniquely-named ``.pkg`` file discovered by
-    globbing ONE catalogue directory (``regenerate_catalogue``'s own pool
-    collection), so a basename collision is structurally impossible here.
-    Staging exists for a narrower reason: ``build_repo`` globs ``*.pkg`` in
-    whatever directory it is given rather than accepting an explicit file list,
-    so the only way to hand it a pool that excludes the catalog's own
-    ``data.pkg``/``packagesite.pkg`` is to first copy that pool somewhere
-    ``build_repo`` will re-glob and find nothing else. ``os.link`` preserves the
-    source mtime for free (same inode); the ``shutil.copy2`` fallback preserves
-    it explicitly when ``stage_dir`` is cross-device from the source.
-    """
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    for path in paths:
-        target = stage_dir / path.name
-        try:
-            os.link(path, target)
-        except OSError:
-            shutil.copy2(path, target)
 
 
 def regenerate_catalogue(
@@ -132,67 +113,33 @@ def regenerate_catalogue(
     engine: Engine,
     sign_key: Path | None = None,
 ) -> None:
-    """Rebuild ``site_root/channel/varver`` from whatever ``.pkg`` files already
-    sit in that directory — canonical and dependency alike, no distinction made
-    here (that distinction only matters to ``prune_retained``).
-
-    ``sign_key`` is passed straight through to ``build_repo`` (issue #2675):
-    ``None`` (the default) leaves the catalogue unsigned, byte-identical to
-    before this parameter existed.
-
-    The trap this function exists to dodge: ``build_repo`` globs ``*.pkg`` in its
-    input directory, so a second regeneration pass over the SAME directory would
-    otherwise ingest its own descriptor archives. Excluding the engine's
-    `_CATALOG_PKG_FILES` makes regeneration idempotent.
-
-    Writes directly into ``site_root`` (via ``build_repo``'s own
-    ``catalog_name=f"{channel}/{varver}"`` routing) — no scratch tree, no backup,
-    no rollback. ``build_repo``'s own ``_write_catalog_dir`` reads every staged
-    source's bytes before wiping/rebuilding the destination, so a VALIDATION
-    fault (a corrupt pool member, a mixed/concrete ABI, an unreadable archive)
-    always raises before anything is deleted, leaving the directory untouched.
-
-    That is not the only fault window, though: a write-back fault AFTER the
-    wipe (mid-loop I/O error, disk full, process kill) can still leave the
-    directory in a genuine third state — wiped and partially rebuilt, missing
-    some of ``meta.conf``/``data.pkg``/``packagesite.pkg``/its ``.pkg`` files.
-    This function does not contain that window by itself; it propagates
-    whatever the engine raises, UNWRAPPED, exactly as for a validation fault.
-    Containment is the CALLER's job: the caller must treat any exception from
-    this call as fatal to the whole run and abort before staging, committing,
-    or pushing anything — a half-written catalogue must never reach a commit.
-    """
+    """Rebuild one catalogue from its current installable package pool."""
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
     brp = engine.catalogue_engine
-    pool = sorted(p for p in catalogue_dir.glob("*.pkg") if p.is_file() and p.name not in brp._CATALOG_PKG_FILES)
+    pool = sorted(
+        p
+        for p in catalogue_dir.glob("*.pkg")
+        if p.is_file() and p.name not in brp._CATALOG_PKG_FILES
+    )
     if not pool:
         raise CatalogueAssemblyError(f"{channel}/{varver}: empty pool")
 
-    with tempfile.TemporaryDirectory(prefix="catalogue-assembly-") as stage_str:
-        stage_dir = Path(stage_str)
-        _stage(pool, stage_dir)
-        brp.build_repo(stage_dir, site_root, catalog_name=f"{channel}/{varver}", sign_key=sign_key)
-
-
-def retention_keep_count(channel: str, varver: str) -> int:
-    """Resolve the retained-generation count for one (channel, varver).
-
-    Seam for a later ticket: pinning an EOL'd varver (one we have also EOL'd on
-    our side) to keep=1 only has to teach this function a lookup — no caller
-    reshaping. Today every (channel, varver) gets ``DEFAULT_RETENTION_KEEP``.
-    """
-    return DEFAULT_RETENTION_KEEP
+    brp.emit_catalog(catalogue_dir, pool, root=site_root, sign_key=sign_key)
 
 
 def _canonical_version(path: Path, manifest: Mapping[str, object]) -> str:
     version = manifest.get("version")
     if not isinstance(version, str):
-        raise CatalogueAssemblyError(f"{path}: canonical package manifest version must be a string")
+        raise CatalogueAssemblyError(
+            f"{path}: canonical package manifest version must be a string"
+        )
     return version
 
 
-def _protected_versions(site_root: Path, channel: str, varver: str, *, engine: Engine) -> frozenset[str]:
+def _protected_versions(
+    site_root: Path, channel: str, varver: str, *, engine: Engine
+) -> frozenset[str]:
     """Canonical package versions one of ``channel``'s slower channels
     (``_SLOWER_CHANNELS[channel]``) still carries for this SAME ``varver`` — the set
     ``prune_retained`` must never evict from ``channel``, or a faster channel could
@@ -240,7 +187,9 @@ def _canonical_filename(path: Path, manifest: Mapping[str, object]) -> str:
     return f"{manifest['name']}-{_canonical_version(path, manifest)}.pkg"
 
 
-def _iter_canonical_packages(catalogue_dir: Path, *, engine: Engine) -> list[tuple[Path, str]]:
+def _iter_canonical_packages(
+    catalogue_dir: Path, *, engine: Engine
+) -> list[tuple[Path, str]]:
     """Canonical ``.pkg`` files in ``catalogue_dir`` as ``(path, filename)``.
 
     Catalog descriptor files and non-canonical (dependency) packages are skipped,
@@ -332,17 +281,16 @@ def prune_retained(
     varver: str,
     *,
     engine: Engine,
-    keep_count_for: Callable[[str, str], int] = retention_keep_count,
 ) -> tuple[Path, ...]:
     """Delete every CANONICAL ``.pkg`` in ``site_root/channel/varver`` beyond the
-    newest ``keep_count_for(channel, varver)`` generations, newest-first by
+    newest ``DEFAULT_RETENTION_KEEP`` generations, newest-first by
     ``engine.pfb_pkg.pkg_version_sort_key`` — EXCEPT a generation ``_protected_versions``
     reports as still retained by one of ``channel``'s slower channels for this same
     ``varver`` (containment-aware retention). Returns the deleted paths.
 
     Without the exception: edge receives the union of every tagged stream (edge
     prereleases + testing prereleases + stable finals), so it rotates through its
-    ``keep_count_for`` slots strictly faster than testing/stable and could silently
+    fixed retention slots strictly faster than testing/stable and could silently
     evict a canonical version one of them still serves — quietly breaking this
     project's strict-containment contract (edge superset-of testing superset-of stable,
     documented in ``gen_landing.py``'s trust section and
@@ -359,9 +307,7 @@ def prune_retained(
     """
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
-    keep = keep_count_for(channel, varver)
-    if type(keep) is not int or keep < 1:
-        raise CatalogueAssemblyError(f"retention keep-count for {channel}/{varver} must be a positive integer")
+    keep = DEFAULT_RETENTION_KEEP
 
     pfb_pkg = engine.pfb_pkg
     brp = engine.catalogue_engine
@@ -378,8 +324,14 @@ def prune_retained(
     canonical.sort(key=lambda item: item[0], reverse=True)
     beyond_keep = canonical[keep:]
     # Skip the slower-channel scan entirely when nothing would be evicted anyway.
-    protected = _protected_versions(site_root, channel, varver, engine=engine) if beyond_keep else frozenset()
-    evicted = tuple(path for _, path, version in beyond_keep if version not in protected)
+    protected = (
+        _protected_versions(site_root, channel, varver, engine=engine)
+        if beyond_keep
+        else frozenset()
+    )
+    evicted = tuple(
+        path for _, path, version in beyond_keep if version not in protected
+    )
     for path in evicted:
         path.unlink()
     return evicted
@@ -414,7 +366,9 @@ def verify_multi_destination_identity(
         if len(destinations) < 2:
             continue
         manifest = pfb_pkg.read_compact_manifest(source_path)
-        canonical_name = f"{manifest['name']}-{_canonical_version(source_path, manifest)}.pkg"
+        canonical_name = (
+            f"{manifest['name']}-{_canonical_version(source_path, manifest)}.pkg"
+        )
 
         baseline = (
             hashlib.sha256(source_path.read_bytes()).hexdigest(),

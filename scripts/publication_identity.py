@@ -8,11 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
-PACKAGE = "pfSense-pkg-pfBlockerNG"
-
 Stage = Literal["final", "alpha", "beta", "rc"]
 Channel = Literal["stable", "testing", "edge"]
-GithubRelease = Literal["final", "prerelease"]
 
 _CORE = r"(0|[1-9][0-9]*)"
 _FINAL_RE = re.compile(
@@ -32,19 +29,9 @@ _MAX_RELEASE_TEXT = 128
 
 @dataclass(frozen=True)
 class ReleaseInfo:
-    tag: str | None
-    version: str
     stage: Stage
-    sequence: str | None
-    target_final: str
     release_line: str
-    channel: Channel
-    prerelease: bool
-    final: bool
-    notes_required: bool
-    github_release: GithubRelease
     pkg_version: str
-    package: str
 
 
 def _invalid(tag: str) -> ValueError:
@@ -68,19 +55,9 @@ def parse_release_tag(tag: str, channel: Channel | None = None) -> ReleaseInfo:
         )
         version = f"{major}.{minor}.{patch}"
         return ReleaseInfo(
-            tag=tag,
-            version=version,
             stage="final",
-            sequence=None,
-            target_final=version,
             release_line=f"release/{major}.{minor}",
-            channel="stable",
-            prerelease=False,
-            final=True,
-            notes_required=True,
-            github_release="final",
             pkg_version=version,
-            package=PACKAGE,
         )
 
     match = _PREVIEW_RE.fullmatch(tag)
@@ -98,21 +75,10 @@ def parse_release_tag(tag: str, channel: Channel | None = None) -> ReleaseInfo:
         stage_code = match.group("stage")
         stage = {"a": "alpha", "b": "beta", "r": "rc"}[stage_code]
         sequence = match.group("sequence")
-        version = f"{major}.{minor}.{patch}"
         return ReleaseInfo(
-            tag=tag,
-            version=f"{version}.{stage_code}{sequence}",
             stage=stage,  # type: ignore[arg-type]
-            sequence=sequence,
-            target_final=version,
             release_line=f"release/{major}.{minor}",
-            channel=channel,
-            prerelease=True,
-            final=False,
-            notes_required=True,
-            github_release="prerelease",
-            pkg_version=f"{version}.{stage_code}{sequence}",
-            package=PACKAGE,
+            pkg_version=f"{major}.{minor}.{patch}.{stage_code}{sequence}",
         )
 
     raise _invalid(tag)

@@ -32,18 +32,10 @@ import nightly_contract as nc
 import publish_catalogues as pc
 import publish_nightly as pn
 import publish_release as pr
-from _srcrepo import EngineRootError, resolve_src_root
 
-try:
-    _SRC_ROOT = resolve_src_root()
-    _ENGINE = pc.load_engine(_SRC_ROOT)
-    _ENGINE_SKIP_REASON = ""
-except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
-    _SRC_ROOT = None
-    _ENGINE = None
-    _ENGINE_SKIP_REASON = str(exc)
-
-_requires_engine = unittest.skipIf(_ENGINE is None, _ENGINE_SKIP_REASON)
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+_ENGINE = pc.load_engine()
+_requires_engine = unittest.skipIf(False, "")
 
 _REPO = pc.EXPECTED_SOURCE_REPOSITORY
 _RUN_ID = "555000111:1"
@@ -86,16 +78,26 @@ def _row(
     return row
 
 
-ROW_CE15 = _row(freebsd_major="15", pfsense_version="2.8", variant="CE", extra_pkgs=["textproc/py-charset-normalizer"])
+ROW_CE15 = _row(
+    freebsd_major="15",
+    pfsense_version="2.8",
+    variant="CE",
+    extra_pkgs=["textproc/py-charset-normalizer"],
+)
 ROW_CE15_NO_EXTRA = _row(freebsd_major="15", pfsense_version="2.8", variant="CE")
 ROW_PLUS16_03 = _row(freebsd_major="16", pfsense_version="26.03", variant="Plus")
 ROW_PLUS16_07 = _row(freebsd_major="16", pfsense_version="26.07", variant="Plus")
 ROW_PLUS15_03 = _row(freebsd_major="15", pfsense_version="26.03", variant="Plus")
-ROW_ROUTE_ONLY_17 = _row(freebsd_major="17", pfsense_version="17.0", variant="CE", role="route-only")
+ROW_ROUTE_ONLY_17 = _row(
+    freebsd_major="17", pfsense_version="17.0", variant="CE", role="route-only"
+)
 # Same major as ROW_CE15, ALSO declaring the charset extra — two build-role ROUTE
 # rows sharing one leg, both declaring the dep (issue #2468 coverage).
 ROW_CE15_29 = _row(
-    freebsd_major="15", pfsense_version="2.9", variant="CE", extra_pkgs=["textproc/py-charset-normalizer"]
+    freebsd_major="15",
+    pfsense_version="2.9",
+    variant="CE",
+    extra_pkgs=["textproc/py-charset-normalizer"],
 )
 
 
@@ -123,7 +125,9 @@ def _snapshot(
         pkg_version=f"{build_date:%Y%m%d}120000.{source_sha[:7]}",
         source_sha=source_sha,
         ports_sha=ports_sha,
-        input_digest=nc.combined_nightly_input_digest(source_sha, ports_sha, matrix_digest),
+        input_digest=nc.combined_nightly_input_digest(
+            source_sha, ports_sha, matrix_digest
+        ),
     )
 
 
@@ -137,10 +141,14 @@ def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> No
             info.mode = mode
             info.mtime = mtime
             tf.addfile(info, io.BytesIO(data))
-    path.write_bytes(pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable"))
+    path.write_bytes(
+        pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable")
+    )
 
 
-def _wrap_canonical_pkg(directory: Path, record: dict, *, local_name: str) -> tuple[Path, str]:
+def _wrap_canonical_pkg(
+    directory: Path, record: dict, *, local_name: str
+) -> tuple[Path, str]:
     """A full, validate_project_pkg-shaped canonical .pkg carrying ``record`` as its
     pfb_build_record annotation, under its bare Nightly name (no -<Variant>-<version>
     suffix). Returns (path, sha256 of the bytes)."""
@@ -163,7 +171,11 @@ def _wrap_canonical_pkg(directory: Path, record: dict, *, local_name: str) -> tu
         "abi": f"FreeBSD:{major}:*",
         "arch": f"freebsd:{major}:*",
         "prefix": "/usr/local",
-        "annotations": {pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(record, separators=(",", ":"), sort_keys=True)},
+        "annotations": {
+            pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(
+                record, separators=(",", ":"), sort_keys=True
+            )
+        },
     }
     php_dep = "php" + row["php_version"].replace(".", "")
     python_dep = "python" + row["py_flavor"][2:]
@@ -192,7 +204,12 @@ def _wrap_canonical_pkg(directory: Path, record: dict, *, local_name: str) -> tu
     compact = {**common, "deps": deps}
 
     members = [
-        ("+COMPACT_MANIFEST", json.dumps(compact, separators=(",", ":")).encode(), 0o644, 0),
+        (
+            "+COMPACT_MANIFEST",
+            json.dumps(compact, separators=(",", ":")).encode(),
+            0o644,
+            0,
+        ),
         ("+MANIFEST", json.dumps(full, separators=(",", ":")).encode(), 0o644, 0),
     ]
     members.extend((name, data, 0o644, epoch) for name, data in payload.items())
@@ -211,7 +228,12 @@ def _wrap_dependency_pkg(
     origin: str | None = None,
     payload: dict[str, bytes] | None = None,
 ) -> tuple[Path, str]:
-    manifest = {"name": name, "version": version, "abi": abi, "origin": origin or f"textproc/{name}"}
+    manifest = {
+        "name": name,
+        "version": version,
+        "abi": abi,
+        "origin": origin or f"textproc/{name}",
+    }
     compact = json.dumps(manifest, separators=(",", ":")).encode()
     members = [("+COMPACT_MANIFEST", compact, 0o644, 0)]
     # Extra members vary the archive BYTES under an identical manifest identity —
@@ -254,7 +276,9 @@ def _resolved_dep_specs(spec: _LegSpec) -> Sequence[tuple[str, str]]:
     return ()
 
 
-def _make_record(snapshot: _Snapshot, row: dict[str, object], epoch: int = _EPOCH) -> dict[str, object]:
+def _make_record(
+    snapshot: _Snapshot, row: dict[str, object], epoch: int = _EPOCH
+) -> dict[str, object]:
     normalized = _ENGINE.pfb_pkg.validate_build_matrix_row(row)
     major_minor = ".".join(str(normalized["pfsense_version"]).split(".")[:2])
     record: dict[str, object] = {
@@ -277,25 +301,40 @@ def _make_record(snapshot: _Snapshot, row: dict[str, object], epoch: int = _EPOC
     return _ENGINE.pfb_pkg.validate_build_record(record)
 
 
-def _build_leg_result(snapshot: Any, spec: _LegSpec, *, assets_root: Path) -> dict[str, Any]:
+def _build_leg_result(
+    snapshot: Any, spec: _LegSpec, *, assets_root: Path
+) -> dict[str, Any]:
     """Mint one Nightly leg's record and package fixtures."""
     major = str(spec.row["freebsd_major"])
     legdir = assets_root / f"{pn._LEG_DIR_PREFIX}{major}"
     legdir.mkdir(parents=True, exist_ok=True)
     record = _make_record(snapshot, spec.row, spec.source_date_epoch)
-    canonical_name = f"{_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{snapshot.pkg_version}.pkg"
+    canonical_name = (
+        f"{_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{snapshot.pkg_version}.pkg"
+    )
     _path, digest = _wrap_canonical_pkg(legdir, record, local_name=canonical_name)
     dep_artifacts = []
     for name, version in _resolved_dep_specs(spec):
         dep_name = f"{name}-{version}.pkg"
         _dep_path, dep_digest = _wrap_dependency_pkg(
-            legdir, name=name, version=version, abi=f"FreeBSD:{major}:*", local_name=dep_name, payload=spec.dep_payload
+            legdir,
+            name=name,
+            version=version,
+            abi=f"FreeBSD:{major}:*",
+            local_name=dep_name,
+            payload=spec.dep_payload,
         )
-        dep_artifacts.append({"abi": f"FreeBSD:{major}:*", "name": dep_name, "sha256": dep_digest})
+        dep_artifacts.append(
+            {"abi": f"FreeBSD:{major}:*", "name": dep_name, "sha256": dep_digest}
+        )
     return {
         "matrix_row": spec.row,
         "record": record,
-        "artifact": {"abi": f"FreeBSD:{major}:*", "name": canonical_name, "sha256": digest},
+        "artifact": {
+            "abi": f"FreeBSD:{major}:*",
+            "name": canonical_name,
+            "sha256": digest,
+        },
         "dep_artifacts": dep_artifacts,
     }
 
@@ -310,10 +349,17 @@ def _build_handoff(
     source_sha: str = _SOURCE_SHA,
     ports_sha: str = _PORTS_SHA,
 ) -> dict[str, Any]:
-    results = [_build_leg_result(snapshot, spec, assets_root=assets_root) for spec in legs]
+    results = [
+        _build_leg_result(snapshot, spec, assets_root=assets_root) for spec in legs
+    ]
     build_rows = [spec.row for spec in legs]
     matrix_payload = json.dumps(
-        {"tools_sha": _TOOLS_SHA, "matrix_sha": _MATRIX_SHA, "build": build_rows, "route": list(route_rows)},
+        {
+            "tools_sha": _TOOLS_SHA,
+            "matrix_sha": _MATRIX_SHA,
+            "build": build_rows,
+            "route": list(route_rows),
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
@@ -326,7 +372,9 @@ def _build_handoff(
         "ports_repo": "",
         "ports_ref": "",
         "pkg_version": snapshot.pkg_version,
-        "input_digest": nc.combined_nightly_input_digest(source_sha, ports_sha, matrix_digest),
+        "input_digest": nc.combined_nightly_input_digest(
+            source_sha, ports_sha, matrix_digest
+        ),
         "source_sha": source_sha,
         "ports_sha": ports_sha,
         "tools_sha": _TOOLS_SHA,
@@ -334,7 +382,9 @@ def _build_handoff(
         "matrix_digest": matrix_digest,
         "build_matrix": build_rows,
         "route_matrix": list(route_rows),
-        "builds": sorted(results, key=lambda item: str(item["matrix_row"]["freebsd_major"])),
+        "builds": sorted(
+            results, key=lambda item: str(item["matrix_row"]["freebsd_major"])
+        ),
     }
 
 
@@ -380,7 +430,10 @@ class _TempDirTestCase(unittest.TestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         return handoff, results_dir, snapshot
 
@@ -400,22 +453,34 @@ class HappyFanOutTests(_TempDirTestCase):
             _LegSpec(row=ROW_PLUS16_03),
         ]
         route_rows = [ROW_CE15, ROW_PLUS16_03, ROW_PLUS16_07]
-        handoff = _build_handoff(snapshot, legs=legs, route_rows=route_rows, assets_root=results_dir)
+        handoff = _build_handoff(
+            snapshot, legs=legs, route_rows=route_rows, assets_root=results_dir
+        )
 
         report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
         self.assertEqual(
             set(report.touched),
-            {("nightly", "ce-2.8"), ("nightly", "plus-26.03"), ("nightly", "plus-26.07")},
+            {
+                ("nightly", "ce-2.8"),
+                ("nightly", "plus-26.03"),
+                ("nightly", "plus-26.07"),
+            },
         )
         docs = self.pkg_repo / "docs" / "nightly"
         canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
         self.assertTrue((docs / "ce-2.8" / canonical_name).is_file())
-        self.assertTrue((docs / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file())
+        self.assertTrue(
+            (docs / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file()
+        )
         self.assertTrue((docs / "plus-26.03" / canonical_name).is_file())
         self.assertTrue((docs / "plus-26.07" / canonical_name).is_file())
-        self.assertFalse((docs / "plus-26.03" / "py311-charset-normalizer-3.4.0.pkg").exists())
-        self.assertFalse((docs / "plus-26.07" / "py311-charset-normalizer-3.4.0.pkg").exists())
+        self.assertFalse(
+            (docs / "plus-26.03" / "py311-charset-normalizer-3.4.0.pkg").exists()
+        )
+        self.assertFalse(
+            (docs / "plus-26.07" / "py311-charset-normalizer-3.4.0.pkg").exists()
+        )
         self.assertEqual(
             (docs / "plus-26.03" / canonical_name).read_bytes(),
             (docs / "plus-26.07" / canonical_name).read_bytes(),
@@ -451,7 +516,9 @@ class NoopTests(_TempDirTestCase):
             second.describe(),
             ["NOOP: every destination already matches this run's verified assets"],
         )
-        self.assertEqual((catalogue_dir / canonical_name).stat().st_mtime_ns, before_mtime)
+        self.assertEqual(
+            (catalogue_dir / canonical_name).stat().st_mtime_ns, before_mtime
+        )
         self.assertEqual((catalogue_dir / canonical_name).read_bytes(), before_bytes)
 
 
@@ -466,9 +533,14 @@ class ConflictTests(_TempDirTestCase):
         results_dir_1 = self.new_results_dir()
         snapshot = _snapshot()
         handoff_1 = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir_1
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir_1,
         )
-        first = _run(handoff=handoff_1, results_dir=results_dir_1, pkg_repo=self.pkg_repo)
+        first = _run(
+            handoff=handoff_1, results_dir=results_dir_1, pkg_repo=self.pkg_repo
+        )
         self.assertEqual(first.touched, (("nightly", "ce-2.8"),))
 
         catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
@@ -504,9 +576,14 @@ class StaleTests(_TempDirTestCase):
         newer_alloc = _snapshot(build_date=date(2026, 8, 10))
         results_dir_1 = self.new_results_dir()
         handoff_1 = _build_handoff(
-            newer_alloc, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir_1
+            newer_alloc,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir_1,
         )
-        first = _run(handoff=handoff_1, results_dir=results_dir_1, pkg_repo=self.pkg_repo)
+        first = _run(
+            handoff=handoff_1, results_dir=results_dir_1, pkg_repo=self.pkg_repo
+        )
         self.assertTrue(first.touched)
 
         catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
@@ -515,7 +592,10 @@ class StaleTests(_TempDirTestCase):
         older_alloc = _snapshot(build_date=date(2026, 8, 5))
         results_dir_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
-            older_alloc, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir_2
+            older_alloc,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir_2,
         )
 
         with self.assertRaises(pn.StaleNightlyError) as ctx:
@@ -540,16 +620,29 @@ class StaleTests(_TempDirTestCase):
         catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
         corrupt_name = "pfSense-pkg-pfBlockerNG-99.99.9999.pkg"
         corrupt_path = catalogue_dir / corrupt_name
-        manifest = {"name": _ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY, "abi": "FreeBSD:15:*"}
+        manifest = {
+            "name": _ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY,
+            "abi": "FreeBSD:15:*",
+        }
         _write_tar_pkg(
             corrupt_path,
-            [("+COMPACT_MANIFEST", json.dumps(manifest, separators=(",", ":")).encode(), 0o644, 0)],
+            [
+                (
+                    "+COMPACT_MANIFEST",
+                    json.dumps(manifest, separators=(",", ":")).encode(),
+                    0o644,
+                    0,
+                )
+            ],
         )
 
         newer_alloc = _snapshot(build_date=date(2026, 8, 20))
         results_dir_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
-            newer_alloc, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir_2
+            newer_alloc,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir_2,
         )
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
@@ -583,7 +676,9 @@ class RetentionTests(_TempDirTestCase):
             )
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
-        remaining = sorted(p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg"))
+        remaining = sorted(
+            p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg")
+        )
         self.assertEqual(len(remaining), keep)
         self.assertNotIn(f"pfSense-pkg-pfBlockerNG-{first_version}.pkg", remaining)
         self.assertTrue((catalogue_dir / dep_name).is_file())
@@ -597,7 +692,9 @@ class RetentionTests(_TempDirTestCase):
 
 class DependencyPlaceIfMissingTests(_TempDirTestCase):
     @_requires_engine
-    def test_rebuilt_dependency_different_bytes_publishes_without_conflict(self) -> None:
+    def test_rebuilt_dependency_different_bytes_publishes_without_conflict(
+        self,
+    ) -> None:
         """RED CANARY (issue #2468), nightly analogue: Nightly rebuilds its
         dependency every run from whatever source commit triggered it — new archive
         bytes under the identical name-version is expected, not an error. A second
@@ -616,12 +713,19 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         results_dir_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
             newer,
-            legs=[_LegSpec(row=ROW_CE15, dep_payload={"filler.bin": b"rebuilt-from-new-source-commit"})],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15,
+                    dep_payload={"filler.bin": b"rebuilt-from-new-source-commit"},
+                )
+            ],
             route_rows=[ROW_CE15],
             assets_root=results_dir_2,
         )
 
-        second = _run(handoff=handoff_2, results_dir=results_dir_2, pkg_repo=self.pkg_repo)
+        second = _run(
+            handoff=handoff_2, results_dir=results_dir_2, pkg_repo=self.pkg_repo
+        )
 
         self.assertTrue(second.touched)
         canonical_name = f"pfSense-pkg-pfBlockerNG-{newer.pkg_version}.pkg"
@@ -629,7 +733,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         self.assertEqual(dep_path.read_bytes(), original_dep_bytes)
 
     @_requires_engine
-    def test_dep_already_different_at_one_varver_does_not_trip_identity_check(self) -> None:
+    def test_dep_already_different_at_one_varver_does_not_trip_identity_check(
+        self,
+    ) -> None:
         """issue #2468: two build-role ROUTE rows of one major (ce-2.8 + ce-2.9) both
         declare the dep, so one leg's dep artifact reaches two catalogues. When one of
         them already holds a byte-different build of that same name-version, the run
@@ -657,15 +763,23 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         )
         report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
-        self.assertEqual(set(report.touched), {("nightly", "ce-2.8"), ("nightly", "ce-2.9")})
+        self.assertEqual(
+            set(report.touched), {("nightly", "ce-2.8"), ("nightly", "ce-2.9")}
+        )
         docs = self.pkg_repo / "docs" / "nightly"
-        self.assertEqual((docs / "ce-2.8" / _CHARSET_PKG).read_bytes(), stale_bytes)  # left as it was
+        self.assertEqual(
+            (docs / "ce-2.8" / _CHARSET_PKG).read_bytes(), stale_bytes
+        )  # left as it was
         fresh = docs / "ce-2.9" / _CHARSET_PKG
         self.assertTrue(fresh.is_file())
-        self.assertNotEqual(fresh.read_bytes(), stale_bytes)  # this run's own build, placed where missing
+        self.assertNotEqual(
+            fresh.read_bytes(), stale_bytes
+        )  # this run's own build, placed where missing
 
     @_requires_engine
-    def test_undeclared_same_name_leftover_replaced_by_this_runs_dependency(self) -> None:
+    def test_undeclared_same_name_leftover_replaced_by_this_runs_dependency(
+        self,
+    ) -> None:
         """A Nightly destination holding a same-name dependency whose origin the row no
         longer declares (the port moved category, issue #2403) must end ONE run
         advertising the dependency this run verified — place-if-missing and eviction
@@ -687,7 +801,10 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
 
         self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
         published = dest / _CHARSET_PKG
-        self.assertTrue(published.is_file(), "this run's verified dependency is missing from the catalogue")
+        self.assertTrue(
+            published.is_file(),
+            "this run's verified dependency is missing from the catalogue",
+        )
         self.assertEqual(
             _ENGINE.pfb_pkg.read_compact_manifest(published)["origin"],
             f"textproc/{_CHARSET_NAME}",
@@ -720,15 +837,24 @@ class HandoffIntegrityTests(_TempDirTestCase):
         real_alloc = _snapshot(build_date=date(2026, 8, 4))
         forged_alloc = _snapshot(build_date=date(2026, 8, 9))
         handoff = _build_handoff(
-            real_alloc, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            real_alloc,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         legdir = results_dir / f"{pn._LEG_DIR_PREFIX}15"
         forged_record = _make_record(forged_alloc, ROW_CE15)
         forged_name = f"pfSense-pkg-pfBlockerNG-{forged_alloc.pkg_version}.pkg"
-        _path, forged_digest = _wrap_canonical_pkg(legdir, forged_record, local_name=forged_name)
+        _path, forged_digest = _wrap_canonical_pkg(
+            legdir, forged_record, local_name=forged_name
+        )
 
         mutated = _mutate(handoff)
-        mutated["builds"][0]["artifact"] = {"abi": "FreeBSD:15:*", "name": forged_name, "sha256": forged_digest}
+        mutated["builds"][0]["artifact"] = {
+            "abi": "FreeBSD:15:*",
+            "name": forged_name,
+            "sha256": forged_digest,
+        }
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
@@ -738,7 +864,12 @@ class HandoffIntegrityTests(_TempDirTestCase):
     def test_run_id_mismatch_rejected(self) -> None:
         handoff, results_dir, _alloc = self.base_handoff()
         with self.assertRaises(pn.PublishNightlyError) as ctx:
-            _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo, source_run_id="some-other-run")
+            _run(
+                handoff=handoff,
+                results_dir=results_dir,
+                pkg_repo=self.pkg_repo,
+                source_run_id="some-other-run",
+            )
         self.assertIn("run_id", str(ctx.exception))
 
     @_requires_engine
@@ -753,11 +884,15 @@ class HandoffIntegrityTests(_TempDirTestCase):
     @_requires_engine
     def test_schema_wrong_rejected(self) -> None:
         handoff, results_dir, _alloc = self.base_handoff()
-        mutated = _mutate(handoff)
-        mutated["schema"] = 2
-        with self.assertRaises(pn.PublishNightlyError) as ctx:
-            _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("schema", str(ctx.exception))
+        for schema in (2, True):
+            with self.subTest(schema=schema):
+                mutated = _mutate(handoff)
+                mutated["schema"] = schema
+                with self.assertRaises(pn.PublishNightlyError) as ctx:
+                    _run(
+                        handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo
+                    )
+                self.assertIn("schema", str(ctx.exception))
 
     @_requires_engine
     def test_top_level_field_missing_rejected(self) -> None:
@@ -806,8 +941,12 @@ class HandoffIntegrityTests(_TempDirTestCase):
             assets_root=results_dir,
         )
         mutated = _mutate(handoff)
-        mutated["builds"][1]["matrix_row"]["freebsd_major"] = mutated["builds"][0]["matrix_row"]["freebsd_major"]
-        mutated["builds"][1]["matrix_row"]["freebsd_version"] = mutated["builds"][0]["matrix_row"]["freebsd_version"]
+        mutated["builds"][1]["matrix_row"]["freebsd_major"] = mutated["builds"][0][
+            "matrix_row"
+        ]["freebsd_major"]
+        mutated["builds"][1]["matrix_row"]["freebsd_version"] = mutated["builds"][0][
+            "matrix_row"
+        ]["freebsd_version"]
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("duplicate", str(ctx.exception))
@@ -860,7 +999,9 @@ class HandoffIntegrityTests(_TempDirTestCase):
                 mutated = _mutate(handoff)
                 mutated[field] = "not-a-sha"
                 with self.assertRaises(pn.PublishNightlyError):
-                    _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+                    _run(
+                        handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo
+                    )
 
     @_requires_engine
     def test_build_matrix_must_match_build_entries(self) -> None:
@@ -915,7 +1056,10 @@ class RoutingTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15, ROW_PLUS16_03], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15, ROW_PLUS16_03],
+            assets_root=results_dir,
         )
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
@@ -961,8 +1105,12 @@ class RoutingTests(_TempDirTestCase):
             manifest={},
             record=record_b,
         )
-        leg_a = pn._Leg(major="15", matrix_row=ROW_CE15, canonical=asset_a, dependencies=())
-        leg_b = pn._Leg(major="15", matrix_row=ROW_CE15, canonical=asset_b, dependencies=())
+        leg_a = pn._Leg(
+            major="15", matrix_row=ROW_CE15, canonical=asset_a, dependencies=()
+        )
+        leg_b = pn._Leg(
+            major="15", matrix_row=ROW_CE15, canonical=asset_b, dependencies=()
+        )
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             pn._route_targets(_ENGINE, [ROW_CE15], [leg_a, leg_b])
@@ -990,7 +1138,12 @@ class RoutingTests(_TempDirTestCase):
             sha256="1" * 64,
             manifest={"abi": "FreeBSD:16:*"},
         )
-        leg = pn._Leg(major="15", matrix_row=ROW_CE15, canonical=canonical, dependencies=(mismatched_dep,))
+        leg = pn._Leg(
+            major="15",
+            matrix_row=ROW_CE15,
+            canonical=canonical,
+            dependencies=(mismatched_dep,),
+        )
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             pn._route_targets(_ENGINE, [ROW_CE15], [leg])
@@ -1009,11 +1162,19 @@ class DependencyTests(_TempDirTestCase):
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
-        (results_dir / f"{pn._LEG_DIR_PREFIX}15" / "py311-charset-normalizer-3.4.0.pkg").unlink()
+        (
+            results_dir
+            / f"{pn._LEG_DIR_PREFIX}15"
+            / "py311-charset-normalizer-3.4.0.pkg"
+        ).unlink()
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("missing dependency asset", str(ctx.exception))
@@ -1024,7 +1185,11 @@ class DependencyTests(_TempDirTestCase):
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
@@ -1039,7 +1204,11 @@ class DependencyTests(_TempDirTestCase):
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
@@ -1064,7 +1233,10 @@ class RouteOnlyTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15, ROW_ROUTE_ONLY_17], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15, ROW_ROUTE_ONLY_17],
+            assets_root=results_dir,
         )
         report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
@@ -1082,7 +1254,12 @@ class MissingFileTests(_TempDirTestCase):
     def test_missing_results_dir_clean_error(self) -> None:
         scratch = self.new_results_dir()
         snapshot = _snapshot()
-        handoff = _build_handoff(snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=scratch)
+        handoff = _build_handoff(
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=scratch,
+        )
         missing_dir = self.tmp / "does-not-exist"
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=missing_dir, pkg_repo=self.pkg_repo)
@@ -1093,7 +1270,10 @@ class MissingFileTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
         (results_dir / f"{pn._LEG_DIR_PREFIX}15" / canonical_name).unlink()
@@ -1115,12 +1295,17 @@ class HostileNameTests(_TempDirTestCase):
                 results_dir = self.new_results_dir()
                 snapshot = _snapshot()
                 handoff = _build_handoff(
-                    snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+                    snapshot,
+                    legs=[_LegSpec(row=ROW_CE15)],
+                    route_rows=[ROW_CE15],
+                    assets_root=results_dir,
                 )
                 mutated = _mutate(handoff)
                 mutated["builds"][0]["artifact"]["name"] = hostile
                 with self.assertRaises((pc.AssetVerificationError, nc.ContractError)):
-                    _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+                    _run(
+                        handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo
+                    )
 
     @_requires_engine
     def test_hostile_dep_artifact_name_rejected(self) -> None:
@@ -1130,14 +1315,21 @@ class HostileNameTests(_TempDirTestCase):
                 snapshot = _snapshot()
                 handoff = _build_handoff(
                     snapshot,
-                    legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+                    legs=[
+                        _LegSpec(
+                            row=ROW_CE15,
+                            dep_specs=[("py311-charset-normalizer", "3.4.0")],
+                        )
+                    ],
                     route_rows=[ROW_CE15],
                     assets_root=results_dir,
                 )
                 mutated = _mutate(handoff)
                 mutated["builds"][0]["dep_artifacts"][0]["name"] = hostile
                 with self.assertRaises((pc.AssetVerificationError, nc.ContractError)):
-                    _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+                    _run(
+                        handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo
+                    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1174,7 +1366,10 @@ class MainCliTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         handoff_path = self.tmp / "handoff.json"
         handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
@@ -1211,19 +1406,29 @@ class SignKeyThreadingTests(_TempDirTestCase):
         real_regenerate = pn.ca.regenerate_catalogue
 
         def capturing_regenerate(
-            site_root: str | Path, channel: str, varver: str, *, engine: pc.Engine, sign_key: Path | None = None
+            site_root: str | Path,
+            channel: str,
+            varver: str,
+            *,
+            engine: pc.Engine,
+            sign_key: Path | None = None,
         ) -> None:
             seen.append(sign_key)
             real_regenerate(site_root, channel, varver, engine=engine)
 
-        return mock.patch.object(pn.ca, "regenerate_catalogue", side_effect=capturing_regenerate), seen
+        return mock.patch.object(
+            pn.ca, "regenerate_catalogue", side_effect=capturing_regenerate
+        ), seen
 
     @_requires_engine
     def test_main_sign_key_flag_reaches_regenerate_catalogue(self) -> None:
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         handoff_path = self.tmp / "handoff.json"
         handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
@@ -1253,7 +1458,10 @@ class SignKeyThreadingTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
         handoff_path = self.tmp / "handoff.json"
         handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
@@ -1297,13 +1505,20 @@ class IdentityPostConditionTests(_TempDirTestCase):
         divergent_dir = self.tmp / "divergent"
         divergent_dir.mkdir()
         divergent_record = _make_record(divergent_alloc, ROW_PLUS16_03)
-        divergent_path, _digest = _wrap_canonical_pkg(divergent_dir, divergent_record, local_name="divergent.pkg")
+        divergent_path, _digest = _wrap_canonical_pkg(
+            divergent_dir, divergent_record, local_name="divergent.pkg"
+        )
         divergent_bytes = divergent_path.read_bytes()
 
         real_regenerate = pn.ca.regenerate_catalogue
 
         def corrupting_regenerate(
-            site_root: str | Path, channel: str, varver: str, *, engine: pc.Engine, sign_key: Path | None = None
+            site_root: str | Path,
+            channel: str,
+            varver: str,
+            *,
+            engine: pc.Engine,
+            sign_key: Path | None = None,
         ) -> None:
             real_regenerate(site_root, channel, varver, engine=engine)
             if varver == "plus-26.07":
@@ -1311,7 +1526,9 @@ class IdentityPostConditionTests(_TempDirTestCase):
                 target.write_bytes(divergent_bytes)
 
         with (
-            mock.patch.object(pn.ca, "regenerate_catalogue", side_effect=corrupting_regenerate),
+            mock.patch.object(
+                pn.ca, "regenerate_catalogue", side_effect=corrupting_regenerate
+            ),
             self.assertRaises(pn.ca.CatalogueAssemblyError) as ctx,
         ):
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
@@ -1350,7 +1567,10 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         first = _snapshot(build_date=date(2026, 8, 4))
         results_1 = self.new_results_dir()
         handoff_1 = _build_handoff(
-            first, legs=[_LegSpec(row=ROW_PLUS16_03)], route_rows=[ROW_PLUS16_03], assets_root=results_1
+            first,
+            legs=[_LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_03],
+            assets_root=results_1,
         )
         _run(handoff=handoff_1, results_dir=results_1, pkg_repo=self.pkg_repo)
         dest = self.pkg_repo / "docs" / "nightly" / "plus-26.03"
@@ -1359,12 +1579,17 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         second = _snapshot(build_date=date(2026, 8, 5))
         results_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
-            second, legs=[_LegSpec(row=ROW_PLUS16_03)], route_rows=[ROW_PLUS16_03], assets_root=results_2
+            second,
+            legs=[_LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_03],
+            assets_root=results_2,
         )
         report = _run(handoff=handoff_2, results_dir=results_2, pkg_repo=self.pkg_repo)
         self.assertFalse(report.noop)
         self.assertFalse((dest / _CHARSET_PKG).exists())
-        self.assertTrue((dest / f"pfSense-pkg-pfBlockerNG-{second.pkg_version}.pkg").is_file())
+        self.assertTrue(
+            (dest / f"pfSense-pkg-pfBlockerNG-{second.pkg_version}.pkg").is_file()
+        )
         self.assertNotIn(_CHARSET_NAME, _packagesite_names(dest))
 
     @_requires_engine
@@ -1372,7 +1597,10 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         snapshot = _snapshot()
         results_1 = self.new_results_dir()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_PLUS16_03)], route_rows=[ROW_PLUS16_03], assets_root=results_1
+            snapshot,
+            legs=[_LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_03],
+            assets_root=results_1,
         )
         first = _run(handoff=handoff, results_dir=results_1, pkg_repo=self.pkg_repo)
         self.assertFalse(first.noop)
@@ -1381,7 +1609,10 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
 
         results_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_PLUS16_03)], route_rows=[ROW_PLUS16_03], assets_root=results_2
+            snapshot,
+            legs=[_LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_03],
+            assets_root=results_2,
         )
         second = _run(handoff=handoff_2, results_dir=results_2, pkg_repo=self.pkg_repo)
         self.assertFalse(second.noop)
@@ -1394,28 +1625,11 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         results_1 = self.new_results_dir()
         handoff_1 = _build_handoff(
             first,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
-            route_rows=[ROW_CE15],
-            assets_root=results_1,
-        )
-        _run(handoff=handoff_1, results_dir=results_1, pkg_repo=self.pkg_repo)
-        dest = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
-        self.assertTrue((dest / _CHARSET_PKG).is_file())
-
-        second = _snapshot(build_date=date(2026, 8, 5))
-        results_2 = self.new_results_dir()
-        handoff_2 = _build_handoff(second, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_2)
-        _run(handoff=handoff_2, results_dir=results_2, pkg_repo=self.pkg_repo)
-        self.assertTrue((dest / _CHARSET_PKG).is_file())
-        self.assertIn(_CHARSET_NAME, _packagesite_names(dest))
-
-    @_requires_engine
-    def test_undeclared_ce_extra_evicted_when_row_drops_extra_pkgs(self) -> None:
-        first = _snapshot(build_date=date(2026, 8, 4))
-        results_1 = self.new_results_dir()
-        handoff_1 = _build_handoff(
-            first,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
             route_rows=[ROW_CE15],
             assets_root=results_1,
         )
@@ -1426,7 +1640,40 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         second = _snapshot(build_date=date(2026, 8, 5))
         results_2 = self.new_results_dir()
         handoff_2 = _build_handoff(
-            second, legs=[_LegSpec(row=ROW_CE15_NO_EXTRA)], route_rows=[ROW_CE15_NO_EXTRA], assets_root=results_2
+            second,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_2,
+        )
+        _run(handoff=handoff_2, results_dir=results_2, pkg_repo=self.pkg_repo)
+        self.assertTrue((dest / _CHARSET_PKG).is_file())
+        self.assertIn(_CHARSET_NAME, _packagesite_names(dest))
+
+    @_requires_engine
+    def test_undeclared_ce_extra_evicted_when_row_drops_extra_pkgs(self) -> None:
+        first = _snapshot(build_date=date(2026, 8, 4))
+        results_1 = self.new_results_dir()
+        handoff_1 = _build_handoff(
+            first,
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
+            route_rows=[ROW_CE15],
+            assets_root=results_1,
+        )
+        _run(handoff=handoff_1, results_dir=results_1, pkg_repo=self.pkg_repo)
+        dest = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
+        self.assertTrue((dest / _CHARSET_PKG).is_file())
+
+        second = _snapshot(build_date=date(2026, 8, 5))
+        results_2 = self.new_results_dir()
+        handoff_2 = _build_handoff(
+            second,
+            legs=[_LegSpec(row=ROW_CE15_NO_EXTRA)],
+            route_rows=[ROW_CE15_NO_EXTRA],
+            assets_root=results_2,
         )
         _run(handoff=handoff_2, results_dir=results_2, pkg_repo=self.pkg_repo)
         self.assertFalse((dest / _CHARSET_PKG).exists())
@@ -1442,7 +1689,11 @@ class SameMajorDestScopeTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")])],
+            legs=[
+                _LegSpec(
+                    row=ROW_CE15, dep_specs=[("py311-charset-normalizer", "3.4.0")]
+                )
+            ],
             route_rows=[ROW_CE15, ROW_PLUS15_03],
             assets_root=results_dir,
         )
@@ -1481,7 +1732,9 @@ class SameMajorDestScopeTests(_TempDirTestCase):
         )
         report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
-        self.assertEqual(set(report.touched), {("nightly", "ce-2.8"), ("nightly", "ce-2.9")})
+        self.assertEqual(
+            set(report.touched), {("nightly", "ce-2.8"), ("nightly", "ce-2.9")}
+        )
         docs = self.pkg_repo / "docs" / "nightly"
         self.assertTrue((docs / "ce-2.8" / _CHARSET_PKG).is_file())
         self.assertTrue((docs / "ce-2.9" / _CHARSET_PKG).is_file())
@@ -1510,9 +1763,17 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
-            snapshot, legs=[_LegSpec(row=ROW_CE15)], route_rows=[ROW_CE15], assets_root=results_dir
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
         )
-        return _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo, sign_key=key)
+        return _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            sign_key=key,
+        )
 
     @_requires_engine
     def test_republish_with_a_key_signs_a_catalogue_that_has_no_signature(self) -> None:
@@ -1537,10 +1798,17 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
     def test_republish_after_key_rotation_resigns_with_the_new_key(self) -> None:
         catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
         self._publish(tbrp._gen_key(self.tmp / "old.key"))
-        first_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")["packagesite.yaml.pub"]
+        first_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")[
+            "packagesite.yaml.pub"
+        ]
 
-        self.assertEqual(self._publish(tbrp._gen_key(self.tmp / "new.key")).touched, (("nightly", "ce-2.8"),))
-        second_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")["packagesite.yaml.pub"]
+        self.assertEqual(
+            self._publish(tbrp._gen_key(self.tmp / "new.key")).touched,
+            (("nightly", "ce-2.8"),),
+        )
+        second_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")[
+            "packagesite.yaml.pub"
+        ]
         self.assertNotEqual(first_pub, second_pub)
 
 
