@@ -473,6 +473,8 @@ def publish(
         pr._require_safe_catalogue_destination(
             site_root / _CHANNEL / varver, root=site_root
         )
+
+    for varver in sorted(targets):
         _reject_stale(site_root, varver, incoming_version)
 
     expected_public = pr._expected_public_member(sign_key)

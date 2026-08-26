@@ -623,6 +623,71 @@ class NoopTests(_TempDirTestCase):
             {path.name: path.read_bytes() for path in outside.iterdir()}, before
         )
 
+    def test_all_destinations_are_checked_before_any_stale_logic(self) -> None:
+        newer_results = self.new_results_dir()
+        newer_snapshot = _snapshot(build_date=date(2026, 8, 5), source_sha="f" * 40)
+        newer_handoff = _build_handoff(
+            newer_snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=newer_results,
+            source_sha=newer_snapshot.source_sha,
+        )
+        first = _run(
+            handoff=newer_handoff,
+            results_dir=newer_results,
+            pkg_repo=self.pkg_repo,
+        )
+        self.assertEqual(first.touched, (("nightly", "ce-2.8"),))
+
+        older_results = self.new_results_dir()
+        older_snapshot = _snapshot()
+        older_handoff = _build_handoff(
+            older_snapshot,
+            legs=[_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_CE15, ROW_PLUS16_03],
+            assets_root=older_results,
+        )
+        site_root = self.pkg_repo / "docs"
+        safe = site_root / "nightly" / "ce-2.8"
+        safe_before = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in safe.iterdir()
+        }
+        outside = self.tmp / "outside-later-nightly-destination"
+        outside.mkdir()
+        (outside / "sentinel.pkg").write_bytes(b"outside must remain byte-identical")
+        unsafe = site_root / "nightly" / "plus-26.03"
+        unsafe.symlink_to(outside, target_is_directory=True)
+        outside_before = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                handoff=older_handoff,
+                results_dir=older_results,
+                pkg_repo=self.pkg_repo,
+            )
+
+        self.assertEqual(
+            {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            },
+            outside_before,
+        )
+        self.assertEqual(
+            {
+                path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in safe.iterdir()
+            },
+            safe_before,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # T3 — same version, different bytes already at a destination: fail closed.
