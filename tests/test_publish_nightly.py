@@ -599,6 +599,30 @@ class NoopTests(_TempDirTestCase):
             },
         )
 
+    def test_symlinked_destination_is_rejected_before_stale_check_or_mutation(
+        self,
+    ) -> None:
+        handoff, results_dir, _snapshot_value = self.base_handoff()
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel.pkg"
+        sentinel.write_bytes(b"outside must remain untouched")
+        destination = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
+        destination.parent.mkdir(parents=True)
+        destination.symlink_to(outside, target_is_directory=True)
+        before = {path.name: path.read_bytes() for path in outside.iterdir()}
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                handoff=handoff,
+                results_dir=results_dir,
+                pkg_repo=self.pkg_repo,
+            )
+
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in outside.iterdir()}, before
+        )
+
 
 # --------------------------------------------------------------------------- #
 # T3 — same version, different bytes already at a destination: fail closed.
