@@ -1867,6 +1867,10 @@ class OutcomeTests(_TempDirTestCase):
             ("Infinity", ({**row, "pkgsize": float("inf")},)),
             ("negative Infinity", ({**row, "pkgsize": float("-inf")},)),
             ("wrong finite pkgsize", ({**row, "pkgsize": 1},)),
+            (
+                "equal-valued float pkgsize",
+                ({**row, "pkgsize": float(cast(int, row["pkgsize"]))},),
+            ),
             ("wrong checksum", ({**row, "sum": "1$" + "0" * 64},)),
             ("wrong manifest field", ({**row, "origin": "security/not-this-port"},)),
             (
@@ -1919,6 +1923,10 @@ class OutcomeTests(_TempDirTestCase):
             (
                 "wrong data manifest field",
                 {**row, "origin": "security/not-this-port"},
+            ),
+            (
+                "equal-valued data float pkgsize",
+                {**row, "pkgsize": float(cast(int, row["pkgsize"]))},
             ),
             ("data NaN", {**row, "pkgsize": float("nan")}),
             ("data Infinity", {**row, "pkgsize": float("inf")}),
@@ -2021,6 +2029,41 @@ class OutcomeTests(_TempDirTestCase):
 
         self.assertEqual(
             {path.name: path.read_bytes() for path in outside.iterdir()}, before
+        )
+
+    def test_dangling_package_symlink_is_rejected_before_copy(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        outside = self.tmp / "outside-payload"
+        outside.mkdir()
+        escaped = outside / "escaped.pkg"
+        destination = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        destination.mkdir(parents=True)
+        payload = destination / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg"
+        payload.symlink_to(escaped)
+        before = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                tag="v4.0.0.b1",
+            )
+
+        self.assertEqual(
+            {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            },
+            before,
         )
 
     def test_all_tagged_destinations_are_checked_before_any_mutation(self) -> None:

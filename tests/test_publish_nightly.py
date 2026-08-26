@@ -623,6 +623,37 @@ class NoopTests(_TempDirTestCase):
             {path.name: path.read_bytes() for path in outside.iterdir()}, before
         )
 
+    def test_dangling_package_symlink_is_rejected_before_copy(self) -> None:
+        handoff, results_dir, snapshot = self.base_handoff()
+        outside = self.tmp / "outside-payload"
+        outside.mkdir()
+        escaped = outside / "escaped.pkg"
+        destination = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
+        destination.mkdir(parents=True)
+        payload = destination / f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+        payload.symlink_to(escaped)
+        before = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                handoff=handoff,
+                results_dir=results_dir,
+                pkg_repo=self.pkg_repo,
+            )
+
+        self.assertEqual(
+            {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            },
+            before,
+        )
+
     def test_all_destinations_are_checked_before_any_stale_logic(self) -> None:
         newer_results = self.new_results_dir()
         newer_snapshot = _snapshot(build_date=date(2026, 8, 5), source_sha="f" * 40)
