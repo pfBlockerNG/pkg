@@ -14,6 +14,7 @@ _VERSION = re.compile(r"^[0-9]{14}\.[0-9a-f]{7}$")
 _ARTIFACT_REF = re.compile(
     r"^ghcr\.io/pfblockerng/pfblockerng-nightly@sha256:[0-9a-f]{64}$"
 )
+_PUBLICATION_REF = "refs/remotes/origin/main"
 
 
 class PublicationReceiptError(ValueError):
@@ -32,7 +33,7 @@ def verify_publication(
             "artifact_ref is not an exact Nightly digest reference"
         )
     proc = subprocess.run(
-        ["git", "-C", str(repo), "log", "--format=%B%x00"],
+        ["git", "-C", str(repo), "log", "--format=%B%x00", _PUBLICATION_REF],
         check=False,
         capture_output=True,
         text=True,
@@ -40,7 +41,8 @@ def verify_publication(
     )
     if proc.returncode != 0:
         raise PublicationReceiptError(
-            f"cannot read pkg publication history: {proc.stderr.strip()}"
+            f"cannot read pkg publication history at {_PUBLICATION_REF}: "
+            f"{proc.stderr.strip()}"
         )
     expected = {
         "pfBlockerNG-Nightly-Version": nightly_version,
