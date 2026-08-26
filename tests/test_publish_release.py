@@ -1822,6 +1822,7 @@ class OutcomeTests(_TempDirTestCase):
                 "non-finite JSON constant",
                 ({**row, "pkgsize": float("nan")},),
             ),
+            ("wrong finite pkgsize", ({**row, "pkgsize": 1},)),
             (
                 "hostile package path",
                 ({**row, "path": "../payload.pkg", "repopath": "../payload.pkg"},),
