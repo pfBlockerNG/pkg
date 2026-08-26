@@ -884,6 +884,14 @@ def _non_negative_int(value: str) -> int:
     return iv
 
 
+def _positive_int(value: str) -> int:
+    """argparse ``type`` for counts that must retain at least one item."""
+    iv = int(value)
+    if iv < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return iv
+
+
 def _line_key(version: str, pkg_name: str) -> str:
     """The major/minor "line" grouping key for a pfBlockerNG pkg VERSION.
 
@@ -1704,7 +1712,12 @@ def main(argv: list[str]) -> int:
     g_matrix.add_argument(
         "--stable-src", default=None, help="source tree checked out at --stable-tag (defaults to --local-src)"
     )
-    g_matrix.add_argument("--nightly-keep", type=int, default=14, help="nightlies retained per varver (default 14)")
+    g_matrix.add_argument(
+        "--nightly-keep",
+        type=_positive_int,
+        default=14,
+        help="nightlies retained per varver (default 14; must be >= 1)",
+    )
     g_matrix.add_argument(
         "--nightly-pkgversion",
         default=None,

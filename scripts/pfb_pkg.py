@@ -566,8 +566,11 @@ def validate_project_pkg(
             raise PkgError(f"{pkg_path.name}: size mismatch for {name}")
     if _INFO_PATH not in payload or any(name.endswith("/info.xml") and name != _INFO_PATH for name in payload):
         raise PkgError(f"{pkg_path.name}: canonical package info.xml path missing or suffixed")
+    info_xml = payload[_INFO_PATH]
+    if b"<!DOCTYPE" in info_xml or b"<!ENTITY" in info_xml:
+        raise PkgError(f"{pkg_path.name}: info.xml contains forbidden DTD/entity declarations")
     try:
-        root = ET.fromstring(payload[_INFO_PATH])
+        root = ET.fromstring(info_xml)
     except ET.ParseError as exc:
         raise PkgError(f"{pkg_path.name}: info.xml is not valid XML: {exc}") from None
     if root.findtext(".//name") != "pfBlockerNG" or root.findtext(".//version") != record["canonical_package_version"]:

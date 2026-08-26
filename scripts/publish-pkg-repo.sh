@@ -96,7 +96,11 @@
 #   SOURCE_REPOSITORY, RELEASE_ID, RELEASE_TAG, SOURCE_SHA, DESTINATIONS
 #                        the rest of the publish_release.py intake — see its --help
 #   ASSETS_DIR             directory of downloaded .pkg assets + digests.json sidecar
-#   HANDOFF_FILE           durable build-time tagged release handoff JSON
+#   HANDOFF_FILE           durable build-time tagged release handoff JSON; required
+#                        unless COMPATIBILITY_ROUTE_MATRIX is set
+#   COMPATIBILITY_ROUTE_MATRIX
+#                        pkg-owned ROUTE matrix for immutable Releases published
+#                        before handoffs existed; satisfies the HANDOFF_FILE requirement
 #
 # Required environment — PUBLISH_KIND=tagged, PUBLISH_STAGE=promote only:
 #   RELEASE_TAG, DESTINATIONS  the promote commit message's own trailers

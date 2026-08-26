@@ -194,6 +194,13 @@ def retention_keep_count(channel: str, varver: str) -> int:
     return DEFAULT_RETENTION_KEEP
 
 
+def _canonical_version(path: Path, manifest: Mapping[str, object]) -> str:
+    version = manifest.get("version")
+    if not isinstance(version, str):
+        raise CatalogueAssemblyError(f"{path}: canonical package manifest version must be a string")
+    return version
+
+
 def _protected_versions(site_root: Path, channel: str, varver: str, *, engine: Engine) -> frozenset[str]:
     """Canonical package versions one of ``channel``'s slower channels
     (``_SLOWER_CHANNELS[channel]``) still carries for this SAME ``varver`` — the set
@@ -228,7 +235,7 @@ def _protected_versions(site_root: Path, channel: str, varver: str, *, engine: E
             manifest = pfb_pkg.read_compact_manifest(path)
             if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
                 continue
-            versions.add(manifest["version"])
+            versions.add(_canonical_version(path, manifest))
     return frozenset(versions)
 
 
@@ -240,8 +247,8 @@ def _files_byte_identical(a: Path, b: Path) -> bool:
     return a.read_bytes() == b.read_bytes()
 
 
-def _canonical_filename(manifest: Mapping[str, object]) -> str:
-    return f"{manifest['name']}-{manifest['version']}.pkg"
+def _canonical_filename(path: Path, manifest: Mapping[str, object]) -> str:
+    return f"{manifest['name']}-{_canonical_version(path, manifest)}.pkg"
 
 
 def _iter_canonical_packages(catalogue_dir: Path, *, engine: Engine) -> list[tuple[Path, str]]:
@@ -260,7 +267,7 @@ def _iter_canonical_packages(catalogue_dir: Path, *, engine: Engine) -> list[tup
         manifest = pfb_pkg.read_compact_manifest(path)
         if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
             continue
-        found.append((path, _canonical_filename(manifest)))
+        found.append((path, _canonical_filename(path, manifest)))
     return found
 
 
@@ -376,7 +383,8 @@ def prune_retained(
         manifest = pfb_pkg.read_compact_manifest(path)
         if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
             continue
-        canonical.append((pfb_pkg.pkg_version_sort_key(manifest["version"]), path, manifest["version"]))
+        version = _canonical_version(path, manifest)
+        canonical.append((pfb_pkg.pkg_version_sort_key(version), path, version))
 
     canonical.sort(key=lambda item: item[0], reverse=True)
     beyond_keep = canonical[keep:]
@@ -417,7 +425,7 @@ def verify_multi_destination_identity(
         if len(destinations) < 2:
             continue
         manifest = pfb_pkg.read_compact_manifest(source_path)
-        canonical_name = f"{manifest['name']}-{manifest['version']}.pkg"
+        canonical_name = f"{manifest['name']}-{_canonical_version(source_path, manifest)}.pkg"
 
         baseline: tuple[str, object] | None = None
         for channel, varver in destinations:
@@ -432,6 +440,7 @@ def verify_multi_destination_identity(
             # for a fan-out that can span every varver on the tree.
             sha256 = hashlib.sha256(dest_path.read_bytes()).hexdigest()
             dest_manifest = pfb_pkg.read_compact_manifest(dest_path)
+            _canonical_version(dest_path, dest_manifest)
             record = brp._canonical_build_record(dest_path, dest_manifest)
             current = (sha256, record)
             if baseline is None:

@@ -618,6 +618,41 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             )
         self.assertIn("valid JSON", str(ctx.exception))
 
+    def test_handoff_invalid_utf8_is_handoff_error(self) -> None:
+        handoff = self.tmp / "pfblockerng-release-handoff.json"
+        handoff.write_bytes(b"\xff")
+        with self.assertRaises(trh.HandoffError) as ctx:
+            trh.load_handoff(
+                handoff,
+                expected_release_tag="v4.0.0.b1",
+                expected_source_sha="a" * 40,
+            )
+        self.assertIn("not valid UTF-8", str(ctx.exception))
+
+    def test_route_matrix_invalid_utf8_returns_standard_error(self) -> None:
+        route_matrix = self.tmp / "route-matrix.json"
+        route_matrix.write_bytes(b"\xff")
+        output = self.tmp / "handoff.json"
+        argv = [
+            "--release-tag",
+            "v4.0.0.b1",
+            "--source-sha",
+            "a" * 40,
+            "--ci-metadata-sha",
+            "b" * 40,
+            "--ports-sha",
+            "c" * 40,
+            "--route-matrix",
+            str(route_matrix),
+            "--output",
+            str(output),
+        ]
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = trh.main(argv)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
     @_requires_engine
     def test_handoff_route_matrix_empty_array_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
@@ -667,6 +702,31 @@ class IntakeAndHandoffTests(_TempDirTestCase):
         )
 
         self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+
+    @_requires_engine
+    def test_published_release_without_handoff_enforces_cli_source_sha(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        compatibility = self.tmp / "compatibility-route-matrix.json"
+        compatibility.write_text(json.dumps([ROW_CE]), encoding="utf-8")
+
+        with self.assertRaises(pr.DestinationConflictError) as ctx:
+            pr.run(
+                source_repository=_REPO,
+                release_id="1",
+                release_tag="v4.0.0.b1",
+                source_sha="c" * 40,
+                destinations='["edge"]',
+                source_run_id="10:1",
+                assets_dir=assets_dir,
+                pkg_repo=self.pkg_repo,
+                handoff_file=None,
+                compatibility_route_matrix_file=compatibility,
+                engine=_ENGINE,
+            )
+
+        self.assertIn("source_sha", str(ctx.exception))
+        self.assertFalse(self.pkg_repo.exists())
 
     @_requires_engine
     def test_published_release_without_handoff_rejects_empty_compatibility_matrix(self) -> None:

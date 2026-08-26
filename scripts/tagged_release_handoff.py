@@ -91,6 +91,8 @@ def load_handoff(
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise HandoffError(f"cannot read tagged release handoff {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise HandoffError(f"tagged release handoff is not valid UTF-8: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise HandoffError(f"tagged release handoff is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
@@ -157,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(handoff, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
-    except (OSError, json.JSONDecodeError, HandoffError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, HandoffError) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     return 0

@@ -1739,6 +1739,15 @@ def test_cli_build_matrix_requires_matrix_and_out(capsys: pytest.CaptureFixture[
         brp.main(["--build-matrix", "--out", "/tmp/x"])  # missing --matrix-json
 
 
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_cli_nightly_keep_rejects_non_positive(value: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """A non-positive Nightly window must fail at the CLI before it can empty a catalogue."""
+    with pytest.raises(SystemExit) as exc:
+        brp.main(["--nightly-keep", value])
+    assert exc.value.code == 2
+    assert "must be >= 1" in capsys.readouterr().err
+
+
 def test_cli_build_matrix_unwraps_versions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI accepts a {versions:[...]} matrix file and forwards the array to the brain."""
     captured: dict[str, Any] = {}

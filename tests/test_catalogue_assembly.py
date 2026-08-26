@@ -858,6 +858,28 @@ class RetentionTests(_TempDirTestCase):
             ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: True)
 
     @_requires_engine
+    def test_canonical_manifest_version_must_be_string(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        catalogue_dir.mkdir(parents=True)
+        base = {
+            "name": _ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY,
+            "abi": "FreeBSD:15:*",
+            "origin": "net/pfSense-pkg-pfBlockerNG",
+        }
+        for label, version in (("missing", None), ("non-string", 7)):
+            with self.subTest(label=label):
+                manifest = dict(base)
+                if version is not None:
+                    manifest["version"] = version
+                path = catalogue_dir / f"{label}.pkg"
+                _write_tar_pkg(path, json.dumps(manifest, separators=(",", ":")).encode())
+                with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+                    ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+                self.assertIn(f"{path}: canonical package manifest version must be a string", str(ctx.exception))
+                path.unlink()
+
+    @_requires_engine
     def test_pruned_generation_absent_after_regenerate(self) -> None:
         """Retention runs BEFORE regeneration in the real flow: an evicted
         generation must never reappear once the catalogue is rebuilt."""
