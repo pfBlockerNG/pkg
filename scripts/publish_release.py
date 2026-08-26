@@ -731,6 +731,8 @@ def run(
                             ) from exc
                 raise DestinationConflictError(str(exc)) from exc
             raise
+        # Resolve targets before handoff validation so route errors win while
+        # the catalogue is still untouched; publish() resolves them again.
         _build_targets(run_result)
         if handoff is not None:
             trh.validate_packages(handoff, [path for _name, path in assets])
