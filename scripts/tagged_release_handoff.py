@@ -240,7 +240,10 @@ def _dependency_packages(
                 "py_flavor": row["py_flavor"],
             }
             for field, expected_value in expected.items():
-                if identity[field] != expected_value:
+                if (
+                    type(identity[field]) is not type(expected_value)
+                    or identity[field] != expected_value
+                ):
                     raise HandoffError(
                         f"{label}.{field} does not match tagged release handoff"
                     )
