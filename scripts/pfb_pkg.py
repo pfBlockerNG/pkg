@@ -49,10 +49,23 @@ _RECORD_FIELDS = {
     "freebsd_ports_sha",
     "route",
     "source_date_epoch",
+    "dependency_builder",
     "build_input_digest",
 }
+_LEGACY_RECORD_FIELDS = _RECORD_FIELDS - {"dependency_builder"}
 _RECORD_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_RECORD_PORTS_SHA = re.compile(r"^[0-9a-f]{40}$")
 _RECORD_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_DEPENDENCY_BUILDER_FIELDS = {
+    "python",
+    "pip",
+    "setuptools",
+    "wheel",
+    "zstandard",
+    "uv",
+    "uv_lock_sha256",
+}
+_TOOL_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)+(?:[A-Za-z0-9._+-]*)?$")
 _VARIANT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _PF_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
 _MATRIX_FIELDS = {
@@ -147,6 +160,22 @@ def build_input_digest(record: Mapping[str, object]) -> str:
 
 def _record_error(message: str) -> PkgError:
     return PkgError(f"invalid build record: {message}")
+
+
+def validate_dependency_builder(value: object) -> dict[str, str]:
+    """Validate the immutable Python/wheel tool contract carried by release records."""
+    if not isinstance(value, dict) or set(value) != _DEPENDENCY_BUILDER_FIELDS:
+        raise _record_error("dependency_builder exact fields required")
+    for name in _DEPENDENCY_BUILDER_FIELDS - {"uv_lock_sha256"}:
+        version = value[name]
+        if not isinstance(version, str) or not _TOOL_VERSION.fullmatch(version):
+            raise _record_error(f"dependency_builder.{name} is malformed")
+    lock_sha = value["uv_lock_sha256"]
+    if not isinstance(lock_sha, str) or not _RECORD_DIGEST.fullmatch(lock_sha):
+        raise _record_error(
+            "dependency_builder.uv_lock_sha256 must be lowercase SHA-256"
+        )
+    return dict(value)
 
 
 def _require_string(record: Mapping[str, object], key: str) -> str:
@@ -256,7 +285,8 @@ def validate_build_record(
         raise _record_error("record must be an object")
     _json_safe(record)
     keys = set(record)
-    if keys != _RECORD_FIELDS:
+    current_record = keys == _RECORD_FIELDS
+    if not current_record and keys != _LEGACY_RECORD_FIELDS:
         missing = sorted(_RECORD_FIELDS - keys)
         unknown = sorted(keys - _RECORD_FIELDS)
         raise _record_error(f"exact fields required (missing={missing}, unknown={unknown})")
@@ -280,11 +310,17 @@ def validate_build_record(
     ports_sha = record["freebsd_ports_sha"]
     if not isinstance(source_sha, str) or not _RECORD_SHA.fullmatch(source_sha):
         raise _record_error("source_sha must be lowercase 40- or 64-character hex")
-    if not isinstance(ports_sha, str) or not _RECORD_SHA.fullmatch(ports_sha):
-        raise _record_error("freebsd_ports_sha must be lowercase 40- or 64-character hex")
+    ports_sha_re = _RECORD_PORTS_SHA if current_record else _RECORD_SHA
+    ports_sha_length = "40" if current_record else "40- or 64"
+    if not isinstance(ports_sha, str) or not ports_sha_re.fullmatch(ports_sha):
+        raise _record_error(
+            f"freebsd_ports_sha must be lowercase {ports_sha_length}-character hex"
+        )
     epoch = record["source_date_epoch"]
     if type(epoch) is not int or epoch < 0:
         raise _record_error("source_date_epoch must be a non-negative integer")
+    if current_record:
+        validate_dependency_builder(record["dependency_builder"])
 
     expected_recipe = CANONICAL_EMITTED_IDENTITY if channel == "stable" else f"{CANONICAL_EMITTED_IDENTITY}-{channel}"
     if record["emitted_identity"] != CANONICAL_EMITTED_IDENTITY or record["native_recipe_identity"] != expected_recipe:

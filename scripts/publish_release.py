@@ -154,20 +154,32 @@ def _discover_assets(
 
 def _verify_all_assets(
     intake: pc.Intake,
-    assets_dir: Path,
+    assets: Sequence[tuple[str, Path]],
     digests: Mapping[str, str],
     work_dir: Path,
 ) -> list[pc.VerifiedAsset]:
-    return [
-        pc.verify_asset(
-            path,
-            name,
-            intake=intake,
-            expected_sha256=digests[name],
-            work_dir=work_dir / f"asset-{index}",
-        )
-        for index, (name, path) in enumerate(_discover_assets(assets_dir, digests))
-    ]
+    verified: list[pc.VerifiedAsset] = []
+    for index, (name, path) in enumerate(assets):
+        try:
+            verified.append(
+                pc.verify_asset(
+                    path,
+                    name,
+                    intake=intake,
+                    expected_sha256=digests[name],
+                    work_dir=work_dir / f"asset-{index}",
+                )
+            )
+        except (pc.PublishError, pfb_pkg.PkgError) as exc:
+            if any(
+                phrase in str(exc).lower()
+                for phrase in ("release-asset suffix", "canonical identity")
+            ):
+                raise pc.AssetVerificationError(
+                    f"{exc}; route row filename could not be resolved"
+                ) from exc
+            raise
+    return verified
 
 
 @dataclass
@@ -232,8 +244,8 @@ def _build_targets(run_result: pc.RunResult) -> dict[str, _Target]:
         # canonical target of this run, declare the dep's origin, and match ABI.
         reject = PublishReleaseError(
             f"dependency asset {dep.declared_name!r} matches no varver targeted "
-            "by this run's own canonical assets (per-suffix routing, ABI, and "
-            "extra_pkgs declaration)"
+            "by this run's own canonical assets (per-suffix route/filename, "
+            "ABI/arch, and origin/extra_pkgs declaration)"
         )
         if dep.release_suffix is None:
             raise reject
@@ -680,11 +692,10 @@ def run(
 
     assets_dir = Path(assets_dir)
     digests = _load_digests(assets_dir)
+    assets = _discover_assets(assets_dir, digests)
 
     with tempfile.TemporaryDirectory(prefix="publish-release-verify-") as work_dir:
-        verified_assets = _verify_all_assets(
-            intake, assets_dir, digests, Path(work_dir)
-        )
+        verified_assets = _verify_all_assets(intake, assets, digests, Path(work_dir))
         run_result = pc.verify_run(intake, verified_assets, route_matrix_rows)
         records = [
             cast(Mapping[str, object], asset.record)
@@ -720,6 +731,9 @@ def run(
                             ) from exc
                 raise DestinationConflictError(str(exc)) from exc
             raise
+        _build_targets(run_result)
+        if handoff is not None:
+            trh.validate_packages(handoff, [path for _name, path in assets])
         return publish(run_result, pkg_repo, sign_key=sign_key)
 
 
