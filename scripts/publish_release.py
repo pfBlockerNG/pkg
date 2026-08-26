@@ -109,12 +109,12 @@ class DestinationConflictError(PublishReleaseError):
 def _load_digests(assets_dir: Path) -> dict[str, str]:
     path = assets_dir / _DIGESTS_FILENAME
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
     except OSError as exc:
         raise PublishReleaseError(f"cannot read {path}: {exc}") from exc
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        parsed = _strict_json(raw)
+    except (UnicodeError, ValueError) as exc:
         raise PublishReleaseError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict) or not parsed:
         raise PublishReleaseError(
