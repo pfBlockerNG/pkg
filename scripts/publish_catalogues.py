@@ -91,6 +91,8 @@ _REQUIRED_BUILD_REPO_PORTABLE_ATTRS = (
     "_PKG_SEGMENT_RE",
     "_CATALOG_PKG_FILES",
     "build_repo",
+    "PKGSIGN_ECDSA_HEAD",
+    "signing_public_der",
 )
 
 

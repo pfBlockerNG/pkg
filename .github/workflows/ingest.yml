@@ -162,7 +162,7 @@ jobs:
         run: printf '%s' "$GH_TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Pull exact Nightly digest
-        if: inputs.operation == 'nightly'
+        if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'
         env:
           ARTIFACT_REF: ${{ inputs.artifact_ref }}
           NIGHTLY_VERSION: ${{ inputs.nightly_version }}

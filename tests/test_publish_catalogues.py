@@ -281,6 +281,20 @@ class EngineLoadingTests(unittest.TestCase):
         self.assertTrue(hasattr(engine.build_repo_portable, "_canonical_build_record"))
 
     @_requires_engine
+    def test_load_engine_rejects_missing_signing_symbols(self) -> None:
+        module = _ENGINE.build_repo_portable
+        for name in ("PKGSIGN_ECDSA_HEAD", "signing_public_der"):
+            with self.subTest(name=name):
+                value = getattr(module, name)
+                delattr(module, name)
+                try:
+                    with self.assertRaises(pc.EngineError) as ctx:
+                        pc.load_engine(_SRC_ROOT)
+                    self.assertIn(name, str(ctx.exception))
+                finally:
+                    setattr(module, name, value)
+
+    @_requires_engine
     def test_mismatched_checkout_reload_raises(self) -> None:
         """load_engine caches both engine modules under a fixed name/key, so a
         second call naming a DIFFERENT checkout must fail loudly instead of

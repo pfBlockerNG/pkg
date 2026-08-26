@@ -236,14 +236,14 @@ PY
   # --- r5: matrix transform --------------------------------------------------
 
   It 'r5: feeds gen_landing.py the same abi transform the publisher used to, never interpolating arch'
-    export ROUTE_MATRIX='[{"freebsd_major":"15","pfsense_version":"2.8","variant":"ce","php_version":"8.3","py_flavor":"py311","arch":"amd64"}]'
+    export ROUTE_MATRIX='[{"freebsd_major":"15","pfsense_version":"2.8","variant":"ce","php_version":"8.3","py_flavor":"py311","arch":"amd64","role":"route-only"}]'
     export FAKE_MATRIX_DUMP="${base}/matrix-seen.json"
     When run script "$script"
     The status should equal 0
     The output should include 'ADVANCE'
     The stderr should include 'main'
     seen="$(cat "${base}/matrix-seen.json")"
-    The variable seen should equal '[{"abi":"FreeBSD:15:*","pfsense_version":"2.8","variant":"ce","php_version":"8.3","py_flavor":"py311"}]'
+    The variable seen should equal '[{"abi":"FreeBSD:15:*","pfsense_version":"2.8","variant":"ce","php_version":"8.3","py_flavor":"py311","role":"route-only"}]'
   End
 
   # --- r6: the push resync-retry loop, with a REAL competing commit ----------

@@ -55,13 +55,15 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertIn("pfblockerng-release-handoff.json", text)
         self.assertIn("HANDOFF_FILE", text)
 
-    def test_nightly_pull_and_cleanup_use_only_the_digest_reference(self) -> None:
+    def test_nightly_pull_and_cleanup_use_only_the_validated_digest_reference(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
         self.assertIn("ghcr.io/pfblockerng/pfblockerng-nightly@sha256:", text.lower())
+        pull_step = text[text.index("- name: Pull exact Nightly digest") : text.index("- name: Materialize catalogue signing key")]
+        self.assertIn("if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'", pull_step)
         self.assertIn('oras pull "$ARTIFACT_REF"', text)
         self.assertIn('oras manifest delete "$ARTIFACT_REF"', text)
         self.assertNotRegex(text, r'oras pull "?[^\n]*:(?:latest|nightly)')
-        self.assertLess(text.index('sh scripts/publish-pkg-repo.sh'), text.index('oras manifest delete "$ARTIFACT_REF"'))
+        self.assertLess(text.index("source_run_id does not match OCI handoff"), text.index('oras manifest delete "$ARTIFACT_REF"'))
         self.assertIn("application/vnd.pfblockerng.nightly.handoff.v1+json", text)
 
     def test_tagged_stage_promote_discard_and_nightly_are_explicit(self) -> None:

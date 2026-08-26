@@ -473,22 +473,25 @@ def run(
     with tempfile.TemporaryDirectory(prefix="publish-release-verify-") as work_dir:
         verified_assets = _verify_all_assets(engine, intake, assets_dir, digests, Path(work_dir))
         run_result = pc.verify_run(engine, intake, verified_assets, route_matrix_rows)
-        if handoff is not None:
-            try:
-                trh.validate_build_records(
-                    handoff,
-                    [cast(Mapping[str, object], asset.record) for asset in run_result.canonical_assets],
-                )
-            except trh.BuildRecordIdentityError as exc:
-                if exc.field == "source_sha":
-                    site_root = Path(pkg_repo) / _SITE_SUBDIR
-                    for varver, target in _build_targets(engine, run_result).items():
-                        for channel in intake.destinations:
-                            existing = site_root / channel / varver / target.canonical.canonical_name
-                            if existing.is_file():
-                                raise DestinationConflictError(f"{existing}: {exc}") from exc
-                    raise DestinationConflictError(str(exc)) from exc
-                raise
+        records = [cast(Mapping[str, object], asset.record) for asset in run_result.canonical_assets]
+        try:
+            if handoff is not None:
+                trh.validate_build_records(handoff, records)
+            else:
+                expected_source_sha = trh._git_sha(source_sha, "expected source_sha")
+                for index, record in enumerate(records):
+                    if record.get("source_sha") != expected_source_sha:
+                        raise trh.BuildRecordIdentityError(index, "source_sha")
+        except trh.BuildRecordIdentityError as exc:
+            if exc.field == "source_sha":
+                site_root = Path(pkg_repo) / _SITE_SUBDIR
+                for varver, target in _build_targets(engine, run_result).items():
+                    for channel in intake.destinations:
+                        existing = site_root / channel / varver / target.canonical.canonical_name
+                        if existing.is_file():
+                            raise DestinationConflictError(f"{existing}: {exc}") from exc
+                raise DestinationConflictError(str(exc)) from exc
+            raise
         return publish(engine, run_result, pkg_repo, sign_key=sign_key)
 
 

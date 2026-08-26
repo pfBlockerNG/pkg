@@ -365,6 +365,21 @@ def test_inspect_and_validate_project_pkg_full_cascade(tmp_path: Path, compressi
     assert pfb_pkg.validate_project_pkg(pkg, record, expected_manifest=full)["record"] == record
 
 
+def test_validate_project_pkg_rejects_dtd_entity_declarations(tmp_path: Path) -> None:
+    info = (
+        b'<!DOCTYPE pfsensepkgs [<!ENTITY package_version "2.8.0">]>'
+        b"<pfsensepkgs><package><name>pfBlockerNG</name>"
+        b"<version>&package_version;</version></package></pfsensepkgs>"
+    )
+    payload = {
+        "/usr/local/share/pfSense-pkg-pfBlockerNG/info.xml": info,
+        "/usr/local/pkg/pfblockerng/pfb_stub.py": b"print('ok')\n",
+    }
+    pkg, record, _ = _synthetic_pkg(tmp_path, payload=payload, compression="plain")
+    with pytest.raises(pfb_pkg.PkgError, match="DTD/entity declarations"):
+        pfb_pkg.validate_project_pkg(pkg, record)
+
+
 @pytest.mark.parametrize(
     "native_path",
     [
