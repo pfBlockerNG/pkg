@@ -309,6 +309,10 @@ def _drop_assets(dest_dir: Path, asset_map: Mapping[str, pc.VerifiedAsset]) -> b
     for name, asset in asset_map.items():
         dest = dest_dir / name
         src = asset.work_path
+        if dest.is_symlink() or (dest.exists() and not dest.is_file()):
+            raise PublishReleaseError(
+                f"package destination is not a regular file: {dest}"
+            )
         if dest.is_file():
             if asset.asset_class == "dependency":
                 # issue #2468: a dependency .pkg's identity IS its filename — place
@@ -362,10 +366,10 @@ def _catalogue_archive_payload(path: Path, member_name: str) -> tuple[bytes, boo
 
 def _catalogue_rows(
     rows: object,
-) -> dict[tuple[str, str, str], dict[str, object]]:
+) -> dict[tuple[str, str, str], str]:
     if not isinstance(rows, list) or not rows:
         raise ValueError("catalogue packages must be a non-empty array")
-    normalized: dict[tuple[str, str, str], dict[str, object]] = {}
+    normalized: dict[tuple[str, str, str], str] = {}
     name_versions: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -395,7 +399,13 @@ def _catalogue_rows(
         if name_version in name_versions:
             raise ValueError("duplicate catalogue name/version")
         name_versions.add(name_version)
-        normalized[(name, version, repopath)] = row
+        normalized[(name, version, repopath)] = json.dumps(
+            row,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     return normalized
 
 
@@ -411,6 +421,10 @@ def _catalogue_destination_safe(dest_dir: Path, *, root: Path) -> bool:
         current /= segment
         if current.is_symlink() or (current.exists() and not current.is_dir()):
             return False
+    if dest_dir.is_dir() and any(
+        path.is_symlink() or not path.is_file() for path in dest_dir.glob("*.pkg")
+    ):
+        return False
     return dest_dir.resolve().is_relative_to(root.resolve())
 
 
@@ -461,6 +475,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
             )
         if not payload_rows:
             return False
+        expected_rows = _catalogue_rows(list(payload_rows.values()))
 
         packagesite_raw, packagesite_signed = _catalogue_archive_payload(
             dest_dir / "packagesite.pkg", "packagesite.yaml"
@@ -468,7 +483,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
         packagesite_rows = [
             _strict_json(line) for line in packagesite_raw.splitlines() if line
         ]
-        if _catalogue_rows(packagesite_rows) != payload_rows:
+        if _catalogue_rows(packagesite_rows) != expected_rows:
             return False
 
         data_raw, data_signed = _catalogue_archive_payload(
@@ -483,7 +498,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
             return False
         if data["groups"] != [] or data["expired_packages"] != []:
             return False
-        return _catalogue_rows(data["packages"]) == payload_rows
+        return _catalogue_rows(data["packages"]) == expected_rows
     except _DESCRIPTOR_ERRORS:
         return False
 
