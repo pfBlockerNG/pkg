@@ -1,7 +1,7 @@
 """Shared libpkg .pkg helpers — zstd framing + the +COMPACT_MANIFEST reader.
 
 A libpkg .pkg is a zstd-compressed tar whose first member is +COMPACT_MANIFEST
-(the package metadata). Both scripts/build-repo-portable.py and
+(the package metadata). Both scripts/catalogue_engine.py and
 scripts/gen_landing.py read those manifests off-FreeBSD; this module is the one
 copy of that logic. Both run as `python3 .../scripts/<tool>.py`, so the script's
 directory (scripts/) is on sys.path and `import pfb_pkg` resolves here.
@@ -23,13 +23,13 @@ import shutil
 import subprocess
 import tarfile
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 try:
-    from scripts.release_version import parse_release_tag, validate_nightly_version
+    from scripts.publication_identity import parse_release_tag, validate_nightly_version
 except ImportError:  # script directory is also a direct import root
-    from release_version import parse_release_tag, validate_nightly_version
+    from publication_identity import parse_release_tag, validate_nightly_version
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 XZ_MAGIC = b"\xfd7zXZ\x00"
@@ -88,6 +88,27 @@ _INFO_PATH = "/usr/local/share/pfSense-pkg-pfBlockerNG/info.xml"
 
 class PkgError(Exception):
     """A .pkg could not be read (no zstd decoder available, or malformed)."""
+
+
+def _safe_xml_text(payload: bytes, package_name: str) -> str:
+    if payload.startswith((b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00")):
+        encoding = "utf-32"
+    elif payload.startswith((b"\xfe\xff", b"\xff\xfe")):
+        encoding = "utf-16"
+    elif payload[:4] in (b"\x00<\x00?", b"<\x00?\x00"):
+        encoding = "utf-16-be" if payload.startswith(b"\x00<") else "utf-16-le"
+    elif payload[:4] in (b"\x00\x00\x00<", b"<\x00\x00\x00"):
+        encoding = "utf-32-be" if payload.startswith(b"\x00\x00") else "utf-32-le"
+    else:
+        encoding = "utf-8-sig"
+    try:
+        text = payload.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise PkgError(f"{package_name}: info.xml has invalid text encoding: {exc}") from None
+    declarations = text.upper()
+    if "<!DOCTYPE" in declarations or "<!ENTITY" in declarations:
+        raise PkgError(f"{package_name}: info.xml contains forbidden DTD/entity declarations")
+    return text
 
 
 def _json_safe(value: object, *, path: str = "$") -> None:
@@ -566,9 +587,7 @@ def validate_project_pkg(
             raise PkgError(f"{pkg_path.name}: size mismatch for {name}")
     if _INFO_PATH not in payload or any(name.endswith("/info.xml") and name != _INFO_PATH for name in payload):
         raise PkgError(f"{pkg_path.name}: canonical package info.xml path missing or suffixed")
-    info_xml = payload[_INFO_PATH]
-    if b"<!DOCTYPE" in info_xml or b"<!ENTITY" in info_xml:
-        raise PkgError(f"{pkg_path.name}: info.xml contains forbidden DTD/entity declarations")
+    info_xml = _safe_xml_text(payload[_INFO_PATH], pkg_path.name)
     try:
         root = ET.fromstring(info_xml)
     except ET.ParseError as exc:
@@ -595,7 +614,7 @@ def validate_project_pkg(
             raise PkgError(f"{pkg_path.name}: native identity leaked into dependency {name!r}")
     row = record["matrix_row"]
     expected_php = "php" + row["php_version"].replace(".", "")
-    py_digits = row["py_flavor"][2:] if row["py_flavor"].startswith("py") else row["py_flavor"]
+    py_digits = row["py_flavor"].removeprefix("py")
     expected_python = "python" + py_digits
     php_deps = [name for name in deps if _DEP_PHP.fullmatch(name)]
     python_deps = [name for name in deps if _DEP_PYTHON.fullmatch(name) or _DEP_PY_FLAVOR.match(name)]
@@ -612,12 +631,12 @@ def validate_project_pkg(
 
 
 # --------------------------------------------------------------------------- #
-# Version sort key — shared by build-repo-portable.py (release/nightly retention)
+# Version sort key — shared by catalogue_engine.py (release/nightly retention)
 # and gen_landing.py (the landing page's "newest build" picks).
 # --------------------------------------------------------------------------- #
 
 # FreeBSD pkg ranks a prerelease stage BELOW the bare release, and alpha < beta <
-# rc between themselves (see scripts/release_version.py, whose canonical tags use
+# rc between themselves (see scripts/publication_identity.py, whose canonical tags use
 # vX.Y.Z.aN|bN|rN). Retained legacy expanded package versions remain sortable.
 # A version with no stage keyword —
 # a genuine stable release, a bare edition version like "2.8.1", or a Nightly

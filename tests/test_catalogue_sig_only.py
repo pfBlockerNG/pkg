@@ -2,13 +2,13 @@
 
 ECDSA signing is randomised (OpenSSL implements no deterministic RFC 6979), so
 re-signing an UNCHANGED catalogue payload with the SAME key still rewrites the
-`.sig` member — see build-repo-portable.py's "Catalogue signing" comment
+`.sig` member — see catalogue_engine.py's "Catalogue signing" comment
 block. This module tells that apart from a real change (payload edit, key
 rotation, added/removed member) so scripts/publish-pkg-repo.sh can skip
 publishing a republish that changed nothing but its own signature.
 
-Fixtures reuse scripts/build-repo-portable.py's own signed-catalogue output
-(via tests/test_build_repo_portable.py's make_pkg/_gen_key/brp helpers) for
+Fixtures reuse scripts/catalogue_engine.py's own signed-catalogue output
+(via tests/test_catalogue_engine.py's make_pkg/_gen_key/brp helpers) for
 the real-catalogue rows, so the wire format under test is the one the
 publisher actually emits — not a hand-rolled approximation. Rows that only
 need control over the archive's member SET (added/removed member) build a
@@ -27,9 +27,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import catalogue_sig_only as cso  # noqa: E402
-import pfb_pkg  # noqa: E402
-import test_build_repo_portable as tbrp  # noqa: E402  (make_pkg / _gen_key / brp)
+import catalogue_fixtures as tbrp
+import catalogue_sig_only as cso
+import pfb_pkg
 
 
 def _build(tmp_path: Path, out_name: str, *, sign_key: Path | None, payload: bytes = b"hey") -> Path:

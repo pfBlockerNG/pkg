@@ -19,10 +19,8 @@
 # tree, not stale local state.
 #
 # Required environment:
-#   PFB_SRC          pfBlockerNG source-repo checkout — provides
-#                    scripts/gen_landing.py and pkg-site/
-#   PKG_REPO         pfBlockerNG/pkg checkout, already cloned with a credentialed
-#                    remote (this script only fetches/checks out/pushes `main`)
+#   PFB_SRC          current pkg checkout containing gen_landing.py and pkg-site/
+#   PKG_REPO         same pkg checkout with a credentialed origin remote
 #   BASE_URL         Pages base URL passed to gen_landing.py
 #   SOURCE_RUN_ID    provenance trailer on the render commit
 #   ROUTE_MATRIX     the pinned ROUTE matrix, compact JSON array text (same shape

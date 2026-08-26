@@ -2,12 +2,12 @@
 
 ECDSA signing is randomised (OpenSSL implements no deterministic RFC 6979), so
 signing an UNCHANGED catalogue payload with the SAME key still rewrites every
-`.sig` member — see build-repo-portable.py's "Catalogue signing" comment
+`.sig` member — see catalogue_engine.py's "Catalogue signing" comment
 block. scripts/publish-pkg-repo.sh uses this module to tell that apart from a
 real change before deciding whether a republish is a NOOP.
 
 A delta is signature-only when the two zstd-tar archives (`packagesite.pkg` /
-`data.pkg`, as written by build-repo-portable.py's `write_zstd_tar`) carry the
+`data.pkg`, as written by catalogue_engine.py's `write_zstd_tar`) carry the
 SAME member-NAME set, at least one member's name ends `.sig`, and every
 member whose name does NOT end `.sig` is byte-identical. Comparing by member
 name is equivalent to (and simpler than) inspecting `meta.conf`'s

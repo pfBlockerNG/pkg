@@ -11,15 +11,9 @@ that one directory from whatever is now present, and commits ``site_root`` to
 ``main`` — a failed run simply never reaches that commit, so there is nothing
 here to roll back.
 
-stdlib-only, Python 3.11. The engine (``pfb_pkg.py`` + ``build-repo-portable.py``)
-is the already-built ``publish_catalogues.Engine`` handed in by the caller — this
-module never loads it a second time. Emission (manifest reading, ABI/collision
-checks, the catalog descriptor) is entirely the engine's ``build_repo``; this
-module adds only directory-scoped staging (working around ``build_repo``'s own
-``*.pkg`` glob re-picking up its own ``data.pkg``/``packagesite.pkg`` on a second
-pass — see ``regenerate_catalogue``), retention, and the multi-destination
-byte/checksum/provenance identity post-condition ``build_repo`` itself has no
-reason to know about.
+The caller supplies the pkg-local `pfb_pkg.py` + `catalogue_engine.py` engine.
+This module adds directory-scoped staging, retention, and multi-destination
+identity checks around the engine's catalogue emission.
 """
 
 from __future__ import annotations
@@ -82,7 +76,7 @@ def _validate_channel(channel: str) -> None:
 def _validate_varver(varver: str, engine: Engine) -> None:
     if len(varver) > _MAX_VARVER_LENGTH:
         raise CatalogueAssemblyError(f"varver exceeds {_MAX_VARVER_LENGTH} characters ({len(varver)}): {varver!r}")
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     try:
         brp._validate_catalog_name(varver, single_segment=True)
     except brp.BuildRepoError as exc:
@@ -148,11 +142,8 @@ def regenerate_catalogue(
 
     The trap this function exists to dodge: ``build_repo`` globs ``*.pkg`` in its
     input directory, so a second regeneration pass over the SAME directory would
-    otherwise swallow the ``data.pkg``/``packagesite.pkg`` the FIRST pass just
-    wrote there and die trying to read a catalog-descriptor archive as if it were
-    a libpkg package. Collecting the pool with ``build_repo_portable``'s own
-    ``_CATALOG_PKG_FILES`` exclusion and staging ONLY that pool into a directory
-    ``build_repo`` has never seen before is what makes regeneration idempotent.
+    otherwise ingest its own descriptor archives. Excluding the engine's
+    `_CATALOG_PKG_FILES` makes regeneration idempotent.
 
     Writes directly into ``site_root`` (via ``build_repo``'s own
     ``catalog_name=f"{channel}/{varver}"`` routing) — no scratch tree, no backup,
@@ -173,7 +164,7 @@ def regenerate_catalogue(
     """
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     pool = sorted(p for p in catalogue_dir.glob("*.pkg") if p.is_file() and p.name not in brp._CATALOG_PKG_FILES)
     if not pool:
         raise CatalogueAssemblyError(f"{channel}/{varver}: empty pool")
@@ -211,10 +202,8 @@ def _protected_versions(site_root: Path, channel: str, varver: str, *, engine: E
 
     Presence-based only: a slower-channel directory that does not exist (or does not
     yet carry this varver) contributes nothing — no error. Scoped exactly like
-    ``prune_retained``'s own pool scan: catalog descriptor files
-    (``build_repo_portable._CATALOG_PKG_FILES``) and non-canonical (dependency)
-    packages are skipped, never read as a canonical manifest, so neither can grant
-    protection by coincidence.
+    ``prune_retained``'s own pool scan: catalogue descriptor files and
+    non-canonical dependency packages are skipped.
 
     Bytes are never compared here: a canonical package sharing the SAME name+version
     across destinations is already guaranteed byte-identical at publish time
@@ -223,7 +212,7 @@ def _protected_versions(site_root: Path, channel: str, varver: str, *, engine: E
     is sufficient — this function has no reason to re-verify that post-condition.
     """
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     versions: set[str] = set()
     for slower_channel in _SLOWER_CHANNELS[channel]:
         slower_dir = site_root / slower_channel / varver
@@ -259,7 +248,7 @@ def _iter_canonical_packages(catalogue_dir: Path, *, engine: Engine) -> list[tup
     never be copied or compared as a containment source.
     """
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     found: list[tuple[Path, str]] = []
     for path in sorted(catalogue_dir.glob("*.pkg")):
         if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
@@ -375,7 +364,7 @@ def prune_retained(
         raise CatalogueAssemblyError(f"retention keep-count for {channel}/{varver} must be a positive integer")
 
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     canonical: list[tuple[object, Path, str]] = []
     for path in sorted(catalogue_dir.glob("*.pkg")):
         if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
@@ -420,14 +409,17 @@ def verify_multi_destination_identity(
     """
     site_root = Path(site_root)
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     for source_path, destinations in source_index.items():
         if len(destinations) < 2:
             continue
         manifest = pfb_pkg.read_compact_manifest(source_path)
         canonical_name = f"{manifest['name']}-{_canonical_version(source_path, manifest)}.pkg"
 
-        baseline: tuple[str, object] | None = None
+        baseline = (
+            hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            brp._canonical_build_record(source_path, manifest),
+        )
         for channel, varver in destinations:
             dest_path = site_root / channel / varver / canonical_name
             if not dest_path.is_file():
@@ -443,9 +435,6 @@ def verify_multi_destination_identity(
             _canonical_version(dest_path, dest_manifest)
             record = brp._canonical_build_record(dest_path, dest_manifest)
             current = (sha256, record)
-            if baseline is None:
-                baseline = current
-                continue
             if current != baseline:
                 raise CatalogueAssemblyError(
                     f"{canonical_name}: multi-destination identity violation across "

@@ -38,10 +38,8 @@
 
 set -eu
 
-# The hook source lives at the shipped path, under a checkout's src/usr/local/etc/rc.d/
-# sibling of this file's own scripts/ directory (issue #2675).
-# Resolved once at source time — CDPATH='' guard used throughout scripts/, see
-# tests/shell/cdpath_spec.sh.
+# The checkout form keeps the hook beside this script; the rendered form embeds
+# the same bytes. Resolve the local fallback once under a CDPATH-neutral lookup.
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
 HOOK_SRC="${SCRIPT_DIR}/pfblockerng_repo_generate.sh"
 

@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Create and validate the immutable tagged-release publisher handoff."""
+"""Validate immutable tagged-Release publisher handoffs."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -53,7 +51,7 @@ def _route_matrix(value: object) -> list[dict[str, object]]:
     return normalized
 
 
-def build_handoff(
+def _validate_handoff_fields(
     *,
     release_tag: str,
     source_sha: str,
@@ -61,7 +59,7 @@ def build_handoff(
     ports_sha: str,
     route_matrix: object,
 ) -> dict[str, object]:
-    """Build the canonical handoff attached to a draft tagged release."""
+    """Validate and normalize the canonical tagged handoff fields."""
     if not isinstance(release_tag, str) or not _RELEASE_TAG_RE.fullmatch(release_tag):
         raise HandoffError("release_tag is malformed")
     source_sha = _git_sha(source_sha, "source_sha")
@@ -102,7 +100,7 @@ def load_handoff(
     if type(raw["schema"]) is not int or raw["schema"] != 1 or raw["kind"] != "tagged-release-handoff":
         raise HandoffError("tagged release handoff schema or kind is unsupported")
 
-    validated = build_handoff(
+    validated = _validate_handoff_fields(
         release_tag=raw["release_tag"],
         source_sha=raw["source_sha"],
         ci_metadata_sha=raw["ci_metadata_sha"],
@@ -131,39 +129,3 @@ def validate_build_records(handoff: Mapping[str, object], records: Sequence[Mapp
         for name, value in expected.items():
             if record.get(name) != value:
                 raise BuildRecordIdentityError(index, name)
-
-
-def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--release-tag", required=True)
-    parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--ci-metadata-sha", required=True)
-    parser.add_argument("--ports-sha", required=True)
-    parser.add_argument("--route-matrix", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parse_args(argv)
-    try:
-        route_matrix = json.loads(args.route_matrix.read_text(encoding="utf-8"))
-        handoff = build_handoff(
-            release_tag=args.release_tag,
-            source_sha=args.source_sha,
-            ci_metadata_sha=args.ci_metadata_sha,
-            ports_sha=args.ports_sha,
-            route_matrix=route_matrix,
-        )
-        args.output.write_text(
-            json.dumps(handoff, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, HandoffError) as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

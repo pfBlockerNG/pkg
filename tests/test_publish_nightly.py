@@ -1,22 +1,7 @@
-"""Tests for scripts/publish_nightly.py — issue #2146 step S2 (Nightly-handoff
-publisher CLI): re-validate the verified Nightly handoff
-(nightly_provenance.build_handoff's own shape, read back as untrusted JSON), verify
-every referenced .pkg asset from BYTES (publish_catalogues.verify_asset — never
-trusting the handoff's own literal record/matrix_row/artifact echoes), fan each
-per-FreeBSD-major build out to every ROUTE varver sharing that major, then assemble
-nightly/<varver>/ catalogues with retention
-(catalogue_assembly.prune_retained/regenerate_catalogue/verify_multi_destination_identity
-— reused, never re-derived). No git, no network.
+"""Tests for the pkg-local Nightly handoff publisher.
 
-Fixture .pkg archives mirror tests/test_publish_release.py's _wrap_canonical_pkg /
-_wrap_dependency_pkg (duplicated here, matching this repo's per-file fixture
-convention) but WITHOUT the tagged -<Variant>-<pfsense_version> suffix: Nightly's
-canonical/dependency declared names equal the package's own manifest identity.
-Build records and handoffs carry a stateless timestamp-plus-source-SHA version.
-Handoffs are assembled via nightly_provenance.build_handoff itself wherever the
-scenario is a legitimate one; hostile/forged scenarios mutate a valid handoff's OWN
-dict after the fact (JSON round-tripped, `_mutate`), since build_handoff's own
-validation would otherwise refuse to construct them honestly.
+Fixtures construct valid source-contract records and handoffs directly; hostile
+cases mutate a deep copy before ingestion.
 """
 
 from __future__ import annotations
@@ -42,18 +27,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import catalogue_assembly as ca
-import nightly_provenance as np
+import catalogue_fixtures as tbrp
+import nightly_contract as nc
 import publish_catalogues as pc
 import publish_nightly as pn
 import publish_release as pr
-import test_build_repo_portable as tbrp
-from _srcrepo import SourceRepoError, resolve_src_root
+from _srcrepo import EngineRootError, resolve_src_root
 
 try:
     _SRC_ROOT = resolve_src_root()
     _ENGINE = pc.load_engine(_SRC_ROOT)
     _ENGINE_SKIP_REASON = ""
-except SourceRepoError as exc:  # pragma: no cover - environment gap, not a behaviour regression
+except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
     _SRC_ROOT = None
     _ENGINE = None
     _ENGINE_SKIP_REASON = str(exc)
@@ -138,7 +123,7 @@ def _snapshot(
         pkg_version=f"{build_date:%Y%m%d}120000.{source_sha[:7]}",
         source_sha=source_sha,
         ports_sha=ports_sha,
-        input_digest=np.combined_nightly_input_digest(source_sha, ports_sha, matrix_digest),
+        input_digest=nc.combined_nightly_input_digest(source_sha, ports_sha, matrix_digest),
     )
 
 
@@ -238,8 +223,7 @@ def _wrap_dependency_pkg(
 
 
 # --------------------------------------------------------------------------- #
-# Leg / handoff assembly — one _LegSpec per BUILD major, folded into a genuine
-# nightly_provenance.build_handoff() call.
+# Leg and handoff fixture assembly.
 # --------------------------------------------------------------------------- #
 
 
@@ -271,19 +255,30 @@ def _resolved_dep_specs(spec: _LegSpec) -> Sequence[tuple[str, str]]:
 
 
 def _make_record(snapshot: _Snapshot, row: dict[str, object], epoch: int = _EPOCH) -> dict[str, object]:
-    return np.make_build_record(
-        pkg_version=snapshot.pkg_version,
-        source_sha=snapshot.source_sha,
-        ports_sha=snapshot.ports_sha,
-        matrix_row=row,
-        source_date_epoch=epoch,
-    )
+    normalized = _ENGINE.pfb_pkg.validate_build_matrix_row(row)
+    major_minor = ".".join(str(normalized["pfsense_version"]).split(".")[:2])
+    record: dict[str, object] = {
+        "schema": 1,
+        "channel": "nightly",
+        "release_line": "nightly",
+        "classification": "nightly",
+        "source_tag": None,
+        "source_sha": snapshot.source_sha,
+        "canonical_package_version": snapshot.pkg_version,
+        "native_recipe_identity": "pfSense-pkg-pfBlockerNG-nightly",
+        "emitted_identity": "pfSense-pkg-pfBlockerNG",
+        "matrix_row": normalized,
+        "freebsd_ports_sha": snapshot.ports_sha,
+        "route": f"nightly/{str(normalized['variant']).lower()}-{major_minor}",
+        "source_date_epoch": epoch,
+        "build_input_digest": "",
+    }
+    record["build_input_digest"] = _ENGINE.pfb_pkg.build_input_digest(record)
+    return _ENGINE.pfb_pkg.validate_build_record(record)
 
 
 def _build_leg_result(snapshot: Any, spec: _LegSpec, *, assets_root: Path) -> dict[str, Any]:
-    """Mint one leg's genuine record + canonical/dep .pkg archives under
-    assets_root/nightly-result-<major>/, and return the handoff-shaped `result` dict
-    nightly_provenance.build_handoff itself expects as one entry of `results`."""
+    """Mint one Nightly leg's record and package fixtures."""
     major = str(spec.row["freebsd_major"])
     legdir = assets_root / f"{pn._LEG_DIR_PREFIX}{major}"
     legdir.mkdir(parents=True, exist_ok=True)
@@ -317,18 +312,30 @@ def _build_handoff(
 ) -> dict[str, Any]:
     results = [_build_leg_result(snapshot, spec, assets_root=assets_root) for spec in legs]
     build_rows = [spec.row for spec in legs]
-    return np.build_handoff(
-        pkg_version=snapshot.pkg_version,
-        build_rows=build_rows,
-        route_rows=list(route_rows),
-        results=results,
-        source_sha=source_sha,
-        ports_sha=ports_sha,
-        tools_sha=_TOOLS_SHA,
-        matrix_sha=_MATRIX_SHA,
-        matrix_digest=_MATRIX_DIGEST,
-        run_id=run_id,
-    )
+    matrix_payload = json.dumps(
+        {"tools_sha": _TOOLS_SHA, "matrix_sha": _MATRIX_SHA, "build": build_rows, "route": list(route_rows)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    matrix_digest = hashlib.sha256(matrix_payload).hexdigest()
+    return {
+        "schema": 1,
+        "kind": "nightly-handoff",
+        "run_id": run_id,
+        "source_ref": "",
+        "ports_repo": "",
+        "ports_ref": "",
+        "pkg_version": snapshot.pkg_version,
+        "input_digest": nc.combined_nightly_input_digest(source_sha, ports_sha, matrix_digest),
+        "source_sha": source_sha,
+        "ports_sha": ports_sha,
+        "tools_sha": _TOOLS_SHA,
+        "matrix_sha": _MATRIX_SHA,
+        "matrix_digest": matrix_digest,
+        "build_matrix": build_rows,
+        "route_matrix": list(route_rows),
+        "builds": sorted(results, key=lambda item: str(item["matrix_row"]["freebsd_major"])),
+    }
 
 
 def _mutate(handoff: dict[str, Any]) -> dict[str, Any]:
@@ -725,7 +732,7 @@ class HandoffIntegrityTests(_TempDirTestCase):
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("handoff pkg_version", str(ctx.exception))
+        self.assertIn("artifact", str(ctx.exception))
 
     @_requires_engine
     def test_run_id_mismatch_rejected(self) -> None:
@@ -825,20 +832,14 @@ class HandoffIntegrityTests(_TempDirTestCase):
 
     @_requires_engine
     def test_tampered_matrix_digest_input_digest_mismatch_rejected(self) -> None:
-        """N2: re-run nightly_provenance.build_handoff's OWN input-digest
-        cross-check at publish time too -- a handoff whose matrix_digest was
-        swapped for a different (still well-formed) value no longer matches
-        snapshot.input_digest, which build_handoff computed from the
-        ORIGINAL matrix_digest at handoff-creation time. Without this
-        re-check, a forged matrix_digest sails through untouched: nothing else
-        in the handoff shape depends on it."""
+        """The publisher recomputes both matrix and combined input digests."""
         handoff, results_dir, _alloc = self.base_handoff()
         mutated = _mutate(handoff)
         self.assertNotEqual(mutated["matrix_digest"], "d" * 64)
         mutated["matrix_digest"] = "d" * 64
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("input_digest", str(ctx.exception))
+        self.assertIn("matrix_digest", str(ctx.exception))
 
     @_requires_engine
     def test_matrix_digest_malformed_shape_rejected(self) -> None:
@@ -850,6 +851,57 @@ class HandoffIntegrityTests(_TempDirTestCase):
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("matrix_digest", str(ctx.exception))
+
+    @_requires_engine
+    def test_tools_and_matrix_sha_are_revalidated(self) -> None:
+        handoff, results_dir, _alloc = self.base_handoff()
+        for field in ("tools_sha", "matrix_sha"):
+            with self.subTest(field=field):
+                mutated = _mutate(handoff)
+                mutated[field] = "not-a-sha"
+                with self.assertRaises(pn.PublishNightlyError):
+                    _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+    @_requires_engine
+    def test_build_matrix_must_match_build_entries(self) -> None:
+        handoff, results_dir, _alloc = self.base_handoff()
+        mutated = _mutate(handoff)
+        mutated["build_matrix"][0]["php_version"] = "php999"
+        with self.assertRaises(pn.PublishNightlyError) as ctx:
+            _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        self.assertIn("build_matrix", str(ctx.exception))
+
+    @_requires_engine
+    def test_literal_build_record_must_match_verified_payload(self) -> None:
+        handoff, results_dir, _alloc = self.base_handoff()
+        mutated = _mutate(handoff)
+        mutated["builds"][0]["record"]["source_sha"] = "f" * 40
+        with self.assertRaises(pn.PublishNightlyError) as ctx:
+            _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        self.assertIn("record", str(ctx.exception))
+
+    @_requires_engine
+    def test_dependency_count_must_match_matrix_extra_packages(self) -> None:
+        handoff, results_dir, _alloc = self.base_handoff()
+        mutated = _mutate(handoff)
+        mutated["builds"][0]["dep_artifacts"] = []
+        with self.assertRaises(pn.PublishNightlyError) as ctx:
+            _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        self.assertIn("extra_pkgs", str(ctx.exception))
+
+    @_requires_engine
+    def test_invalid_utf8_handoff_is_a_publisher_error(self) -> None:
+        handoff_path = self.tmp / "nightly-handoff.json"
+        handoff_path.write_bytes(b"\xff")
+        with self.assertRaises(pn.PublishNightlyError) as ctx:
+            pn.run(
+                handoff_path=handoff_path,
+                results_dir=self.tmp,
+                pkg_repo=self.pkg_repo,
+                source_run_id=_RUN_ID,
+                engine=_ENGINE,
+            )
+        self.assertIn("UTF-8", str(ctx.exception))
 
 
 # --------------------------------------------------------------------------- #
@@ -918,13 +970,7 @@ class RoutingTests(_TempDirTestCase):
 
     @_requires_engine
     def test_dep_abi_mismatch_rejected_via_route_targets(self) -> None:
-        """N3a: a leg's dependency manifest ABI that does NOT belong to that
-        leg's own FreeBSD major (a forged handoff -- a genuine
-        nightly_provenance.build_handoff run would never construct this
-        shape, since _validate_dep_artifacts pins every dep to the leg's own
-        wildcard ABI) is rejected by _route_targets's own ABI cross-check,
-        exercised directly via hand-built _Leg/VerifiedAsset objects, same
-        idiom as test_two_legs_same_major_rejected_via_route_targets above."""
+        """A dependency ABI outside its leg's FreeBSD major is rejected."""
         snapshot = _snapshot()
         record = _make_record(snapshot, ROW_CE15)
         canonical = pc.VerifiedAsset(
@@ -1073,7 +1119,7 @@ class HostileNameTests(_TempDirTestCase):
                 )
                 mutated = _mutate(handoff)
                 mutated["builds"][0]["artifact"]["name"] = hostile
-                with self.assertRaises((pc.AssetVerificationError, np.ProvenanceError)):
+                with self.assertRaises((pc.AssetVerificationError, nc.ContractError)):
                     _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
     @_requires_engine
@@ -1090,7 +1136,7 @@ class HostileNameTests(_TempDirTestCase):
                 )
                 mutated = _mutate(handoff)
                 mutated["builds"][0]["dep_artifacts"][0]["name"] = hostile
-                with self.assertRaises((pc.AssetVerificationError, np.ProvenanceError)):
+                with self.assertRaises((pc.AssetVerificationError, nc.ContractError)):
                     _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
 
 
@@ -1155,7 +1201,7 @@ class MainCliTests(_TempDirTestCase):
 # --sign-key threading (issue #2675 step 1): run()/main() must reach
 # catalogue_assembly.regenerate_catalogue with the caller's key, or with none at
 # all when omitted. The signed wire format itself is test_catalogue_assembly.py's
-# and test_build_repo_portable.py's own coverage — never re-derived here.
+# and test_catalogue_engine.py's own coverage — never re-derived here.
 # --------------------------------------------------------------------------- #
 
 

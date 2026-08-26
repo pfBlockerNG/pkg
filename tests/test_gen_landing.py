@@ -17,7 +17,6 @@ import inspect
 import io
 import json
 import os
-import re
 import stat
 import subprocess
 import tarfile
@@ -118,14 +117,7 @@ def test_ver_key_orders_nightly_after_release() -> None:
 
 
 def test_ver_key_orders_prerelease_stages_alpha_beta_rc_then_release() -> None:
-    """ver_key ranks the release-tag stages the way FreeBSD pkg does (release-version.sh).
-
-    A naive numeric-run key (re.findall(r"\\d+", v)) folds the stage keyword away
-    entirely: 4.0.0.alpha.1 / .beta.1 / .rc.1 all collapsed to the SAME key [4,0,0,1],
-    and the bare 4.0.0 release ([4,0,0]) sorted BELOW every prerelease. This bites
-    when more than one prerelease build is retained per channel. Correct order:
-    alpha < beta < rc < release.
-    """
+    """ver_key ranks release-tag stages in FreeBSD pkg order."""
     versions = ["4.0.0.alpha.1", "4.0.0.beta.1", "4.0.0.rc.1", "4.0.0"]
     assert sorted(versions, key=gl.ver_key) == versions
 
@@ -474,7 +466,7 @@ def test_write_site_record_only_pkg_drives_browse_and_landing(tmp_path: Path, mo
     assert "commit" not in annotations
     assert pfb_pkg.PFB_BUILD_RECORD_KEY in annotations
 
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
     n = gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
     assert n == 1
 
@@ -505,7 +497,7 @@ def test_write_site_out_of_range_created_on_project_pkg_renders_dash(tmp_path: P
     _write_pkg(pkg, annotations={"created": "1e309"})
     os.utime(pkg, (_FILE_MTIME, _FILE_MTIME))
 
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
     n = gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
     assert n == 1
     listing = (site / "browse" / "stable" / "ce-2.8" / "index.html").read_text()
@@ -684,7 +676,7 @@ def test_collect_packages_and_write_site_skip_unknown_top_level_dir(tmp_path: Pa
     assert {p["version"] for p in pkgs} == {"1.0.0"}
 
     monkeypatch.setattr(gl, "read_compact_manifest", fake_read)
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
     n = gl.write_site(str(site), "https://x/pkg", str(_PKG_SITE_DIR))
 
     assert n == 1
@@ -772,7 +764,7 @@ def test_matrix_varver_strips_prerelease_suffix() -> None:
     """The landing page pins a row to the varver its packages are PUBLISHED under.
 
     A pre-release matrix entry ("26.07-BETA") carries the suffix inside the minor
-    field; the publisher strips it (build-repo-portable.catalog_name_from_version),
+    field; the publisher and renderer both strip it before varver selection,
     so this mirror must strip identically — otherwise the varver pin matches nothing
     and every row falls back to the unpinned pool (issue #1965).
     """
@@ -1740,7 +1732,7 @@ def test_write_site_keeps_dependency_packages_browsable(tmp_path: Path, monkeypa
         },
     }
     monkeypatch.setattr(gl, "read_compact_manifest", lambda p: manifests[os.path.basename(p)])
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
 
@@ -1762,7 +1754,7 @@ def test_write_site_emits_browse_pages_outside_the_catalogue_tree(tmp_path: Path
 
     manifest = {"name": _CANON, "version": "3.2.16", "abi": "FreeBSD:15:amd64"}
     monkeypatch.setattr(gl, "read_compact_manifest", lambda p: manifest)
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
 
@@ -1812,7 +1804,7 @@ def test_write_site_never_indexes_docs_staging(tmp_path: Path, monkeypatch: Any)
 
     manifest = {"name": _CANON, "version": "3.2.16", "abi": "FreeBSD:15:amd64"}
     monkeypatch.setattr(gl, "read_compact_manifest", lambda p: manifest)
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
 
@@ -1841,7 +1833,7 @@ def test_write_site_empty_site_root_renders_four_empty_cards_exit_zero(tmp_path:
     cards, no crash, write_site returns 0 (the CLI's exit-0 equivalent)."""
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://x/pkg", str(_PKG_SITE_DIR))
 
@@ -1883,7 +1875,7 @@ def test_browse_adapts_to_any_future_tree_shape(tmp_path: Path, monkeypatch: Any
         return {"name": _CANON, "version": "9.9.9", "abi": abi}
 
     monkeypatch.setattr(gl, "read_compact_manifest", fake_manifest)
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://x/pkg/", str(_PKG_SITE_DIR))
 
@@ -1935,7 +1927,7 @@ def _eol_pkg(version: str, abi: str, varver: str, channel: str = "stable") -> di
     """A package row as collect_packages would produce for a route-only (EOL) catalog entry.
 
     rel is DIRECTLY under <channel>/<varver>/ — arch-less (issue #1806 NO_ARCH), exactly
-    where build-repo-portable.py places them (four-channel model, issue #2147).
+    where catalogue_engine.py places them (four-channel model, issue #2147).
     """
     return {
         "channel": channel,
@@ -2276,25 +2268,15 @@ def test_eol_versions_section_present_in_rendered_page_with_route_only() -> None
     assert "3.2.16" not in eol_block
 
 
-# ── Contract guard: _conf_via_portable ↔ build-repo-portable.py --print-conf ──
-# This test exercises the REAL build-repo-portable.py (no monkeypatching) so that
-# any future change to its --print-conf required-arg/--channel contract immediately
-# breaks the unit suite instead of reaching the live publish workflow.
+# ── Local repo-conf renderer contract ─────────────────────────────────────────
 
 
-def test_conf_via_portable_matches_real_build_repo_portable_contract() -> None:
-    """_conf_via_portable shells the real build-repo-portable.py with `--channel <ch>`
-    and must produce a valid, per-channel conf.
-
-    Guards the gen_landing<->build-repo-portable.py --print-conf contract: a future
-    change to its required-arg/--channel contract must break here, not reach the
-    live publish workflow. All four channels are exercised (branch coverage) — every
-    one of them has its OWN repo/conf (issue #2147).
-    """
+def test_render_conf_is_channel_specific() -> None:
+    """Every channel receives its own stanza and placeholder path."""
     base: str = "https://pkg.pfblockerng.com"
 
     for channel in gl.CH_ORDER:
-        conf: str = gl._conf_via_portable(base, channel)
+        conf: str = gl._render_conf(base, channel)
         assert conf, f"{channel} conf must be non-empty"
         assert f"pfblockerng-{channel}: {{" in conf
         assert f"{base}/{channel}/<varver>" in conf
@@ -2349,7 +2331,7 @@ def test_write_site_publishes_install_script(tmp_path: Path, monkeypatch: Any) -
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     gl.write_site(str(site), f"file://{site}", str(_PKG_SITE_DIR))
 
@@ -2385,7 +2367,7 @@ def test_published_installer_runs_piped_with_embedded_hook(tmp_path: Path, monke
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     base = f"file://{site}"
     gl.write_site(str(site), base, str(_PKG_SITE_DIR))
@@ -2461,7 +2443,7 @@ def test_published_installer_never_treats_the_on_box_hook_as_its_checkout_source
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     base = f"file://{site}"
     gl.write_site(str(site), base, str(_PKG_SITE_DIR))
@@ -2536,7 +2518,7 @@ def test_published_installer_saved_to_disk_still_replaces_a_stale_on_box_hook(tm
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     base = f"file://{site}"
     gl.write_site(str(site), base, str(_PKG_SITE_DIR))
@@ -2605,7 +2587,7 @@ def test_write_site_bakes_the_sites_base_url_into_the_published_installer(tmp_pa
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     fork_base = "https://fork.example.org/mypkg"
     gl.write_site(str(site), fork_base, str(_PKG_SITE_DIR))
@@ -2674,7 +2656,7 @@ def test_write_site_bakes_a_base_url_containing_shell_metacharacters_as_inert_da
 
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     probe = tmp_path / "pwned"
     evil_base = f"https://evil.example.org/$(touch {probe})`touch {probe}`'\"&"
@@ -3058,7 +3040,7 @@ def test_write_site_base_with_trailing_slash_stripped_once(tmp_path: Path, monke
     site = tmp_path / "site"
     _touch(site / "stable" / "ce-2.8" / f"{_CANON}-1.0.0.pkg")
     monkeypatch.setattr(gl, "read_compact_manifest", lambda p: {"name": _CANON, "version": "1.0.0", "abi": "x"})
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     gl.write_site(str(site), "https://x/pkg/", str(_PKG_SITE_DIR))
 
@@ -3084,7 +3066,7 @@ def test_main_cli_accepts_the_production_positional_and_flag_shape(tmp_path: Pat
     site.mkdir()
     matrix_file = tmp_path / "matrix.json"
     matrix_file.write_text("[]")
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     rc = gl.main([str(site), "https://x/pkg", "--site-tree", str(_PKG_SITE_DIR), "--matrix", str(matrix_file)])
 
@@ -3125,7 +3107,7 @@ def test_main_production_shape_with_real_pkg_site_and_matrix(tmp_path: Path, mon
     site.mkdir()
     matrix_file = tmp_path / "matrix.json"
     matrix_file.write_text("[]")
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     rc = gl.main([str(site), "https://x/pkg", "--site-tree", str(_PKG_SITE_DIR), "--matrix", str(matrix_file)])
 
@@ -3155,7 +3137,7 @@ def test_write_site_is_deterministic_across_two_renders_even_with_mtime_churn(tm
     pkg = cell / f"{_CANON}-1.0.0.pkg"
     _write_pkg(pkg, annotations={}, version="1.0.0")
     (cell / "meta.conf").write_text("version = 2;\n")
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     gl.write_site(str(site), "https://x/pkg", str(_PKG_SITE_DIR))
     first = _snapshot(site)
@@ -3196,7 +3178,7 @@ def test_rendered_page_wins_over_a_same_named_site_tree_file(tmp_path: Path, mon
     _write_tree_file(tree, "browse.html", b"<p>not the real browse page</p>")
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     gl.write_site(str(site), "https://x/pkg", str(tree))
 
@@ -3212,7 +3194,7 @@ def test_write_site_empty_tree_and_docs_renders_four_cards_no_crash(tmp_path: Pa
     _write_tree_file(tree, ".nojekyll", b"")
     site = tmp_path / "site"
     site.mkdir()
-    monkeypatch.setattr(gl, "_conf_via_portable", lambda base, ch: f"{ch}-conf")
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     n = gl.write_site(str(site), "https://x/pkg", str(tree))
 

@@ -7,7 +7,7 @@
 # trees, touch nothing inside them. Run by pfBlockerNG/pkg's
 # publish.yml AFTER the per-channel catalog trees are built under <site>/.
 #
-# It is the human-facing sibling of build-repo-portable.py: that tool emits the
+# It is the human-facing sibling of catalogue_engine.py: that tool emits the
 # machine catalog pkg(8) fetches; this one renders a styled index over it —
 # channel install cards (stable / testing / edge / nightly), a Version x ABI table
 # read from each .pkg's own manifest, and a browse view that shows the package(s)
@@ -37,12 +37,15 @@ import json
 import os
 import re
 import stat
-import subprocess
-import sys
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
-from pfb_pkg import CANONICAL_EMITTED_IDENTITY, pkg_version_sort_key, read_compact_manifest
+import repo_conf
+from pfb_pkg import (
+    CANONICAL_EMITTED_IDENTITY,
+    pkg_version_sort_key,
+    read_compact_manifest,
+)
 
 # Display order for the published-packages table + the channel cards. Every channel
 # owns its own <channel>/<varver>/ catalogue subtree and serves the SAME canonical
@@ -73,7 +76,7 @@ PKG_SITE_URL = "https://pkg.pfblockerng.com"
 # from the human listing and the package table.
 CATALOG_META = ("packagesite.pkg", "data.pkg")
 
-# Placeholder catalog-path passed to build-repo-portable.py --print-conf for the
+# Placeholder catalog-path passed to catalogue_engine.py --print-conf for the
 # manual-conf snippet on the landing page. The rc.d hook resolves the box's real
 # varver at boot (arch-less; issue #1806 NO_ARCH); a hand-written conf must
 # substitute a concrete value (e.g. ce-2.8).
@@ -604,7 +607,7 @@ def _abi_matches(a: str, b: str) -> bool:
     """True if two ABI strings denote the same catalog placement: exact string
     equality, OR either side is a NO_ARCH package's wildcarded ABI sharing the
     other's OS+major (the CPU/arch segment is never compared in that case;
-    issue #1806 — mirrors build-repo-portable.py's ``_pkg_matches_abi``)."""
+    issue #1806 — mirrors catalogue_engine.py's ``_pkg_matches_abi``)."""
     if a == b:
         return True
     if not (_is_wildcard_abi(a) or _is_wildcard_abi(b)):
@@ -640,7 +643,7 @@ def _edition_key(variant: str) -> str:
 def _matrix_varver(pfsense_version: str, variant: str) -> str:
     """The catalog dir name (varver) a matrix entry's packages are published under.
 
-    Mirrors build-repo-portable.py's catalog_name_from_version (major.minor only,
+    Mirrors catalogue_engine.py's catalog_name_from_version (major.minor only,
     pre-release suffix stripped first — it sits inside the minor field, so a bare
     split would keep it and pin the row to a varver nothing publishes, issue #1965):
       "2.7" + "CE"           -> "ce-2.7"
@@ -1413,32 +1416,10 @@ def sync_site(docs: str, desired: dict[str, tuple[bytes, int]]) -> tuple[list[st
     return sorted(desired), sorted(deleted)
 
 
-def _conf_via_portable(base: str, channel: str) -> str:
-    """The manual-conf snippet the landing page shows: build-repo-portable.py's own
-    ``--print-conf`` (it supports ``--channel`` — every one of the four channels
-    has its own repo/conf, ``pfblockerng-<channel>``). ``--catalog-path`` takes a
-    literal placeholder because the landing page shows a generic snippet — the
-    rc.d hook resolves the box's real varver at boot (see _CONF_PLACEHOLDER_PATH).
-    """
-    scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    build_repo_portable = os.path.join(scripts_dir, "build-repo-portable.py")
-    out = subprocess.run(
-        [
-            sys.executable,
-            build_repo_portable,
-            "--print-conf",
-            "--base-url",
-            base,
-            "--catalog-path",
-            _CONF_PLACEHOLDER_PATH,
-            "--channel",
-            channel,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return out.stdout.rstrip("\n")
+def _render_conf(base: str, channel: str) -> str:
+    """Render the manual-conf snippet from pkg-local configuration code."""
+    url = f"{base.rstrip('/')}/{channel}/{_CONF_PLACEHOLDER_PATH}"
+    return repo_conf.render(url, channel).rstrip("\n")
 
 
 def write_site(site: str, base: str, site_tree: str, matrix: list[dict] | None = None) -> int:
@@ -1454,7 +1435,7 @@ def write_site(site: str, base: str, site_tree: str, matrix: list[dict] | None =
     built = build_site_tree(site_tree, base)
 
     def conf_fn(channel: str) -> str:
-        return _conf_via_portable(base, channel)
+        return _render_conf(base, channel)
 
     desired = dict(built)
     # A rendered page always wins over a same-named site-tree file (H4, issue #2450).

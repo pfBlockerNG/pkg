@@ -4,7 +4,7 @@ Pins every error path of read_compact_manifest and the zstd decoder's fallback
 chain: the roundtrip uses whichever decoder the environment has (the `zstandard`
 module if installed, else the `zstd` binary), and the no-decoder case is forced
 deterministically to assert the PkgError. This is the single copy of the reader
-that both build-repo-portable.py and gen_landing.py now depend on.
+that both catalogue_engine.py and gen_landing.py now depend on.
 """
 
 from __future__ import annotations
@@ -229,9 +229,11 @@ def test_load_build_record_json_and_path(tmp_path: Path) -> None:
     [
         ("#!/bin/sh\n/usr/local/bin/php -f /etc/rc.packages pfSense-pkg-pfBlockerNG ${2}\n", True),
         (
-            '#!/bin/sh\n\nif [ "${2}" != "POST-INSTALL" ]; then\n\texit 0\nfi\n\n'
-            "${PKG_ROOTDIR}/usr/local/bin/php -f ${PKG_ROOTDIR}/etc/rc.packages "
-            "pfSense-pkg-pfBlockerNG ${2}\n",
+            (
+                '#!/bin/sh\n\nif [ "${2}" != "POST-INSTALL" ]; then\n\texit 0\nfi\n\n'
+                "${PKG_ROOTDIR}/usr/local/bin/php -f ${PKG_ROOTDIR}/etc/rc.packages "
+                "pfSense-pkg-pfBlockerNG ${2}\n"
+            ),
             True,
         ),
         ("#!/bin/sh\n/usr/local/bin/php -f /etc/rc.packages pfSense-pkg-pfBlockerNG ${2} # comment\n", True),
@@ -289,8 +291,8 @@ def _synthetic_pkg(
     record = record or _record()
     payload = payload or {
         "/usr/local/share/pfSense-pkg-pfBlockerNG/info.xml": (
-            "<pfsensepkgs><package><name>pfBlockerNG</name><version>2.8.0</version></package></pfsensepkgs>"
-        ).encode(),
+            b"<pfsensepkgs><package><name>pfBlockerNG</name><version>2.8.0</version></package></pfsensepkgs>"
+        ),
         "/usr/local/pkg/pfblockerng/pfb_stub.py": b"print('ok')\n",
     }
     common = {
@@ -365,12 +367,14 @@ def test_inspect_and_validate_project_pkg_full_cascade(tmp_path: Path, compressi
     assert pfb_pkg.validate_project_pkg(pkg, record, expected_manifest=full)["record"] == record
 
 
-def test_validate_project_pkg_rejects_dtd_entity_declarations(tmp_path: Path) -> None:
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_validate_project_pkg_rejects_dtd_entity_declarations(tmp_path: Path, encoding: str) -> None:
     info = (
-        b'<!DOCTYPE pfsensepkgs [<!ENTITY package_version "2.8.0">]>'
-        b"<pfsensepkgs><package><name>pfBlockerNG</name>"
-        b"<version>&package_version;</version></package></pfsensepkgs>"
-    )
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE pfsensepkgs [<!ENTITY package_version "2.8.0">]>'
+        "<pfsensepkgs><package><name>pfBlockerNG</name>"
+        "<version>&package_version;</version></package></pfsensepkgs>"
+    ).encode(encoding)
     payload = {
         "/usr/local/share/pfSense-pkg-pfBlockerNG/info.xml": info,
         "/usr/local/pkg/pfblockerng/pfb_stub.py": b"print('ok')\n",
