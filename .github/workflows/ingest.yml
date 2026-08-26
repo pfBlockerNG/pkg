@@ -1,0 +1,282 @@
+name: Ingest immutable publication input
+run-name: Ingest ${{ inputs.operation }} ${{ inputs.source_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Exact publication operation
+        required: true
+        type: choice
+        options:
+          - tagged-stage
+          - tagged-promote
+          - tagged-discard
+          - nightly
+          - nightly-cleanup
+      source_repository:
+        description: Immutable input repository
+        required: false
+        default: ""
+        type: string
+      release_id:
+        description: Exact immutable GitHub Release id
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: Exact immutable GitHub Release tag
+        required: false
+        default: ""
+        type: string
+      source_sha:
+        description: Expected source commit
+        required: false
+        default: ""
+        type: string
+      destinations:
+        description: Compact JSON destination array
+        required: false
+        default: ""
+        type: string
+      source_run_id:
+        description: Source workflow run id and attempt
+        required: true
+        type: string
+      artifact_ref:
+        description: Exact digest-pinned Nightly OCI reference
+        required: false
+        default: ""
+        type: string
+      nightly_version:
+        description: Expected Nightly version
+        required: false
+        default: ""
+        type: string
+      staging_prefix:
+        description: Exact staging prefix returned by tagged-stage
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: pkg-repository-mutation
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Initialize result
+        run: |
+          mkdir -p "${RUNNER_TEMP}/publication-result"
+          printf '%s\n' '{"status":"started"}' > "${RUNNER_TEMP}/publication-result/result.json"
+
+      - name: Validate operation inputs
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          STAGING_PREFIX: ${{ inputs.staging_prefix }}
+        run: |
+          set -eu
+          case "$OPERATION" in
+            tagged-stage|tagged-promote|tagged-discard|nightly|nightly-cleanup) ;;
+            *) echo "::error::unsupported operation: ${OPERATION}"; exit 1 ;;
+          esac
+          case "$SOURCE_RUN_ID" in
+            ''|*[!0-9:]*) echo "::error::source_run_id must be <run-id>:<attempt>"; exit 1 ;;
+          esac
+          case "$OPERATION" in
+            tagged-promote|tagged-discard)
+              case "$STAGING_PREFIX" in staging/[0-9A-Za-z_-]*) ;; *) echo "::error::invalid staging_prefix"; exit 1 ;; esac
+              ;;
+          esac
+
+      - name: Download exact immutable Release input
+        if: startsWith(inputs.operation, 'tagged-') && inputs.operation != 'tagged-discard'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -eu
+          [ "$SOURCE_REPOSITORY" = pfBlockerNG/pfBlockerNG ] || { echo "::error::unexpected source repository"; exit 1; }
+          case "$RELEASE_ID" in ''|*[!0-9]*) echo "::error::release_id must be decimal"; exit 1 ;; esac
+          META=$(gh api "repos/${SOURCE_REPOSITORY}/releases/${RELEASE_ID}")
+          ACTUAL_TAG=$(printf '%s' "$META" | jq -r '.tag_name')
+          DRAFT=$(printf '%s' "$META" | jq -r '.draft')
+          IMMUTABLE=$(printf '%s' "$META" | jq -r '.immutable // false')
+          [ "$ACTUAL_TAG" = "$RELEASE_TAG" ] || { echo "::error::Release id/tag mismatch"; exit 1; }
+          [ "$DRAFT" = false ] || { echo "::error::Release is a draft"; exit 1; }
+          [ "$IMMUTABLE" = true ] || { echo "::error::Release is not immutable"; exit 1; }
+
+          mkdir -p "${RUNNER_TEMP}/release-assets"
+          HANDOFF_NAME=pfblockerng-release-handoff.json
+          HANDOFFS=$(printf '%s' "$META" | jq -c --arg name "$HANDOFF_NAME" '[.assets[] | select(.name == $name)]')
+          HANDOFF_COUNT=$(printf '%s' "$HANDOFFS" | jq 'length')
+          [ "$HANDOFF_COUNT" -le 1 ] || { echo "::error::Release has duplicate handoffs"; exit 1; }
+          if [ "$HANDOFF_COUNT" -eq 1 ]; then
+            HANDOFF_ID=$(printf '%s' "$HANDOFFS" | jq -r '.[0].id')
+            HANDOFF_DIGEST=$(printf '%s' "$HANDOFFS" | jq -r '.[0].digest // ""')
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${SOURCE_REPOSITORY}/releases/assets/${HANDOFF_ID}" \
+              > "${RUNNER_TEMP}/release-assets/${HANDOFF_NAME}"
+            ACTUAL=$(sha256sum "${RUNNER_TEMP}/release-assets/${HANDOFF_NAME}" | cut -d' ' -f1)
+            [ "sha256:${ACTUAL}" = "$HANDOFF_DIGEST" ] || { echo "::error::handoff digest mismatch"; exit 1; }
+            printf 'HANDOFF_FILE=%s\n' "${RUNNER_TEMP}/release-assets/${HANDOFF_NAME}" >> "$GITHUB_ENV"
+            jq -c '.route_matrix' "${RUNNER_TEMP}/release-assets/${HANDOFF_NAME}" > "${RUNNER_TEMP}/route-matrix.json"
+          else
+            cp publication/compatibility-route-matrix.json "${RUNNER_TEMP}/route-matrix.json"
+          fi
+          printf 'ROUTE_MATRIX=%s\n' "$(jq -c . "${RUNNER_TEMP}/route-matrix.json")" >> "$GITHUB_ENV"
+
+          if [ "$OPERATION" = tagged-stage ]; then
+            PKG_ASSETS=$(printf '%s' "$META" | jq -c '[.assets[] | select(.name | endswith(".pkg"))]')
+            [ "$(printf '%s' "$PKG_ASSETS" | jq 'length')" -gt 0 ] || { echo "::error::Release carries no .pkg assets"; exit 1; }
+            BAD=$(printf '%s' "$PKG_ASSETS" | jq '[.[] | select((.digest // "") | startswith("sha256:") | not)] | length')
+            [ "$BAD" -eq 0 ] || { echo "::error::one or more .pkg release assets have no sha256 digest"; exit 1; }
+            printf '%s' "$PKG_ASSETS" | jq 'map({(.name): (.digest | ltrimstr("sha256:"))}) | add' \
+              > "${RUNNER_TEMP}/release-assets/digests.json"
+            gh release download "$RELEASE_TAG" -R "$SOURCE_REPOSITORY" --pattern '*.pkg' --dir "${RUNNER_TEMP}/release-assets"
+          fi
+
+      - name: Set up ORAS
+        if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'
+        uses: oras-project/setup-oras@v1
+
+      - name: Log in to GHCR
+        if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | oras login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull exact Nightly digest
+        if: inputs.operation == 'nightly'
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          NIGHTLY_VERSION: ${{ inputs.nightly_version }}
+        run: |
+          set -eu
+          PREFIX=ghcr.io/pfblockerng/pfblockerng-nightly@sha256:
+          case "$ARTIFACT_REF" in
+            "${PREFIX}"*) ;;
+            *) echo "::error::Nightly input must be the digest-pinned ghcr.io/pfBlockerNG/pfBlockerNG-nightly reference"; exit 1 ;;
+          esac
+          DIGEST=${ARTIFACT_REF#"$PREFIX"}
+          case "$DIGEST" in ''|*[!0-9a-f]*) echo "::error::Nightly manifest digest is malformed"; exit 1 ;; esac
+          [ "${#DIGEST}" -eq 64 ] || { echo "::error::Nightly manifest digest must have 64 hex characters"; exit 1; }
+          MANIFEST=$(oras manifest fetch "$ARTIFACT_REF")
+          [ "$(printf '%s' "$MANIFEST" | jq -r '.artifactType')" = application/vnd.pfblockerng.nightly.v1 ] || {
+            echo "::error::unexpected Nightly OCI artifact type"; exit 1; }
+          [ "$(printf '%s' "$MANIFEST" | jq '[.layers[] | select(.mediaType == "application/vnd.pfblockerng.nightly.handoff.v1+json")] | length')" -eq 1 ] || {
+            echo "::error::Nightly OCI handoff layer media type is missing or duplicated"; exit 1; }
+          [ "$(printf '%s' "$MANIFEST" | jq '[.layers[] | select(.mediaType == "application/vnd.pfblockerng.nightly.results.v1+tar+gzip")] | length')" -eq 1 ] || {
+            echo "::error::Nightly OCI results layer media type is missing or duplicated"; exit 1; }
+          mkdir -p "${RUNNER_TEMP}/nightly"
+          oras pull "$ARTIFACT_REF" -o "${RUNNER_TEMP}/nightly"
+          [ -f "${RUNNER_TEMP}/nightly/nightly-handoff.json" ] || { echo "::error::OCI handoff is missing"; exit 1; }
+          [ -f "${RUNNER_TEMP}/nightly/results.tar.gz" ] || { echo "::error::OCI results archive is missing"; exit 1; }
+          [ "$(jq -r '.pkg_version' "${RUNNER_TEMP}/nightly/nightly-handoff.json")" = "$NIGHTLY_VERSION" ] || {
+            echo "::error::Nightly version does not match OCI handoff"; exit 1; }
+          [ "$(jq -r '.run_id' "${RUNNER_TEMP}/nightly/nightly-handoff.json")" = "${{ inputs.source_run_id }}" ] || {
+            echo "::error::source_run_id does not match OCI handoff"; exit 1; }
+          mkdir -p "${RUNNER_TEMP}/nightly/results"
+          tar -xzf "${RUNNER_TEMP}/nightly/results.tar.gz" -C "${RUNNER_TEMP}/nightly/results"
+          printf 'HANDOFF_FILE=%s\n' "${RUNNER_TEMP}/nightly/nightly-handoff.json" >> "$GITHUB_ENV"
+          printf 'RESULTS_DIR=%s\n' "${RUNNER_TEMP}/nightly/results" >> "$GITHUB_ENV"
+          printf 'ROUTE_MATRIX=%s\n' "$(jq -c '.route_matrix' "${RUNNER_TEMP}/nightly/nightly-handoff.json")" >> "$GITHUB_ENV"
+
+      - name: Materialize catalogue signing key
+        if: inputs.operation == 'tagged-stage' || inputs.operation == 'nightly'
+        env:
+          PFB_PKG_SIGNING_KEY: ${{ secrets.PFB_PKG_SIGNING_KEY }}
+        run: |
+          set -eu
+          umask 077
+          printf '%s\n' "$PFB_PKG_SIGNING_KEY" > "${RUNNER_TEMP}/pfb-pkg-signing.key"
+
+      - name: Publish with guarded local commit
+        if: inputs.operation != 'nightly-cleanup'
+        id: publish
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          DESTINATIONS: ${{ inputs.destinations }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          STAGING_PREFIX: ${{ inputs.staging_prefix }}
+          BASE_URL: https://pkg.pfblockerng.com
+        run: |
+          set -eu
+          export PFB_SRC="$GITHUB_WORKSPACE"
+          export PKG_REPO="$GITHUB_WORKSPACE"
+          export ASSETS_DIR="${RUNNER_TEMP}/release-assets"
+          export PFB_SIGN_KEY="${RUNNER_TEMP}/pfb-pkg-signing.key"
+          case "$OPERATION" in
+            tagged-stage)
+              export PUBLISH_KIND=tagged PUBLISH_STAGE=stage
+              export COMPATIBILITY_ROUTE_MATRIX="$GITHUB_WORKSPACE/publication/compatibility-route-matrix.json"
+              python3 scripts/publish_release.py --help | grep -F -- '--compatibility-route-matrix' >/dev/null
+              ;;
+            tagged-promote)
+              export PUBLISH_KIND=tagged PUBLISH_STAGE=promote PUBLISH_RENDER_SITE=1
+              ;;
+            tagged-discard)
+              export PUBLISH_KIND=tagged PUBLISH_STAGE=discard
+              ;;
+            nightly)
+              export PUBLISH_KIND=nightly PUBLISH_STAGE=direct PUBLISH_RENDER_SITE=1
+              ;;
+          esac
+          sh scripts/publish-pkg-repo.sh
+
+      - name: Delete consumed Nightly OCI manifest
+        if: inputs.operation == 'nightly-cleanup' && success()
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+        run: |
+          set -eu
+          PREFIX=ghcr.io/pfblockerng/pfblockerng-nightly@sha256:
+          case "$ARTIFACT_REF" in "${PREFIX}"*) ;; *) echo "::error::cleanup requires an exact digest reference"; exit 1 ;; esac
+          DIGEST=${ARTIFACT_REF#"$PREFIX"}
+          case "$DIGEST" in ''|*[!0-9a-f]*) echo "::error::cleanup digest is malformed"; exit 1 ;; esac
+          [ "${#DIGEST}" -eq 64 ] || { echo "::error::cleanup digest must have 64 hex characters"; exit 1; }
+          oras manifest delete "$ARTIFACT_REF"
+
+      - name: Record ingestion result
+        if: always()
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          STAGING_PREFIX: ${{ steps.publish.outputs.staging_prefix || inputs.staging_prefix }}
+          NOOP: ${{ steps.publish.outputs.noop }}
+          TOUCHED: ${{ steps.publish.outputs.touched }}
+          STATUS: ${{ job.status }}
+        run: |
+          jq -n --arg operation "$OPERATION" --arg source_run_id "$SOURCE_RUN_ID" \
+            --arg staging_prefix "$STAGING_PREFIX" --arg noop "${NOOP:-false}" \
+            --argjson touched "${TOUCHED:-[]}" --arg status "$STATUS" \
+            '{operation: $operation, source_run_id: $source_run_id, staging_prefix: $staging_prefix, noop: ($noop == "true"), touched: $touched, status: $status}' \
+            > "${RUNNER_TEMP}/publication-result/result.json"
+
+      - name: Upload publication result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: publication-result
+          path: ${{ runner.temp }}/publication-result/result.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,68 @@
+[
+  {
+    "pfsense_version": "2.8",
+    "channel": "CE",
+    "freebsd_version": "15.0-RELEASE",
+    "freebsd_major": "15",
+    "php_version": "8.3",
+    "py_flavor": "py311",
+    "variant": "CE",
+    "status": "active",
+    "ci": true,
+    "extra_pkgs": [
+      "textproc/py-charset-normalizer"
+    ],
+    "upgrade": {
+      "available": false
+    }
+  },
+  {
+    "pfsense_version": "26.03",
+    "channel": "Plus",
+    "freebsd_version": "16.0-RELEASE",
+    "freebsd_major": "16",
+    "php_version": "8.5",
+    "py_flavor": "py311",
+    "variant": "Plus",
+    "status": "active",
+    "ci": true,
+    "image_name": "pfsense-plus",
+    "extra_pkgs": [],
+    "upgrade": {
+      "available": false
+    }
+  },
+  {
+    "pfsense_version": "26.07",
+    "channel": "Plus",
+    "freebsd_version": "16.0-RELEASE",
+    "freebsd_major": "16",
+    "php_version": "8.5",
+    "py_flavor": "py311",
+    "variant": "Plus",
+    "status": "active",
+    "ci": true,
+    "image_name": "pfsense-plus",
+    "extra_pkgs": [],
+    "upgrade": {
+      "available": false
+    }
+  },
+  {
+    "pfsense_version": "2.9",
+    "channel": "CE",
+    "freebsd_version": "16.0-RELEASE",
+    "freebsd_major": "16",
+    "php_version": "8.5",
+    "py_flavor": "py311",
+    "variant": "CE",
+    "status": "active",
+    "ci": true,
+    "extra_pkgs": [
+      "textproc/py-charset-normalizer"
+    ],
+    "upgrade": {
+      "available": false
+    }
+  }
+]

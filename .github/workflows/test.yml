@@ -1,0 +1,48 @@
+name: Publication tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - name: Run publisher and renderer tests
+        run: uv run --with pytest==9.1.1 --with zstandard==0.25.0 pytest -q tests
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require dash and jq
+        run: |
+          DASH=$(command -v dash)
+          JQ=$(command -v jq)
+          [ -x "$DASH" ] && [ -x "$JQ" ]
+      - name: Install pinned ShellSpec
+        env:
+          SHELLSPEC_VERSION: 0.28.1
+          SHELLSPEC_SHA256: 350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
+        run: |
+          curl -fsSLo shellspec-dist.tar.gz \
+            "https://github.com/shellspec/shellspec/releases/download/${SHELLSPEC_VERSION}/shellspec-dist.tar.gz"
+          echo "${SHELLSPEC_SHA256}  shellspec-dist.tar.gz" | sha256sum -c -
+          tar -xzf shellspec-dist.tar.gz -C "$HOME"
+          echo "$HOME/shellspec" >> "$GITHUB_PATH"
+      - name: Prove the shell gate red path, then run it
+        run: |
+          DASH=$(command -v dash)
+          if shellspec --shell "$DASH" tests/fixtures/red_spec.sh; then
+            echo "::error::ShellSpec red canary unexpectedly passed"
+            exit 1
+          fi
+          shellspec --shell "$DASH"

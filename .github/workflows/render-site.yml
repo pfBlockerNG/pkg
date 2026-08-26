@@ -1,0 +1,38 @@
+name: Render pkg website
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - pkg-site/**
+      - scripts/gen_landing.py
+      - scripts/render-pkg-site.sh
+      - publication/compatibility-route-matrix.json
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pkg-repository-mutation
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Render and commit the pkg website
+        env:
+          BASE_URL: https://pkg.pfblockerng.com
+          SOURCE_RUN_ID: ${{ github.run_id }}:${{ github.run_attempt }}
+        run: |
+          set -eu
+          export PFB_SRC="$GITHUB_WORKSPACE"
+          export PKG_REPO="$GITHUB_WORKSPACE"
+          export ROUTE_MATRIX="$(jq -c . publication/compatibility-route-matrix.json)"
+          sh scripts/render-pkg-site.sh
