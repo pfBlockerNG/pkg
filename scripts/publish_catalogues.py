@@ -15,11 +15,10 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 from typing import Literal
 
-import catalogue_engine as catalogue_engine_module
-import pfb_pkg as pfb_pkg_module
+import catalogue_engine
+import pfb_pkg
 
 # --------------------------------------------------------------------------- #
 # Errors — one dedicated type per stage, all rooted at PublishError.
@@ -40,23 +39,6 @@ class AssetVerificationError(PublishError):
 
 class RunVerificationError(PublishError):
     """Cross-asset or ROUTE validation failed."""
-
-
-@dataclass(frozen=True)
-class Engine:
-    pfb_pkg: ModuleType
-    catalogue_engine: ModuleType
-
-
-_LOCAL_ENGINE = Engine(
-    pfb_pkg=pfb_pkg_module,
-    catalogue_engine=catalogue_engine_module,
-)
-
-
-def load_engine() -> Engine:
-    """Return the repository-local publisher engine."""
-    return _LOCAL_ENGINE
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +218,6 @@ def _validate_asset_name(name: str) -> None:
 
 
 def verify_asset(
-    engine: Engine,
     asset_path: str | Path,
     asset_name: str,
     *,
@@ -248,7 +229,7 @@ def verify_asset(
 
     Produces a canonical working copy (stripping a tagged Release asset's
     ``-<Variant>-<pfsense_version>`` suffix), pulls the provenance record via the
-    engine's ``_canonical_build_record``, runs ``validate_project_pkg``, and applies
+    local catalogue engine, runs ``validate_project_pkg``, and applies
     the publisher-level cross-checks against ``intake``. A canonical package with no
     provenance annotation is rejected — the legacy unannotated path is gone.
     """
@@ -271,7 +252,6 @@ def verify_asset(
             f"{asset_name}: sha256 mismatch: expected {expected_sha256}, got {digest}"
         )
 
-    pfb_pkg = engine.pfb_pkg
     try:
         manifest = pfb_pkg.read_compact_manifest(asset_path)
     except pfb_pkg.PkgError as exc:
@@ -282,7 +262,6 @@ def verify_asset(
 
     if manifest.get("name") == pfb_pkg.CANONICAL_EMITTED_IDENTITY:
         return _verify_canonical_asset(
-            engine,
             asset_path,
             asset_name,
             manifest,
@@ -291,7 +270,6 @@ def verify_asset(
             digest=digest,
         )
     return _verify_dependency_asset(
-        engine,
         asset_path,
         asset_name,
         manifest,
@@ -302,7 +280,6 @@ def verify_asset(
 
 
 def _verify_canonical_asset(
-    engine: Engine,
     asset_path: Path,
     asset_name: str,
     manifest: Mapping[str, object],
@@ -311,8 +288,7 @@ def _verify_canonical_asset(
     work_dir: Path,
     digest: str,
 ) -> VerifiedAsset:
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     try:
         record = brp._canonical_build_record(asset_path, manifest)
     except brp.BuildRepoError as exc:
@@ -367,7 +343,6 @@ def _verify_canonical_asset(
 
 
 def _verify_dependency_asset(
-    engine: Engine,
     asset_path: Path,
     asset_name: str,
     manifest: Mapping[str, object],
@@ -386,8 +361,7 @@ def _verify_dependency_asset(
     the ABI against SOME ROUTE row. Here the suffix only has to be well-formed; it is
     returned on the VerifiedAsset (``release_suffix``) for the publisher to route on.
     """
-    brp = engine.catalogue_engine
-    pfb_pkg = engine.pfb_pkg
+    brp = catalogue_engine
     name = manifest.get("name")
     version = manifest.get("version")
     segment_re = brp._PKG_SEGMENT_RE
@@ -456,7 +430,7 @@ class RunResult:
 
 
 def _normalize_route_matrix(
-    engine: Engine, route_matrix_rows: Sequence[Mapping[str, object]]
+    route_matrix_rows: Sequence[Mapping[str, object]],
 ) -> tuple[
     dict[tuple[object, object], dict[str, object]],
     dict[tuple[object, object], dict[str, object]],
@@ -467,7 +441,6 @@ def _normalize_route_matrix(
     popped before validate_build_matrix_row only for "route-only" (that function
     rejects any role other than absent/"build"), then reattached.
     """
-    pfb_pkg = engine.pfb_pkg
     build_rows: dict[tuple[object, object], dict[str, object]] = {}
     route_only_rows: dict[tuple[object, object], dict[str, object]] = {}
     for raw_row in route_matrix_rows:
@@ -528,7 +501,6 @@ def _require_single_value(assets: Sequence[VerifiedAsset], field_name: str) -> o
 
 
 def verify_run(
-    engine: Engine,
     intake: Intake,
     assets: Sequence[VerifiedAsset],
     route_matrix_rows: Sequence[Mapping[str, object]],
@@ -545,7 +517,7 @@ def verify_run(
     if not canonical:
         raise RunVerificationError("run has no canonical project package")
 
-    build_rows, route_only_rows = _normalize_route_matrix(engine, route_matrix_rows)
+    build_rows, route_only_rows = _normalize_route_matrix(route_matrix_rows)
 
     # Axes 4/6: release_line and canonical_package_version identical across the run.
     _require_single_value(canonical, "release_line")
@@ -581,7 +553,7 @@ def verify_run(
         f"FreeBSD:{row['freebsd_major']}:*"
         for row in {**build_rows, **route_only_rows}.values()
     }
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     for asset in dependency:
         if not any(brp._pkg_matches_abi(asset.manifest, abi) for abi in route_abis):
             raise RunVerificationError(

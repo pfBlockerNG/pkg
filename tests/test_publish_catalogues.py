@@ -2,8 +2,7 @@
 verification core for the four-channel staged publisher).
 
 No network, no git, no tree assembly, no ledger — this pins parse_intake, verify_asset,
-and verify_run against the pfBlockerNG pkg-local engine loaded from PFB_SRC (see
-tests/_srcrepo.py). Canonical .pkg fixtures are built in pure Python (mirrors the source
+and verify_run against the repository-local engine. Canonical .pkg fixtures are built in pure Python (mirrors the source
 repo's tests/test_catalogue_engine.py make_pkg / tests/test_pfb_pkg.py _synthetic_pkg),
 and every fixture record's build_input_digest is computed by the engine's own
 pfb_pkg.build_input_digest — never hand-typed.
@@ -24,11 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import publish_catalogues as pc
-
-_SRC_ROOT = Path(__file__).resolve().parents[1]
-_ENGINE = pc.load_engine()
-_requires_engine = unittest.skipIf(False, "")
-
 
 # --------------------------------------------------------------------------- #
 # Fixture builders — genuine records (build_input_digest via the engine), and
@@ -69,7 +63,7 @@ def _record(
 ) -> dict:
     """A genuine, digest-bound build record — build_input_digest always recomputed
     via engine.pfb_pkg.build_input_digest, never hand-typed."""
-    pfb_pkg = _ENGINE.pfb_pkg
+    pfb_pkg = pc.pfb_pkg
     row = row or _matrix_row()
     major_minor = ".".join(row["pfsense_version"].split(".")[:2])
     if channel == "nightly":
@@ -119,7 +113,7 @@ def _record(
 
 
 def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> None:
-    pfb_pkg = _ENGINE.pfb_pkg
+    pfb_pkg = pc.pfb_pkg
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tf:
         for name, data, mode, mtime in members:
@@ -138,7 +132,7 @@ def _wrap_canonical_pkg(
 ) -> tuple[Path, str]:
     """Write a full, validate_project_pkg-shaped canonical .pkg carrying ``record``
     as its pfb_build_record annotation. Returns (local path, sha256 of the bytes)."""
-    pfb_pkg = _ENGINE.pfb_pkg
+    pfb_pkg = pc.pfb_pkg
     row = record["matrix_row"]
     version = record["canonical_package_version"]
     epoch = record["source_date_epoch"]
@@ -483,7 +477,6 @@ class IntakeSourceRepositoryTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 
-@_requires_engine
 class AssetVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -514,7 +507,6 @@ class AssetVerificationTests(unittest.TestCase):
             f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}-CE-2.8.pkg"
         )
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             declared,
             intake=intake,
@@ -533,7 +525,6 @@ class AssetVerificationTests(unittest.TestCase):
             f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}-CE-2.8.pkg"
         )
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             declared,
             intake=intake,
@@ -550,7 +541,6 @@ class AssetVerificationTests(unittest.TestCase):
             f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}-CE-2.8.pkg"
         )
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             declared,
             intake=intake,
@@ -565,7 +555,6 @@ class AssetVerificationTests(unittest.TestCase):
         path, digest = _wrap_canonical_pkg(self.tmp_path, record)
         declared = f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}.pkg"
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             declared,
             intake=intake,
@@ -582,7 +571,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         path, digest = _wrap_dependency_pkg(self.tmp_path)
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             "py311-charset-normalizer-3.4.0-CE-2.8.pkg",
             intake=intake,
@@ -600,7 +588,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="nightly", destinations='["nightly"]')
         path, digest = _wrap_dependency_pkg(self.tmp_path)
         asset = pc.verify_asset(
-            _ENGINE,
             path,
             "py311-charset-normalizer-3.4.0.pkg",
             intake=intake,
@@ -621,7 +608,6 @@ class AssetVerificationTests(unittest.TestCase):
         path, digest = _wrap_dependency_pkg(self.tmp_path)
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 path,
                 "py311-charset-normalizer-3.4.0.pkg",
                 intake=intake,
@@ -648,7 +634,6 @@ class AssetVerificationTests(unittest.TestCase):
                 self.assertRaises(pc.AssetVerificationError) as ctx,
             ):
                 pc.verify_asset(
-                    _ENGINE,
                     path,
                     malformed,
                     intake=intake,
@@ -663,7 +648,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 self.tmp_path / "whatever",
                 "../evil.pkg",
                 intake=intake,
@@ -675,7 +659,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 self.tmp_path / "whatever",
                 "/etc/evil.pkg",
                 intake=intake,
@@ -687,7 +670,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 self.tmp_path / "whatever",
                 "evil\x00.pkg",
                 intake=intake,
@@ -699,7 +681,6 @@ class AssetVerificationTests(unittest.TestCase):
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 self.tmp_path / "whatever",
                 "evil\n.pkg",
                 intake=intake,
@@ -714,7 +695,6 @@ class AssetVerificationTests(unittest.TestCase):
         wrong_declared = "pfSense-pkg-pfBlockerNG-9.9.9-CE-2.8.pkg"
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 path,
                 wrong_declared,
                 intake=intake,
@@ -733,7 +713,6 @@ class AssetVerificationTests(unittest.TestCase):
         )
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 path,
                 declared,
                 intake=intake,
@@ -743,7 +722,7 @@ class AssetVerificationTests(unittest.TestCase):
 
     def test_canonical_package_without_provenance_rejected(self) -> None:
         intake = self._intake(channel="testing", destinations='["testing","edge"]')
-        pfb_pkg = _ENGINE.pfb_pkg
+        pfb_pkg = pc.pfb_pkg
         common = {
             "name": pfb_pkg.CANONICAL_EMITTED_IDENTITY,
             "origin": "net/pfSense-pkg-pfBlockerNG",
@@ -759,7 +738,6 @@ class AssetVerificationTests(unittest.TestCase):
         declared = "pfSense-pkg-pfBlockerNG-4.0.1.b1-CE-2.8.pkg"
         with self.assertRaises(pc.AssetVerificationError) as ctx:
             pc.verify_asset(
-                _ENGINE,
                 path,
                 declared,
                 intake=intake,
@@ -778,7 +756,6 @@ class AssetVerificationTests(unittest.TestCase):
         )
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 path,
                 declared,
                 intake=intake,
@@ -801,7 +778,6 @@ class AssetVerificationTests(unittest.TestCase):
         )
         with self.assertRaises(pc.AssetVerificationError) as ctx:
             pc.verify_asset(
-                _ENGINE,
                 path,
                 declared,
                 intake=intake,
@@ -816,7 +792,7 @@ class AssetVerificationTests(unittest.TestCase):
         rejection PROPAGATES through verify_asset rather than being silently accepted."""
         record = _record(channel="testing", row=_matrix_row(pfsense_version="2.9"))
         record["route"] = "testing/ce-2.8"  # wrong: matrix_row says 2.9
-        pfb_pkg = _ENGINE.pfb_pkg
+        pfb_pkg = pc.pfb_pkg
         record["build_input_digest"] = pfb_pkg.build_input_digest(record)
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         path, digest = _wrap_canonical_pkg(self.tmp_path, record)
@@ -825,7 +801,6 @@ class AssetVerificationTests(unittest.TestCase):
         )
         with self.assertRaises(pc.AssetVerificationError) as ctx:
             pc.verify_asset(
-                _ENGINE,
                 path,
                 declared,
                 intake=intake,
@@ -843,7 +818,6 @@ class AssetVerificationTests(unittest.TestCase):
         )
         with self.assertRaises(pc.AssetVerificationError):
             pc.verify_asset(
-                _ENGINE,
                 path,
                 "py311-charset-normalizer-9.9.9-CE-2.8.pkg",
                 intake=intake,
@@ -857,7 +831,6 @@ class AssetVerificationTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 
-@_requires_engine
 class RunVerificationTests(unittest.TestCase):
     def test_verify_run_single_build_row_success(self) -> None:
         record = _record(channel="testing")
@@ -866,7 +839,7 @@ class RunVerificationTests(unittest.TestCase):
         )
         route_matrix = [_matrix_row()]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
-        result = pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+        result = pc.verify_run(intake, [asset], route_matrix)
         self.assertEqual(len(result.canonical_assets), 1)
 
     def test_verify_run_with_route_only_row_and_matching_dependency(self) -> None:
@@ -897,7 +870,7 @@ class RunVerificationTests(unittest.TestCase):
             ),
         ]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
-        result = pc.verify_run(_ENGINE, intake, [canonical, dependency], route_matrix)
+        result = pc.verify_run(intake, [canonical, dependency], route_matrix)
         self.assertEqual(len(result.dependency_assets), 1)
 
     def test_verify_run_multi_varver_with_dependency_matching_build_row(self) -> None:
@@ -922,9 +895,7 @@ class RunVerificationTests(unittest.TestCase):
         )
         route_matrix = [row_a, row_b]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
-        result = pc.verify_run(
-            _ENGINE, intake, [asset_a, asset_b, dependency], route_matrix
-        )
+        result = pc.verify_run(intake, [asset_a, asset_b, dependency], route_matrix)
         self.assertEqual(len(result.canonical_assets), 2)
         self.assertEqual(len(result.dependency_assets), 1)
 
@@ -936,7 +907,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [_matrix_row(pfsense_version="2.9")]  # no row for 2.8
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+            pc.verify_run(intake, [asset], route_matrix)
 
     def test_duplicate_asset_for_same_route_row_rejected(self) -> None:
         record = _record(channel="testing")
@@ -945,7 +916,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [_matrix_row()]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset_a, asset_b], route_matrix)
+            pc.verify_run(intake, [asset_a, asset_b], route_matrix)
 
     def test_route_build_row_with_no_asset_rejected(self) -> None:
         record = _record(channel="testing", row=_matrix_row(pfsense_version="2.8"))
@@ -956,7 +927,7 @@ class RunVerificationTests(unittest.TestCase):
         ]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+            pc.verify_run(intake, [asset], route_matrix)
 
     def test_assets_disagree_on_source_sha_rejected(self) -> None:
         row_a = _matrix_row()
@@ -972,7 +943,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [row_a, row_b]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset_a, asset_b], route_matrix)
+            pc.verify_run(intake, [asset_a, asset_b], route_matrix)
 
     def test_assets_disagree_on_canonical_package_version_rejected(self) -> None:
         row_a = _matrix_row()
@@ -988,7 +959,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [row_a, row_b]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset_a, asset_b], route_matrix)
+            pc.verify_run(intake, [asset_a, asset_b], route_matrix)
 
     def test_assets_disagree_on_release_line_rejected(self) -> None:
         row_a = _matrix_row()
@@ -1004,7 +975,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [row_a, row_b]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [asset_a, asset_b], route_matrix)
+            pc.verify_run(intake, [asset_a, asset_b], route_matrix)
 
     def test_dependency_with_unmatched_abi_rejected(self) -> None:
         record = _record(channel="testing")
@@ -1023,7 +994,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [_matrix_row()]  # only freebsd_major "15"
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError):
-            pc.verify_run(_ENGINE, intake, [canonical, dependency], route_matrix)
+            pc.verify_run(intake, [canonical, dependency], route_matrix)
 
     # --- _normalize_route_matrix branches (F4) ---
 
@@ -1033,7 +1004,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = ["not-a-mapping"]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+            pc.verify_run(intake, [asset], route_matrix)
         self.assertIn("must be an object", str(ctx.exception))
 
     def test_route_matrix_invalid_role_rejected(self) -> None:
@@ -1042,7 +1013,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [_matrix_row(role="frozen")]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+            pc.verify_run(intake, [asset], route_matrix)
         self.assertIn("invalid role", str(ctx.exception))
 
     def test_route_matrix_ci_must_be_boolean(self) -> None:
@@ -1052,7 +1023,7 @@ class RunVerificationTests(unittest.TestCase):
         row["ci"] = "true"
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pc.verify_run(_ENGINE, intake, [asset], [row])
+            pc.verify_run(intake, [asset], [row])
         self.assertIn("ci must be boolean", str(ctx.exception))
 
     def test_route_matrix_duplicate_version_identity_rejected(self) -> None:
@@ -1061,7 +1032,7 @@ class RunVerificationTests(unittest.TestCase):
         route_matrix = [_matrix_row(), _matrix_row()]
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pc.verify_run(_ENGINE, intake, [asset], route_matrix)
+            pc.verify_run(intake, [asset], route_matrix)
         self.assertIn("duplicate version identity", str(ctx.exception))
 
     def test_route_matrix_empty_rejected(self) -> None:
@@ -1069,7 +1040,7 @@ class RunVerificationTests(unittest.TestCase):
         asset = _fabricated_asset(record)
         intake = pc.parse_intake(_REPO, "1", "v4.0.1.b1", '["testing","edge"]', "10:1")
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pc.verify_run(_ENGINE, intake, [asset], [])
+            pc.verify_run(intake, [asset], [])
         self.assertIn("must not be empty", str(ctx.exception))
 
 

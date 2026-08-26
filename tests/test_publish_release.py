@@ -24,7 +24,6 @@ import hashlib
 import io
 import itertools
 import json
-import os
 import sys
 import tarfile
 import tempfile
@@ -38,14 +37,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import catalogue_assembly as ca
+import catalogue_engine
 import catalogue_fixtures as tbrp
+import pfb_pkg
 import publish_catalogues as pc
 import publish_release as pr
 import tagged_release_handoff as trh
-
-_SRC_ROOT = Path(__file__).resolve().parents[1]
-_ENGINE = pc.load_engine()
-_requires_engine = unittest.skipIf(False, "")
 
 _REPO = pc.EXPECTED_SOURCE_REPOSITORY
 
@@ -68,7 +65,11 @@ ROW_CE: dict[str, object] = {
     "extra_pkgs": ["textproc/py-charset-normalizer"],
 }
 
-ROW_CE_PATCH: dict[str, object] = {**ROW_CE, "pfsense_version": "2.8.1", "extra_pkgs": []}
+ROW_CE_PATCH: dict[str, object] = {
+    **ROW_CE,
+    "pfsense_version": "2.8.1",
+    "extra_pkgs": [],
+}
 
 ROW_PLUS_03: dict[str, object] = {
     "pfsense_version": "26.03",
@@ -86,8 +87,14 @@ ROW_PLUS_07: dict[str, object] = {**ROW_PLUS_03, "pfsense_version": "26.07"}
 
 # Twin dest tests declare textproc/py-twin themselves (issue #2403). Own lists —
 # never mutate ROW_PLUS_03["extra_pkgs"] at import.
-ROW_PLUS_03_TWIN: dict[str, object] = {**ROW_PLUS_03, "extra_pkgs": ["textproc/py-twin"]}
-ROW_PLUS_07_TWIN: dict[str, object] = {**ROW_PLUS_07, "extra_pkgs": ["textproc/py-twin"]}
+ROW_PLUS_03_TWIN: dict[str, object] = {
+    **ROW_PLUS_03,
+    "extra_pkgs": ["textproc/py-twin"],
+}
+ROW_PLUS_07_TWIN: dict[str, object] = {
+    **ROW_PLUS_07,
+    "extra_pkgs": ["textproc/py-twin"],
+}
 
 # Same-major dest scope (issue #2403): Plus shares CE's FreeBSD major, extra_pkgs=[].
 ROW_PLUS_SAME_MAJOR: dict[str, object] = {
@@ -149,13 +156,14 @@ def _record(
     release_line: str | None = None,
     source_tag: str | None = None,
 ) -> dict:
-    pfb_pkg = _ENGINE.pfb_pkg
     row = row or ROW_CE
     major_minor = ".".join(cast(str, row["pfsense_version"]).split(".")[:2])
     tag = source_tag or _TAG_FOR_CHANNEL[channel]
     info = pfb_pkg.parse_release_tag(tag, channel)
     native = (
-        pfb_pkg.CANONICAL_EMITTED_IDENTITY if channel == "stable" else f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{channel}"
+        pfb_pkg.CANONICAL_EMITTED_IDENTITY
+        if channel == "stable"
+        else f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{channel}"
     )
     record = {
         "schema": 1,
@@ -178,7 +186,6 @@ def _record(
 
 
 def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> None:
-    pfb_pkg = _ENGINE.pfb_pkg
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tf:
         for name, data, mode, mtime in members:
@@ -187,13 +194,16 @@ def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> No
             info.mode = mode
             info.mtime = mtime
             tf.addfile(info, io.BytesIO(data))
-    path.write_bytes(pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable"))
+    path.write_bytes(
+        pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable")
+    )
 
 
-def _wrap_canonical_pkg(directory: Path, record: dict, *, local_name: str) -> tuple[Path, str]:
+def _wrap_canonical_pkg(
+    directory: Path, record: dict, *, local_name: str
+) -> tuple[Path, str]:
     """A full, validate_project_pkg-shaped canonical .pkg carrying ``record`` as its
     pfb_build_record annotation. Returns (path, sha256 of the bytes)."""
-    pfb_pkg = _ENGINE.pfb_pkg
     row = record["matrix_row"]
     version = record["canonical_package_version"]
     epoch = record["source_date_epoch"]
@@ -212,7 +222,11 @@ def _wrap_canonical_pkg(directory: Path, record: dict, *, local_name: str) -> tu
         "abi": f"FreeBSD:{major}:*",
         "arch": f"freebsd:{major}:*",
         "prefix": "/usr/local",
-        "annotations": {pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(record, separators=(",", ":"), sort_keys=True)},
+        "annotations": {
+            pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(
+                record, separators=(",", ":"), sort_keys=True
+            )
+        },
     }
     php_dep = "php" + row["php_version"].replace(".", "")
     python_dep = "python" + row["py_flavor"][2:]
@@ -284,7 +298,7 @@ def _wrap_dependency_pkg(
 def _canonical_declared_name(record: dict) -> str:
     row = record["matrix_row"]
     version = record["canonical_package_version"]
-    return f"{_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{version}-{row['variant']}-{row['pfsense_version']}.pkg"
+    return f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{version}-{row['variant']}-{row['pfsense_version']}.pkg"
 
 
 def _dependency_declared_name(*, name: str, version: str, row: dict) -> str:
@@ -299,7 +313,7 @@ def _canonical_verified_asset(row: dict[str, object]) -> pc.VerifiedAsset:
     return pc.VerifiedAsset(
         asset_class="canonical",
         declared_name=_canonical_declared_name(record),
-        canonical_name=f"{_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg",
+        canonical_name=f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg",
         work_path=Path("canonical.pkg"),
         sha256="a" * 64,
         manifest={},
@@ -320,12 +334,19 @@ def _dependency_verified_asset(
         canonical_name=f"{name}-{version}.pkg",
         work_path=Path(f"{name}-{version}.pkg"),
         sha256="b" * 64,
-        manifest={"name": name, "version": version, "abi": abi, "origin": f"textproc/{name}"},
+        manifest={
+            "name": name,
+            "version": version,
+            "abi": abi,
+            "origin": f"textproc/{name}",
+        },
         release_suffix=release_suffix,
     )
 
 
-def _run_result(*, canonical: pc.VerifiedAsset, dependency: pc.VerifiedAsset) -> pc.RunResult:
+def _run_result(
+    *, canonical: pc.VerifiedAsset, dependency: pc.VerifiedAsset
+) -> pc.RunResult:
     return pc.RunResult(
         intake=pc.parse_intake(_REPO, "1", "v4.0.0.b1", '["edge"]', "10:1"),
         canonical_assets=(canonical,),
@@ -361,7 +382,9 @@ def _populate_assets_dir(
         digests[declared] = digest
     if include_dependency:
         row = dep_row or next(r for r in rows if r["variant"] == "CE")
-        declared = _dependency_declared_name(name="py311-charset-normalizer", version=dep_version, row=row)
+        declared = _dependency_declared_name(
+            name="py311-charset-normalizer", version=dep_version, row=row
+        )
         _path, digest = _wrap_dependency_pkg(
             assets_dir,
             version=dep_version,
@@ -369,7 +392,9 @@ def _populate_assets_dir(
             local_name=declared,
         )
         digests[declared] = digest
-    (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+    (assets_dir / pr._DIGESTS_FILENAME).write_text(
+        json.dumps(digests), encoding="utf-8"
+    )
     return digests
 
 
@@ -422,7 +447,6 @@ def _run(
         assets_dir=assets_dir,
         pkg_repo=pkg_repo,
         handoff_file=handoff,
-        engine=_ENGINE,
         sign_key=sign_key,
     )
 
@@ -445,7 +469,6 @@ class _TempDirTestCase(unittest.TestCase):
 
 
 class DigestSidecarTests(_TempDirTestCase):
-    @_requires_engine
     def test_missing_digests_file_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
@@ -458,7 +481,6 @@ class DigestSidecarTests(_TempDirTestCase):
             )
         self.assertIn("cannot read", str(ctx.exception))
 
-    @_requires_engine
     def test_malformed_json_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
@@ -472,7 +494,6 @@ class DigestSidecarTests(_TempDirTestCase):
             )
         self.assertIn("not valid JSON", str(ctx.exception))
 
-    @_requires_engine
     def test_non_object_digests_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
@@ -486,11 +507,12 @@ class DigestSidecarTests(_TempDirTestCase):
             )
         self.assertIn("non-empty JSON object", str(ctx.exception))
 
-    @_requires_engine
     def test_bad_sha_shape_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps({"a.pkg": "not-a-sha"}), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({"a.pkg": "not-a-sha"}), encoding="utf-8"
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -502,11 +524,12 @@ class DigestSidecarTests(_TempDirTestCase):
 
 
 class AssetDiscoveryTests(_TempDirTestCase):
-    @_requires_engine
     def test_no_assets_at_all_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps({"phantom.pkg": "0" * 64}), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({"phantom.pkg": "0" * 64}), encoding="utf-8"
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -516,10 +539,11 @@ class AssetDiscoveryTests(_TempDirTestCase):
             )
         self.assertIn("no .pkg assets found", str(ctx.exception))
 
-    @_requires_engine
     def test_asset_missing_digest_entry_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
-        digests = _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        digests = _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         # Add a second .pkg with no corresponding digests.json entry.
         stray_record = _record(channel="edge", row=ROW_PLUS_03, source_tag="v4.0.0.b1")
         _wrap_canonical_pkg(assets_dir, stray_record, local_name="stray.pkg")
@@ -534,12 +558,15 @@ class AssetDiscoveryTests(_TempDirTestCase):
         self.assertIn("stray.pkg", str(ctx.exception))
         self.assertTrue(digests)  # sanity: the fixture actually wrote something
 
-    @_requires_engine
     def test_digest_entry_missing_file_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
-        digests = _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        digests = _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         digests["ghost.pkg"] = "0" * 64
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -556,11 +583,12 @@ class AssetDiscoveryTests(_TempDirTestCase):
 
 
 class IntakeAndHandoffTests(_TempDirTestCase):
-    @_requires_engine
     def test_nightly_intake_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps({"x.pkg": "0" * 64}), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({"x.pkg": "0" * 64}), encoding="utf-8"
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             pr.run(
                 source_repository=_REPO,
@@ -572,11 +600,9 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 assets_dir=assets_dir,
                 pkg_repo=self.pkg_repo,
                 handoff_file=assets_dir / "missing-handoff.json",
-                engine=_ENGINE,
             )
         self.assertIn("only handles tagged intake", str(ctx.exception))
 
-    @_requires_engine
     def test_destination_outside_closed_five_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
         with self.assertRaises(pc.IntakeError):
@@ -588,10 +614,11 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 tag="v4.0.0",
             )
 
-    @_requires_engine
     def test_handoff_not_json_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         handoff = assets_dir / "pfblockerng-release-handoff.json"
         handoff.write_text("not json", encoding="utf-8")
         with self.assertRaises(ValueError) as ctx:
@@ -605,7 +632,6 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 assets_dir=assets_dir,
                 pkg_repo=self.pkg_repo,
                 handoff_file=handoff,
-                engine=_ENGINE,
             )
         self.assertIn("valid JSON", str(ctx.exception))
 
@@ -620,11 +646,11 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             )
         self.assertIn("not valid UTF-8", str(ctx.exception))
 
-
-    @_requires_engine
     def test_handoff_route_matrix_empty_array_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
             rows=(ROW_CE,),
@@ -644,14 +670,16 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 assets_dir=assets_dir,
                 pkg_repo=self.pkg_repo,
                 handoff_file=handoff,
-                engine=_ENGINE,
             )
         self.assertIn("route_matrix must be a non-empty JSON array", str(ctx.exception))
 
-    @_requires_engine
-    def test_published_release_without_handoff_uses_pkg_compatibility_matrix(self) -> None:
+    def test_published_release_without_handoff_uses_pkg_compatibility_matrix(
+        self,
+    ) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         compatibility = self.tmp / "compatibility-route-matrix.json"
         compatibility.write_text(json.dumps([ROW_CE]), encoding="utf-8")
 
@@ -666,15 +694,15 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             pkg_repo=self.pkg_repo,
             handoff_file=None,
             compatibility_route_matrix_file=compatibility,
-            engine=_ENGINE,
         )
 
         self.assertEqual(report.touched, (("edge", "ce-2.8"),))
 
-    @_requires_engine
     def test_published_release_without_handoff_enforces_cli_source_sha(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         compatibility = self.tmp / "compatibility-route-matrix.json"
         compatibility.write_text(json.dumps([ROW_CE]), encoding="utf-8")
 
@@ -690,16 +718,18 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 pkg_repo=self.pkg_repo,
                 handoff_file=None,
                 compatibility_route_matrix_file=compatibility,
-                engine=_ENGINE,
             )
 
         self.assertIn("source_sha", str(ctx.exception))
         self.assertFalse(self.pkg_repo.exists())
 
-    @_requires_engine
-    def test_published_release_without_handoff_rejects_empty_compatibility_matrix(self) -> None:
+    def test_published_release_without_handoff_rejects_empty_compatibility_matrix(
+        self,
+    ) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         compatibility = self.tmp / "compatibility-route-matrix.json"
         compatibility.write_text("[]\n", encoding="utf-8")
 
@@ -715,13 +745,11 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 pkg_repo=self.pkg_repo,
                 handoff_file=None,
                 compatibility_route_matrix_file=compatibility,
-                engine=_ENGINE,
             )
 
         self.assertIn("route_matrix must be a non-empty JSON array", str(ctx.exception))
         self.assertFalse(self.pkg_repo.exists())
 
-    @_requires_engine
     def test_published_release_without_handoff_rejects_mixed_ports_shas(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
@@ -730,13 +758,15 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             _record(row=ROW_PLUS_03, source_tag="v4.0.0.b1"),
         ]
         records[1]["freebsd_ports_sha"] = "d" * 64
-        records[1]["build_input_digest"] = _ENGINE.pfb_pkg.build_input_digest(records[1])
+        records[1]["build_input_digest"] = pfb_pkg.build_input_digest(records[1])
         digests: dict[str, str] = {}
         for record in records:
             name = _canonical_declared_name(record)
             _path, digest = _wrap_canonical_pkg(assets_dir, record, local_name=name)
             digests[name] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
         compatibility = self.tmp / "compatibility-route-matrix.json"
         compatibility.write_text(json.dumps([ROW_CE, ROW_PLUS_03]), encoding="utf-8")
 
@@ -752,7 +782,6 @@ class IntakeAndHandoffTests(_TempDirTestCase):
                 pkg_repo=self.pkg_repo,
                 handoff_file=None,
                 compatibility_route_matrix_file=compatibility,
-                engine=_ENGINE,
             )
 
         self.assertIn("freebsd_ports_sha", str(ctx.exception))
@@ -765,10 +794,11 @@ class IntakeAndHandoffTests(_TempDirTestCase):
 
 
 class RejectionPropagationTests(_TempDirTestCase):
-    @_requires_engine
     def test_record_source_tag_disagrees_with_release_tag_rejected(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         with self.assertRaises(pc.AssetVerificationError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -778,12 +808,13 @@ class RejectionPropagationTests(_TempDirTestCase):
             )
         self.assertIn("source_tag", str(ctx.exception))
 
-    @_requires_engine
     def test_missing_route_build_row_rejected(self) -> None:
         """An asset set missing a ROUTE build row: the pinned matrix names TWO build
         rows, this run only carries a canonical asset for one of them."""
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         with self.assertRaises(pc.RunVerificationError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -793,11 +824,12 @@ class RejectionPropagationTests(_TempDirTestCase):
             )
         self.assertIn("with no asset", str(ctx.exception))
 
-    @_requires_engine
     def test_extra_asset_matching_no_row_rejected(self) -> None:
         """An asset whose own matrix_row is absent from the pinned ROUTE matrix."""
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         with self.assertRaises(pc.RunVerificationError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -807,10 +839,13 @@ class RejectionPropagationTests(_TempDirTestCase):
             )
         self.assertIn("not a build-role ROUTE row", str(ctx.exception))
 
-    @_requires_engine
-    def test_handoff_ports_identity_disagrees_with_build_record_before_publish(self) -> None:
+    def test_handoff_ports_identity_disagrees_with_build_record_before_publish(
+        self,
+    ) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
             rows=(ROW_CE,),
@@ -829,7 +864,6 @@ class RejectionPropagationTests(_TempDirTestCase):
                 assets_dir=assets_dir,
                 pkg_repo=self.pkg_repo,
                 handoff_file=handoff,
-                engine=_ENGINE,
             )
 
         self.assertIn("freebsd_ports_sha", str(ctx.exception))
@@ -842,7 +876,6 @@ class RejectionPropagationTests(_TempDirTestCase):
 
 
 class TargetResolutionTests(_TempDirTestCase):
-    @_requires_engine
     def test_dependency_matches_no_run_target_rejected(self) -> None:
         """Axis 9 (verify_run) only requires a dependency's ABI to match SOME ROUTE
         row (build or route-only) in the pinned matrix — not necessarily one this
@@ -851,7 +884,9 @@ class TargetResolutionTests(_TempDirTestCase):
         rejected by publish_release's OWN target-fan-in, since there is no
         (channel, varver) directory it could land in."""
         assets_dir = self.new_assets_dir()
-        digests = _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        digests = _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         declared = "py311-orphan-1.0.0-CE-17.0.pkg"
         _path, digest = _wrap_dependency_pkg(
             assets_dir,
@@ -861,7 +896,9 @@ class TargetResolutionTests(_TempDirTestCase):
             local_name=declared,
         )
         digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
@@ -872,7 +909,6 @@ class TargetResolutionTests(_TempDirTestCase):
             )
         self.assertIn("matches no varver targeted", str(ctx.exception))
 
-    @_requires_engine
     def test_duplicate_varver_from_two_route_rows_rejected(self) -> None:
         """Two distinct ROUTE rows (pfsense_version 2.8 vs 2.8.1, both CE) that
         collapse to the SAME varver directory (catalog_name_from_version strips the
@@ -888,7 +924,9 @@ class TargetResolutionTests(_TempDirTestCase):
             declared = _canonical_declared_name(record)
             _path, digest = _wrap_canonical_pkg(assets_dir, record, local_name=declared)
             digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
@@ -899,8 +937,9 @@ class TargetResolutionTests(_TempDirTestCase):
             )
         self.assertIn("same varver", str(ctx.exception))
 
-    @_requires_engine
-    def test_same_dependency_renamed_per_row_with_identical_bytes_publishes(self) -> None:
+    def test_same_dependency_renamed_per_row_with_identical_bytes_publishes(
+        self,
+    ) -> None:
         """The byte-identical twin of DependencyPlaceIfMissingTests's own
         same-major/different-bytes case: ONE artifact attached under two per-row
         declared names (byte-identical) also publishes into every matching varver —
@@ -908,10 +947,15 @@ class TargetResolutionTests(_TempDirTestCase):
         way; this pins the identical-bytes case never regresses alongside it."""
         assets_dir = self.new_assets_dir()
         digests = _populate_assets_dir(
-            assets_dir, rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         for row in (ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN):
-            declared = _dependency_declared_name(name="py311-twin", version="1.0.0", row=row)
+            declared = _dependency_declared_name(
+                name="py311-twin", version="1.0.0", row=row
+            )
             _path, digest = _wrap_dependency_pkg(
                 assets_dir,
                 name="py311-twin",
@@ -920,7 +964,9 @@ class TargetResolutionTests(_TempDirTestCase):
                 local_name=declared,
             )
             digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         report = _run(
             pkg_repo=self.pkg_repo,
@@ -931,11 +977,12 @@ class TargetResolutionTests(_TempDirTestCase):
         self.assertFalse(report.noop)
         for varver in ("plus-26.03", "plus-26.07"):
             self.assertTrue(
-                (self.pkg_repo / "docs/edge" / varver / "py311-twin-1.0.0.pkg").is_file(),
+                (
+                    self.pkg_repo / "docs/edge" / varver / "py311-twin-1.0.0.pkg"
+                ).is_file(),
                 f"dependency missing from {varver}",
             )
 
-    @_requires_engine
     def test_canonical_asset_without_record_rejected(self) -> None:
         """A canonical VerifiedAsset with no record (never produced by verify_asset
         itself, but a convention nothing at the type level enforces — see
@@ -957,12 +1004,11 @@ class TargetResolutionTests(_TempDirTestCase):
             dependency_assets=(),
         )
         with self.assertRaises(pc.RunVerificationError) as ctx:
-            pr._build_targets(_ENGINE, run_result)
+            pr._build_targets(run_result)
         self.assertIn("expected a canonical asset with a record", str(ctx.exception))
 
 
 class DestinationConflictTests(_TempDirTestCase):
-    @_requires_engine
     def test_same_name_version_different_bytes_rejected(self) -> None:
         """Issue #2146's contract: same name/version with different bytes, source,
         or provenance fails closed instead of silently overwriting the published
@@ -988,10 +1034,16 @@ class DestinationConflictTests(_TempDirTestCase):
 
         assets_dir_2 = self.new_assets_dir()
         assets_dir_2.mkdir(parents=True)
-        divergent_record = _record(channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="c" * 40)
+        divergent_record = _record(
+            channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="c" * 40
+        )
         declared = _canonical_declared_name(divergent_record)
-        _path, digest = _wrap_canonical_pkg(assets_dir_2, divergent_record, local_name=declared)
-        (assets_dir_2 / pr._DIGESTS_FILENAME).write_text(json.dumps({declared: digest}), encoding="utf-8")
+        _path, digest = _wrap_canonical_pkg(
+            assets_dir_2, divergent_record, local_name=declared
+        )
+        (assets_dir_2 / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({declared: digest}), encoding="utf-8"
+        )
 
         with self.assertRaises(pr.DestinationConflictError) as ctx:
             _run(
@@ -1013,16 +1065,21 @@ class DestinationConflictTests(_TempDirTestCase):
 
 
 class DependencyPlaceIfMissingTests(_TempDirTestCase):
-    @_requires_engine
-    def test_stale_destination_dependency_bytes_untouched_canonical_published(self) -> None:
+    def test_stale_destination_dependency_bytes_untouched_canonical_published(
+        self,
+    ) -> None:
         """RED CANARY (issue #2468): a destination already holding a byte-different
         same-name dependency .pkg (e.g. left over from an older release) must never
         block this run — the dependency's filename IS its identity; publishers place
         it only when missing and never compare or overwrite it. The canonical
         package still publishes normally alongside the untouched stale dependency."""
         assets_dir = self.new_assets_dir()
-        digests = _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        declared = _dependency_declared_name(name="py311-charset-normalizer", version="3.4.0", row=ROW_CE)
+        digests = _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        declared = _dependency_declared_name(
+            name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
+        )
         _path, digest = _wrap_dependency_pkg(
             assets_dir,
             version="3.4.0",
@@ -1031,7 +1088,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             payload={"filler.bin": b"incoming-build"},
         )
         digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         stale_dir = self.tmp / "stale-dep-seed"
@@ -1055,11 +1114,17 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         )
 
         self.assertFalse(report.noop)
-        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file())
-        self.assertEqual((catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").read_bytes(), stale_bytes)
+        self.assertTrue(
+            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file()
+        )
+        self.assertEqual(
+            (catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").read_bytes(),
+            stale_bytes,
+        )
 
-    @_requires_engine
-    def test_two_same_major_rows_each_own_dep_asset_lands_only_in_own_varver(self) -> None:
+    def test_two_same_major_rows_each_own_dep_asset_lands_only_in_own_varver(
+        self,
+    ) -> None:
         """Two same-major rows (plus-26.03 + plus-26.07, both FreeBSD 16) each carry
         their OWN byte-different dep asset under the identical canonical name
         (py311-twin-1.0.0.pkg). Per-suffix routing (issue #2468) sends each asset to
@@ -1068,11 +1133,19 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         and the run succeeds, each varver holding only its own row's bytes."""
         assets_dir = self.new_assets_dir()
         digests = _populate_assets_dir(
-            assets_dir, rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         twin_bytes: dict[str, bytes] = {}
-        for row, filler in ((ROW_PLUS_03_TWIN, b"built-by-leg-one"), (ROW_PLUS_07_TWIN, b"built-by-leg-two")):
-            declared = _dependency_declared_name(name="py311-twin", version="1.0.0", row=row)
+        for row, filler in (
+            (ROW_PLUS_03_TWIN, b"built-by-leg-one"),
+            (ROW_PLUS_07_TWIN, b"built-by-leg-two"),
+        ):
+            declared = _dependency_declared_name(
+                name="py311-twin", version="1.0.0", row=row
+            )
             path, digest = _wrap_dependency_pkg(
                 assets_dir,
                 name="py311-twin",
@@ -1083,7 +1156,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             )
             digests[declared] = digest
             twin_bytes[str(row["pfsense_version"])] = path.read_bytes()
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         report = _run(
             pkg_repo=self.pkg_repo,
@@ -1094,12 +1169,19 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
 
         self.assertFalse(report.noop)
         for row in (ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN):
-            row_varver = _ENGINE.catalogue_engine.catalog_name_from_version(row["pfsense_version"], row["variant"])
-            dep_path = self.pkg_repo / "docs" / "edge" / row_varver / "py311-twin-1.0.0.pkg"
+            row_varver = catalogue_engine.catalog_name_from_version(
+                row["pfsense_version"], row["variant"]
+            )
+            dep_path = (
+                self.pkg_repo / "docs" / "edge" / row_varver / "py311-twin-1.0.0.pkg"
+            )
             self.assertTrue(dep_path.is_file(), row_varver)
-            self.assertEqual(dep_path.read_bytes(), twin_bytes[str(row["pfsense_version"])], row_varver)
+            self.assertEqual(
+                dep_path.read_bytes(),
+                twin_bytes[str(row["pfsense_version"])],
+                row_varver,
+            )
 
-    @_requires_engine
     def test_dependency_abi_mismatching_its_suffix_row_major_rejected(self) -> None:
         """A dependency asset whose OWN suffix names a valid canonical target row,
         but whose manifest ABI does not match that row's FreeBSD major, is rejected
@@ -1107,8 +1189,12 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         ROW_ROUTE_ONLY_16 lets the ABI clear axis 9 (S1's own "matches SOME ROUTE
         row" check) so this test isolates publish_release's own suffix-row check."""
         assets_dir = self.new_assets_dir()
-        digests = _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        declared = _dependency_declared_name(name="py311-charset-normalizer", version="3.4.0", row=ROW_CE)
+        digests = _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        declared = _dependency_declared_name(
+            name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
+        )
         _path, digest = _wrap_dependency_pkg(
             assets_dir,
             version="3.4.0",
@@ -1116,7 +1202,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             local_name=declared,
         )
         digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
@@ -1161,7 +1249,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             manifest={},
             release_suffix=("CE", "2.8"),
         )
-        target = pr._Target(row=ROW_CE, canonical=canonical, dependencies=[dep_one, dep_two])
+        target = pr._Target(
+            row=ROW_CE, canonical=canonical, dependencies=[dep_one, dep_two]
+        )
 
         with self.assertRaises(pr.DestinationConflictError) as ctx:
             pr._asset_map(target)
@@ -1175,9 +1265,12 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         # tolerated dedupe (the branch this issue removed).
         twin = pc.VerifiedAsset(**{**vars(dep_two), "sha256": dep_one.sha256})
         with self.assertRaises(pr.DestinationConflictError):
-            pr._asset_map(pr._Target(row=ROW_CE, canonical=canonical, dependencies=[dep_one, twin]))
+            pr._asset_map(
+                pr._Target(
+                    row=ROW_CE, canonical=canonical, dependencies=[dep_one, twin]
+                )
+            )
 
-    @_requires_engine
     def test_dependency_without_release_suffix_rejected(self) -> None:
         """_build_targets routes by suffix alone, so a dependency VerifiedAsset that
         carries none has no target to resolve and must be rejected rather than
@@ -1186,22 +1279,24 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         canonical = _canonical_verified_asset(ROW_CE)
         dep = _dependency_verified_asset(abi="FreeBSD:15:*", release_suffix=None)
         with self.assertRaises(pr.PublishReleaseError) as ctx:
-            pr._build_targets(_ENGINE, _run_result(canonical=canonical, dependency=dep))
+            pr._build_targets(_run_result(canonical=canonical, dependency=dep))
         self.assertIn("matches no varver targeted", str(ctx.exception))
 
-    @_requires_engine
     def test_dependency_abi_mismatch_rejected_by_build_targets_itself(self) -> None:
         """The ABI gate inside _build_targets, isolated: the suffix names a real
         canonical target that declares the origin, and only the manifest ABI is
         wrong — so nothing downstream can produce this rejection for us."""
         canonical = _canonical_verified_asset(ROW_CE)
-        dep = _dependency_verified_asset(abi="FreeBSD:16:*", release_suffix=("CE", "2.8"))
+        dep = _dependency_verified_asset(
+            abi="FreeBSD:16:*", release_suffix=("CE", "2.8")
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
-            pr._build_targets(_ENGINE, _run_result(canonical=canonical, dependency=dep))
+            pr._build_targets(_run_result(canonical=canonical, dependency=dep))
         self.assertIn("matches no varver targeted", str(ctx.exception))
 
-    @_requires_engine
-    def test_multi_channel_fanout_dep_differs_at_one_channel_no_identity_violation(self) -> None:
+    def test_multi_channel_fanout_dep_differs_at_one_channel_no_identity_violation(
+        self,
+    ) -> None:
         """issue #2468 coverage row 13: canonical is identical across a multi-channel
         fan-out (verify_multi_destination_identity still enforces THAT), but a
         dependency that already differs at ONE destination channel — because it was
@@ -1216,7 +1311,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             source_tag="v4.0.1.b1",
             include_dependency=False,
         )
-        declared = _dependency_declared_name(name="py311-charset-normalizer", version="3.4.0", row=ROW_CE)
+        declared = _dependency_declared_name(
+            name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
+        )
         _path, digest = _wrap_dependency_pkg(
             assets_dir,
             version="3.4.0",
@@ -1225,7 +1322,9 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             payload={"filler.bin": b"this-runs-build"},
         )
         digests[declared] = digest
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
 
         testing_dir = self.pkg_repo / "docs" / "testing" / "ce-2.8"
         testing_dir.mkdir(parents=True)
@@ -1250,20 +1349,29 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             tag="v4.0.1.b1",
         )
 
-        self.assertEqual(set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")})
+        self.assertEqual(
+            set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
+        )
         testing_pkg = testing_dir / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
         edge_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         edge_pkg = edge_dir / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
-        self.assertEqual(testing_pkg.read_bytes(), edge_pkg.read_bytes())  # canonical still identical
+        self.assertEqual(
+            testing_pkg.read_bytes(), edge_pkg.read_bytes()
+        )  # canonical still identical
 
         testing_dep = testing_dir / "py311-charset-normalizer-3.4.0.pkg"
         edge_dep = edge_dir / "py311-charset-normalizer-3.4.0.pkg"
-        self.assertEqual(testing_dep.read_bytes(), stale_bytes)  # untouched, already present
+        self.assertEqual(
+            testing_dep.read_bytes(), stale_bytes
+        )  # untouched, already present
         self.assertTrue(edge_dep.is_file())
-        self.assertNotEqual(edge_dep.read_bytes(), stale_bytes)  # placed fresh, missing before
+        self.assertNotEqual(
+            edge_dep.read_bytes(), stale_bytes
+        )  # placed fresh, missing before
 
-    @_requires_engine
-    def test_undeclared_same_name_leftover_replaced_by_this_runs_dependency(self) -> None:
+    def test_undeclared_same_name_leftover_replaced_by_this_runs_dependency(
+        self,
+    ) -> None:
         """A destination holding a same-name dependency whose origin the row no longer
         declares (the port moved category, issue #2403) must end ONE run advertising
         the dependency this run actually verified. Place-if-missing skips a name
@@ -1282,13 +1390,21 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
 
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1")
-        report = _run(pkg_repo=self.pkg_repo, assets_dir=assets_dir, rows=(ROW_CE,), tag="v4.0.0.b1")
+        report = _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
 
         self.assertEqual(report.touched, (("edge", "ce-2.8"),))
         published = dest / _CHARSET_PKG
-        self.assertTrue(published.is_file(), "this run's verified dependency is missing from the catalogue")
+        self.assertTrue(
+            published.is_file(),
+            "this run's verified dependency is missing from the catalogue",
+        )
         self.assertEqual(
-            _ENGINE.pfb_pkg.read_compact_manifest(published)["origin"],
+            pfb_pkg.read_compact_manifest(published)["origin"],
             "textproc/py311-charset-normalizer",
         )
         self.assertIn(_CHARSET_NAME, _packagesite_names(dest))
@@ -1300,7 +1416,6 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
 
 
 class BasicPublishFlowTests(_TempDirTestCase):
-    @_requires_engine
     def test_first_publish_single_varver_with_dependency(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1")
@@ -1314,13 +1429,16 @@ class BasicPublishFlowTests(_TempDirTestCase):
         self.assertEqual(report.touched, (("edge", "ce-2.8"),))
         self.assertFalse(report.noop)
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
-        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file())
-        self.assertTrue((catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").is_file())
+        self.assertTrue(
+            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file()
+        )
+        self.assertTrue(
+            (catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").is_file()
+        )
         self.assertTrue((catalogue_dir / "meta.conf").is_file())
         self.assertTrue((catalogue_dir / "data.pkg").is_file())
         self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
 
-    @_requires_engine
     def test_first_publish_three_varvers_dependency_only_in_ce(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(assets_dir, rows=_THREE_ROWS, source_tag="v4.0.0.b1")
@@ -1336,13 +1454,18 @@ class BasicPublishFlowTests(_TempDirTestCase):
             {("edge", "ce-2.8"), ("edge", "plus-26.03"), ("edge", "plus-26.07")},
         )
         docs = self.pkg_repo / "docs" / "edge"
-        self.assertTrue((docs / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file())
-        self.assertFalse((docs / "plus-26.03" / "py311-charset-normalizer-3.4.0.pkg").exists())
-        self.assertFalse((docs / "plus-26.07" / "py311-charset-normalizer-3.4.0.pkg").exists())
+        self.assertTrue(
+            (docs / "ce-2.8" / "py311-charset-normalizer-3.4.0.pkg").is_file()
+        )
+        self.assertFalse(
+            (docs / "plus-26.03" / "py311-charset-normalizer-3.4.0.pkg").exists()
+        )
+        self.assertFalse(
+            (docs / "plus-26.07" / "py311-charset-normalizer-3.4.0.pkg").exists()
+        )
         for varver in ("ce-2.8", "plus-26.03", "plus-26.07"):
             self.assertTrue((docs / varver / "data.pkg").is_file())
 
-    @_requires_engine
     def test_multi_channel_fanout_same_bytes_both_channels(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
@@ -1360,9 +1483,23 @@ class BasicPublishFlowTests(_TempDirTestCase):
             destinations='["testing","edge"]',
             tag="v4.0.1.b1",
         )
-        self.assertEqual(set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")})
-        testing_pkg = self.pkg_repo / "docs" / "testing" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
-        edge_pkg = self.pkg_repo / "docs" / "edge" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+        self.assertEqual(
+            set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
+        )
+        testing_pkg = (
+            self.pkg_repo
+            / "docs"
+            / "testing"
+            / "ce-2.8"
+            / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+        )
+        edge_pkg = (
+            self.pkg_repo
+            / "docs"
+            / "edge"
+            / "ce-2.8"
+            / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+        )
         self.assertTrue(testing_pkg.is_file())
         self.assertTrue(edge_pkg.is_file())
         self.assertEqual(testing_pkg.read_bytes(), edge_pkg.read_bytes())
@@ -1374,7 +1511,6 @@ class BasicPublishFlowTests(_TempDirTestCase):
 
 
 class OutcomeTests(_TempDirTestCase):
-    @_requires_engine
     def test_exact_republish_is_noop(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1")
@@ -1401,7 +1537,6 @@ class OutcomeTests(_TempDirTestCase):
             ["NOOP: every destination already matches this run's verified assets"],
         )
 
-    @_requires_engine
     def test_incomplete_descriptor_regenerated_on_identical_rerun(self) -> None:
         """A rerun with byte-identical assets must still regenerate the catalog
         descriptor if a prior run's write-back fault left it incomplete —
@@ -1409,7 +1544,9 @@ class OutcomeTests(_TempDirTestCase):
         window. `changed=False` from the .pkg comparison alone must not report a
         NOOP over a destination missing packagesite.pkg/data.pkg/meta.conf."""
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         first = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_dir,
@@ -1421,7 +1558,12 @@ class OutcomeTests(_TempDirTestCase):
         (catalogue_dir / "packagesite.pkg").unlink()
 
         second_assets_dir = self.new_assets_dir()
-        _populate_assets_dir(second_assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            second_assets_dir,
+            rows=(ROW_CE,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
         second = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=second_assets_dir,
@@ -1432,12 +1574,15 @@ class OutcomeTests(_TempDirTestCase):
         self.assertFalse(second.noop)
         self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
 
-    @_requires_engine
-    def test_incomplete_descriptor_with_divergent_bytes_still_fails_closed(self) -> None:
+    def test_incomplete_descriptor_with_divergent_bytes_still_fails_closed(
+        self,
+    ) -> None:
         """The B1 fail-closed check runs BEFORE the descriptor-completeness repair:
         a missing packagesite.pkg never waives the different-bytes rejection."""
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
         _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_dir,
@@ -1449,10 +1594,16 @@ class OutcomeTests(_TempDirTestCase):
 
         divergent_assets_dir = self.new_assets_dir()
         divergent_assets_dir.mkdir(parents=True)
-        divergent_record = _record(channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="d" * 40)
+        divergent_record = _record(
+            channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="d" * 40
+        )
         declared = _canonical_declared_name(divergent_record)
-        _path, digest = _wrap_canonical_pkg(divergent_assets_dir, divergent_record, local_name=declared)
-        (divergent_assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps({declared: digest}), encoding="utf-8")
+        _path, digest = _wrap_canonical_pkg(
+            divergent_assets_dir, divergent_record, local_name=declared
+        )
+        (divergent_assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({declared: digest}), encoding="utf-8"
+        )
 
         with self.assertRaises(pr.DestinationConflictError):
             _run(
@@ -1462,7 +1613,6 @@ class OutcomeTests(_TempDirTestCase):
                 tag="v4.0.0.b1",
             )
 
-    @_requires_engine
     def test_new_version_added_alongside_retained_older(self) -> None:
         assets_dir_1 = self.new_assets_dir()
         _populate_assets_dir(
@@ -1494,22 +1644,31 @@ class OutcomeTests(_TempDirTestCase):
 
         self.assertEqual(second.touched, (("edge", "ce-2.8"),))
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
-        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file())
-        self.assertTrue((catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b2.pkg").is_file())
+        self.assertTrue(
+            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file()
+        )
+        self.assertTrue(
+            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b2.pkg").is_file()
+        )
 
-    @_requires_engine
     def test_retention_evicts_oldest_beyond_keep(self) -> None:
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         for seq in range(1, ca_default_keep() + 2):
             tag = f"v4.0.0.b{seq}"
             assets_dir = self.new_assets_dir()
-            _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag=tag, include_dependency=False)
+            _populate_assets_dir(
+                assets_dir, rows=(ROW_CE,), source_tag=tag, include_dependency=False
+            )
             _run(pkg_repo=self.pkg_repo, assets_dir=assets_dir, rows=(ROW_CE,), tag=tag)
 
-        remaining = sorted(p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg"))
+        remaining = sorted(
+            p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg")
+        )
         self.assertEqual(len(remaining), ca_default_keep())
         self.assertNotIn("pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg", remaining)
-        self.assertIn(f"pfSense-pkg-pfBlockerNG-4.0.0.b{ca_default_keep() + 1}.pkg", remaining)
+        self.assertIn(
+            f"pfSense-pkg-pfBlockerNG-4.0.0.b{ca_default_keep() + 1}.pkg", remaining
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1524,7 +1683,7 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         """Drop one already-canonical .pkg into docs/<channel>/<varver>/."""
         dest_dir = self.pkg_repo / "docs" / channel / varver
         dest_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg"
+        name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg"
         scratch = self.tmp / f"seed-{next(self._assets_counter)}"
         scratch.mkdir()
         src, _digest = _wrap_canonical_pkg(scratch, record, local_name=name)
@@ -1532,7 +1691,6 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         dest.write_bytes(src.read_bytes())
         return dest
 
-    @_requires_engine
     def test_edge_heals_testing_version_omitted_from_edge(self) -> None:
         # Red canary: testing/ce-2.8 has 3.2.10, edge/ce-2.8 does not.
         # A new testing publish (destinations testing+edge) must copy it.
@@ -1541,7 +1699,15 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
             "ce-2.8",
             _record(channel="stable", row=ROW_CE, source_tag="v3.2.10"),
         )
-        self.assertFalse((self.pkg_repo / "docs" / "edge" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-3.2.10.pkg").exists())
+        self.assertFalse(
+            (
+                self.pkg_repo
+                / "docs"
+                / "edge"
+                / "ce-2.8"
+                / "pfSense-pkg-pfBlockerNG-3.2.10.pkg"
+            ).exists()
+        )
 
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
@@ -1560,15 +1726,28 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
             tag="v3.2.16.a1",
         )
 
-        self.assertEqual(set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")})
-        edge_pkg = self.pkg_repo / "docs" / "edge" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-3.2.10.pkg"
+        self.assertEqual(
+            set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
+        )
+        edge_pkg = (
+            self.pkg_repo
+            / "docs"
+            / "edge"
+            / "ce-2.8"
+            / "pfSense-pkg-pfBlockerNG-3.2.10.pkg"
+        )
         self.assertTrue(edge_pkg.is_file())
         self.assertEqual(edge_pkg.read_bytes(), seeded.read_bytes())
         self.assertTrue(
-            (self.pkg_repo / "docs" / "edge" / "ce-2.8" / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg").is_file()
+            (
+                self.pkg_repo
+                / "docs"
+                / "edge"
+                / "ce-2.8"
+                / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg"
+            ).is_file()
         )
 
-    @_requires_engine
     def test_nightly_catalogue_not_healed_by_tagged_publish(self) -> None:
         # publish_release rejects nightly dests (kind!=tagged). This case pins
         # that a tagged dest list does not walk an existing nightly tree.
@@ -1602,13 +1781,16 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
 
         self.assertTrue(seeded.is_file())
         self.assertFalse((nightly_dir / "pfSense-pkg-pfBlockerNG-3.2.10.pkg").exists())
-        self.assertFalse((nightly_dir / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg").exists())
+        self.assertFalse(
+            (nightly_dir / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg").exists()
+        )
 
-    @_requires_engine
     def test_tagged_destinations_cannot_include_nightly(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
-        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps({"x.pkg": "0" * 64}), encoding="utf-8")
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(
+            json.dumps({"x.pkg": "0" * 64}), encoding="utf-8"
+        )
         with self.assertRaises(pc.IntakeError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -1634,7 +1816,6 @@ def ca_default_keep() -> int:
 
 
 class IdentityPostConditionTests(_TempDirTestCase):
-    @_requires_engine
     def test_multi_destination_divergence_aborts_publish(self) -> None:
         """Patches regenerate_catalogue to, after doing its real work, overwrite
         ONE of two fanned-out destinations (same canonical_name, same path shape)
@@ -1652,22 +1833,37 @@ class IdentityPostConditionTests(_TempDirTestCase):
         )
         divergent_dir = self.tmp / "divergent"
         divergent_dir.mkdir()
-        divergent_record = _record(channel="testing", row=ROW_CE, source_tag="v4.0.1.b1", source_sha="b" * 40)
-        divergent_path, _digest = _wrap_canonical_pkg(divergent_dir, divergent_record, local_name="divergent.pkg")
+        divergent_record = _record(
+            channel="testing", row=ROW_CE, source_tag="v4.0.1.b1", source_sha="b" * 40
+        )
+        divergent_path, _digest = _wrap_canonical_pkg(
+            divergent_dir, divergent_record, local_name="divergent.pkg"
+        )
         divergent_bytes = divergent_path.read_bytes()
 
         real_regenerate = pr.ca.regenerate_catalogue
 
         def corrupting_regenerate(
-            site_root: str | Path, channel: str, varver: str, *, engine: pc.Engine, sign_key: Path | None = None
+            site_root: str | Path,
+            channel: str,
+            varver: str,
+            *,
+            sign_key: Path | None = None,
         ) -> None:
-            real_regenerate(site_root, channel, varver, engine=engine)
+            real_regenerate(site_root, channel, varver)
             if channel == "edge":
-                target = Path(site_root) / channel / varver / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+                target = (
+                    Path(site_root)
+                    / channel
+                    / varver
+                    / "pfSense-pkg-pfBlockerNG-4.0.1.b1.pkg"
+                )
                 target.write_bytes(divergent_bytes)
 
         with (
-            mock.patch.object(pr.ca, "regenerate_catalogue", side_effect=corrupting_regenerate),
+            mock.patch.object(
+                pr.ca, "regenerate_catalogue", side_effect=corrupting_regenerate
+            ),
             self.assertRaises(pr.ca.CatalogueAssemblyError) as ctx,
         ):
             _run(
@@ -1695,18 +1891,29 @@ class SignKeyThreadingTests(_TempDirTestCase):
         real_regenerate = pr.ca.regenerate_catalogue
 
         def capturing_regenerate(
-            site_root: str | Path, channel: str, varver: str, *, engine: pc.Engine, sign_key: Path | None = None
+            site_root: str | Path,
+            channel: str,
+            varver: str,
+            *,
+            sign_key: Path | None = None,
         ) -> None:
             seen.append(sign_key)
-            real_regenerate(site_root, channel, varver, engine=engine)
+            real_regenerate(site_root, channel, varver)
 
-        return mock.patch.object(pr.ca, "regenerate_catalogue", side_effect=capturing_regenerate), seen
+        return mock.patch.object(
+            pr.ca, "regenerate_catalogue", side_effect=capturing_regenerate
+        ), seen
 
-    @_requires_engine
     def test_main_sign_key_flag_reaches_regenerate_catalogue(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        handoff = _write_handoff(assets_dir / "pfblockerng-release-handoff.json", rows=(ROW_CE,), tag="v4.0.0.b1")
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        handoff = _write_handoff(
+            assets_dir / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
         # A REAL key: publish() derives its public half up front, so a placeholder
         # would abort the run before the threading this test is about.
         key = tbrp._gen_key(self.tmp / "repo.key")
@@ -1733,16 +1940,21 @@ class SignKeyThreadingTests(_TempDirTestCase):
             str(key),
         ]
         patcher, seen = self._capture_sign_key()
-        with patcher, mock.patch.dict(os.environ, {"PFB_SRC": str(_SRC_ROOT)}):
+        with patcher:
             code = pr.main(argv)
         self.assertEqual(code, 0)
         self.assertEqual(seen, [key])
 
-    @_requires_engine
     def test_main_without_sign_key_flag_passes_none(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        handoff = _write_handoff(assets_dir / "pfblockerng-release-handoff.json", rows=(ROW_CE,), tag="v4.0.0.b1")
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        handoff = _write_handoff(
+            assets_dir / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
         argv = [
             "--source-repository",
             _REPO,
@@ -1764,7 +1976,7 @@ class SignKeyThreadingTests(_TempDirTestCase):
             str(handoff),
         ]
         patcher, seen = self._capture_sign_key()
-        with patcher, mock.patch.dict(os.environ, {"PFB_SRC": str(_SRC_ROOT)}):
+        with patcher:
             code = pr.main(argv)
         self.assertEqual(code, 0)
         self.assertEqual(seen, [None])
@@ -1776,11 +1988,16 @@ class SignKeyThreadingTests(_TempDirTestCase):
 
 
 class MainCliTests(_TempDirTestCase):
-    @_requires_engine
     def test_main_success_prints_touched_and_returns_zero(self) -> None:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        handoff = _write_handoff(assets_dir / "pfblockerng-release-handoff.json", rows=(ROW_CE,), tag="v4.0.0.b1")
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        handoff = _write_handoff(
+            assets_dir / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
         argv = [
             "--source-repository",
             _REPO,
@@ -1802,18 +2019,20 @@ class MainCliTests(_TempDirTestCase):
             str(handoff),
         ]
         with (
-            mock.patch.dict(os.environ, {"PFB_SRC": str(_SRC_ROOT)}),
             mock.patch("sys.stdout", new_callable=io.StringIO) as out,
         ):
             code = pr.main(argv)
         self.assertEqual(code, 0)
         self.assertIn("updated edge/ce-2.8", out.getvalue())
 
-    @_requires_engine
     def test_main_failure_prints_error_and_returns_one(self) -> None:
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
-        handoff = _write_handoff(assets_dir / "pfblockerng-release-handoff.json", rows=(ROW_CE,), tag="v4.0.0.b1")
+        handoff = _write_handoff(
+            assets_dir / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
         argv = [
             "--source-repository",
             _REPO,
@@ -1835,7 +2054,6 @@ class MainCliTests(_TempDirTestCase):
             str(handoff),
         ]
         with (
-            mock.patch.dict(os.environ, {"PFB_SRC": str(_SRC_ROOT)}),
             mock.patch("sys.stderr", new_callable=io.StringIO) as err,
         ):
             code = pr.main(argv)
@@ -1846,7 +2064,7 @@ class MainCliTests(_TempDirTestCase):
 def _packagesite_names(catalogue_dir: Path) -> set[str]:
     """Manifest `name` of every member in the dest's packagesite.pkg."""
     catalog = catalogue_dir / "packagesite.pkg"
-    data = _ENGINE.pfb_pkg.zstd_decompress(catalog.read_bytes())
+    data = pfb_pkg.zstd_decompress(catalog.read_bytes())
     with tarfile.open(fileobj=io.BytesIO(data)) as tf:
         member = tf.extractfile("packagesite.yaml")
         assert member is not None
@@ -1871,10 +2089,14 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
             local_name=_CHARSET_PKG,
         )
 
-    @_requires_engine
     def test_stale_plus_extra_evicted_on_new_canonical(self) -> None:
         assets_1 = self.new_assets_dir()
-        _populate_assets_dir(assets_1, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets_1,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
         _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_1,
@@ -1886,7 +2108,12 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         self.assertTrue((dest / _CHARSET_PKG).is_file())
 
         assets_2 = self.new_assets_dir()
-        _populate_assets_dir(assets_2, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b2", include_dependency=False)
+        _populate_assets_dir(
+            assets_2,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b2",
+            include_dependency=False,
+        )
         report = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_2,
@@ -1898,10 +2125,14 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         self.assertTrue((dest / "pfSense-pkg-pfBlockerNG-4.0.0.b2.pkg").is_file())
         self.assertNotIn(_CHARSET_NAME, _packagesite_names(dest))
 
-    @_requires_engine
     def test_stale_plus_extra_evicted_on_exact_republish(self) -> None:
         assets = self.new_assets_dir()
-        _populate_assets_dir(assets, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
         first = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets,
@@ -1913,7 +2144,12 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         self._plant_charset(dest, major="16")
 
         second_assets = self.new_assets_dir()
-        _populate_assets_dir(second_assets, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            second_assets,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
         second = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=second_assets,
@@ -1924,38 +2160,58 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         self.assertFalse((dest / _CHARSET_PKG).exists())
         self.assertNotIn(_CHARSET_NAME, _packagesite_names(dest))
 
-    @_requires_engine
     def test_declared_ce_extra_kept_on_new_canonical(self) -> None:
         assets_1 = self.new_assets_dir()
         _populate_assets_dir(assets_1, rows=(ROW_CE,), source_tag="v4.0.0.b1")
-        _run(pkg_repo=self.pkg_repo, assets_dir=assets_1, rows=(ROW_CE,), tag="v4.0.0.b1")
+        _run(
+            pkg_repo=self.pkg_repo, assets_dir=assets_1, rows=(ROW_CE,), tag="v4.0.0.b1"
+        )
         dest = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         self.assertTrue((dest / _CHARSET_PKG).is_file())
 
         assets_2 = self.new_assets_dir()
-        _populate_assets_dir(assets_2, rows=(ROW_CE,), source_tag="v4.0.0.b2", include_dependency=False)
-        _run(pkg_repo=self.pkg_repo, assets_dir=assets_2, rows=(ROW_CE,), tag="v4.0.0.b2")
+        _populate_assets_dir(
+            assets_2, rows=(ROW_CE,), source_tag="v4.0.0.b2", include_dependency=False
+        )
+        _run(
+            pkg_repo=self.pkg_repo, assets_dir=assets_2, rows=(ROW_CE,), tag="v4.0.0.b2"
+        )
         self.assertTrue((dest / _CHARSET_PKG).is_file())
         self.assertIn(_CHARSET_NAME, _packagesite_names(dest))
 
-    @_requires_engine
     def test_undeclared_ce_extra_evicted_when_row_drops_extra_pkgs(self) -> None:
         assets_1 = self.new_assets_dir()
         _populate_assets_dir(assets_1, rows=(ROW_CE,), source_tag="v4.0.0.b1")
-        _run(pkg_repo=self.pkg_repo, assets_dir=assets_1, rows=(ROW_CE,), tag="v4.0.0.b1")
+        _run(
+            pkg_repo=self.pkg_repo, assets_dir=assets_1, rows=(ROW_CE,), tag="v4.0.0.b1"
+        )
         dest = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         self.assertTrue((dest / _CHARSET_PKG).is_file())
 
         assets_2 = self.new_assets_dir()
-        _populate_assets_dir(assets_2, rows=(ROW_CE_NO_EXTRA,), source_tag="v4.0.0.b2", include_dependency=False)
-        _run(pkg_repo=self.pkg_repo, assets_dir=assets_2, rows=(ROW_CE_NO_EXTRA,), tag="v4.0.0.b2")
+        _populate_assets_dir(
+            assets_2,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b2",
+            include_dependency=False,
+        )
+        _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_2,
+            rows=(ROW_CE_NO_EXTRA,),
+            tag="v4.0.0.b2",
+        )
         self.assertFalse((dest / _CHARSET_PKG).exists())
         self.assertNotIn(_CHARSET_NAME, _packagesite_names(dest))
 
-    @_requires_engine
     def test_untargeted_dest_extra_left_in_place(self) -> None:
         assets = self.new_assets_dir()
-        _populate_assets_dir(assets, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b1", include_dependency=False)
+        _populate_assets_dir(
+            assets,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
         _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets,
@@ -1965,7 +2221,12 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
         other = self.pkg_repo / "docs" / "testing" / "plus-26.03"
         self._plant_charset(other, major="16")
         second_assets = self.new_assets_dir()
-        _populate_assets_dir(second_assets, rows=(ROW_PLUS_03,), source_tag="v4.0.0.b2", include_dependency=False)
+        _populate_assets_dir(
+            second_assets,
+            rows=(ROW_PLUS_03,),
+            source_tag="v4.0.0.b2",
+            include_dependency=False,
+        )
         _run(
             pkg_repo=self.pkg_repo,
             assets_dir=second_assets,
@@ -1978,7 +2239,6 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
 class SameMajorDestScopeTests(_TempDirTestCase):
     """issue #2403: same-major CE extra must not land on Plus extra_pkgs=[]."""
 
-    @_requires_engine
     def test_same_major_dep_not_published_to_row_with_empty_extra_pkgs(self) -> None:
         rows = (ROW_CE, ROW_PLUS_SAME_MAJOR)
         assets = self.new_assets_dir()
@@ -2011,15 +2271,19 @@ class SameMajorDestScopeTests(_TempDirTestCase):
             self.assertIn(_CHARSET_NAME, _packagesite_names(ce_dir))
             self.assertNotIn(_CHARSET_NAME, _packagesite_names(plus_dir))
 
-    @_requires_engine
     def test_undeclared_twin_dep_against_empty_plus_extra_pkgs_rejected(self) -> None:
         """No import-time mutation: Plus extra_pkgs=[] does not accept py311-twin."""
         assets = self.new_assets_dir()
         digests = _populate_assets_dir(
-            assets, rows=(ROW_PLUS_03, ROW_PLUS_07), source_tag="v4.0.0.b1", include_dependency=False
+            assets,
+            rows=(ROW_PLUS_03, ROW_PLUS_07),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         for row in (ROW_PLUS_03, ROW_PLUS_07):
-            declared = _dependency_declared_name(name="py311-twin", version="1.0.0", row=row)
+            declared = _dependency_declared_name(
+                name="py311-twin", version="1.0.0", row=row
+            )
             _path, digest = _wrap_dependency_pkg(
                 assets,
                 name="py311-twin",
@@ -2028,7 +2292,9 @@ class SameMajorDestScopeTests(_TempDirTestCase):
                 local_name=declared,
             )
             digests[declared] = digest
-        (assets / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        (assets / pr._DIGESTS_FILENAME).write_text(
+            json.dumps(digests), encoding="utf-8"
+        )
         with self.assertRaises(pr.PublishReleaseError) as ctx:
             _run(
                 pkg_repo=self.pkg_repo,
@@ -2038,7 +2304,9 @@ class SameMajorDestScopeTests(_TempDirTestCase):
             )
         self.assertIn("matches no varver targeted", str(ctx.exception))
         for varver in ("plus-26.03", "plus-26.07"):
-            self.assertFalse((self.pkg_repo / "docs/edge" / varver / "py311-twin-1.0.0.pkg").exists())
+            self.assertFalse(
+                (self.pkg_repo / "docs/edge" / varver / "py311-twin-1.0.0.pkg").exists()
+            )
 
 
 class ResignUnsignedCatalogueTests(_TempDirTestCase):
@@ -2053,10 +2321,17 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
 
     def _publish(self, key: Path | None = None) -> pr.PublishReport:
         assets_dir = self.new_assets_dir()
-        _populate_assets_dir(assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False)
-        return _run(pkg_repo=self.pkg_repo, assets_dir=assets_dir, rows=(ROW_CE,), tag="v4.0.0.b1", sign_key=key)
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        return _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+            sign_key=key,
+        )
 
-    @_requires_engine
     def test_republish_with_a_key_signs_a_catalogue_that_has_no_signature(self) -> None:
         self.assertEqual(self._publish().touched, (("edge", "ce-2.8"),))
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
@@ -2068,9 +2343,11 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
             sorted(tbrp._sig_members(catalogue_dir / "packagesite.pkg")),
             ["packagesite.yaml.pub", "packagesite.yaml.sig"],
         )
-        self.assertEqual(sorted(tbrp._sig_members(catalogue_dir / "data.pkg")), ["data.pub", "data.sig"])
+        self.assertEqual(
+            sorted(tbrp._sig_members(catalogue_dir / "data.pkg")),
+            ["data.pub", "data.sig"],
+        )
 
-    @_requires_engine
     def test_republish_with_the_same_key_is_a_noop(self) -> None:
         key = tbrp._gen_key(self.tmp / "repo.key")
         self.assertEqual(self._publish(key).touched, (("edge", "ce-2.8"),))
@@ -2079,7 +2356,11 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
     def _publish_two_destinations(self, key: Path) -> pr.PublishReport:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, channel="testing", rows=(ROW_CE,), source_tag="v4.0.1.b1", include_dependency=False
+            assets_dir,
+            channel="testing",
+            rows=(ROW_CE,),
+            source_tag="v4.0.1.b1",
+            include_dependency=False,
         )
         return _run(
             pkg_repo=self.pkg_repo,
@@ -2091,16 +2372,18 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
             sign_key=key,
         )
 
-    @_requires_engine
     def test_the_signing_keys_public_half_is_derived_once_per_publish(self) -> None:
         """`signing_public_der` runs two openssl subprocesses and raises on a key pkg
         cannot verify, so deriving it inside the per-destination loop pays that per
         destination and makes a bad key fail at whichever destination sort order reaches
         first — after earlier destinations have already been healed and rewritten."""
         key = tbrp._gen_key(self.tmp / "repo.key")
-        self.assertEqual(set(self._publish_two_destinations(key).touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")})
+        self.assertEqual(
+            set(self._publish_two_destinations(key).touched),
+            {("testing", "ce-2.8"), ("edge", "ce-2.8")},
+        )
 
-        brp = _ENGINE.catalogue_engine
+        brp = catalogue_engine
         calls: list[Path] = []
         real_der = brp.signing_public_der
 
@@ -2115,14 +2398,20 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
             self.assertEqual(self._publish_two_destinations(key).touched, ())
         self.assertEqual(calls, [key])
 
-    @_requires_engine
     def test_republish_after_key_rotation_resigns_with_the_new_key(self) -> None:
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         self._publish(tbrp._gen_key(self.tmp / "old.key"))
-        first_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")["packagesite.yaml.pub"]
+        first_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")[
+            "packagesite.yaml.pub"
+        ]
 
-        self.assertEqual(self._publish(tbrp._gen_key(self.tmp / "new.key")).touched, (("edge", "ce-2.8"),))
-        second_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")["packagesite.yaml.pub"]
+        self.assertEqual(
+            self._publish(tbrp._gen_key(self.tmp / "new.key")).touched,
+            (("edge", "ce-2.8"),),
+        )
+        second_pub = tbrp._sig_members(catalogue_dir / "packagesite.pkg")[
+            "packagesite.yaml.pub"
+        ]
         self.assertNotEqual(first_pub, second_pub)
 
 

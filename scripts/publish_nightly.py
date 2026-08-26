@@ -25,7 +25,9 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import catalogue_assembly as ca
+import catalogue_engine
 import nightly_contract as nc
+import pfb_pkg
 import publish_catalogues as pc
 import publish_release as pr
 
@@ -80,9 +82,7 @@ class _ValidatedHandoff:
     builds: list[dict[str, object]]
 
 
-def _validate_handoff(
-    handoff: object, *, engine: pc.Engine, source_run_id: str
-) -> _ValidatedHandoff:
+def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHandoff:
     if not isinstance(handoff, dict):
         raise PublishNightlyError("handoff must be a JSON object")
     keys = set(handoff)
@@ -135,7 +135,6 @@ def _validate_handoff(
         raise PublishNightlyError("handoff build_matrix must be a non-empty list")
     if not isinstance(route_matrix, list) or not route_matrix:
         raise PublishNightlyError("handoff route_matrix must be a non-empty list")
-    pfb_pkg = engine.pfb_pkg
     try:
         build_matrix = [
             pfb_pkg.validate_build_matrix_row(row) for row in build_matrix_raw
@@ -272,7 +271,6 @@ class _Leg:
 
 
 def _verify_builds(
-    engine: pc.Engine,
     intake: pc.Intake,
     validated: _ValidatedHandoff,
     results_dir: Path,
@@ -298,7 +296,6 @@ def _verify_builds(
                 f"missing canonical asset for FreeBSD {major}: {canonical_path}"
             )
         canonical_asset = pc.verify_asset(
-            engine,
             canonical_path,
             artifact["name"],
             intake=intake,
@@ -340,7 +337,6 @@ def _verify_builds(
                 )
             dependencies.append(
                 pc.verify_asset(
-                    engine,
                     dep_path,
                     dep["name"],
                     intake=intake,
@@ -367,12 +363,11 @@ def _verify_builds(
 
 
 def _route_targets(
-    engine: pc.Engine,
     route_matrix_rows: Sequence[Mapping[str, object]],
     legs: Sequence[_Leg],
 ) -> dict[str, pr._Target]:
-    brp = engine.catalogue_engine
-    build_rows, _route_only_rows = pc._normalize_route_matrix(engine, route_matrix_rows)
+    brp = catalogue_engine
+    build_rows, _route_only_rows = pc._normalize_route_matrix(route_matrix_rows)
 
     targets: dict[str, pr._Target] = {}
     used_majors: set[str] = set()
@@ -425,14 +420,11 @@ def _route_targets(
 # --------------------------------------------------------------------------- #
 
 
-def _reject_stale(
-    site_root: Path, varver: str, engine: pc.Engine, incoming_version: str
-) -> None:
+def _reject_stale(site_root: Path, varver: str, incoming_version: str) -> None:
     catalogue_dir = site_root / _CHANNEL / varver
     if not catalogue_dir.is_dir():
         return  # first publish for this varver — nothing to be stale against
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     incoming_name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{incoming_version}.pkg"
     present = False
     newest_key = None
@@ -469,7 +461,6 @@ def _reject_stale(
 
 
 def publish(
-    engine: pc.Engine,
     pkg_repo: str | Path,
     targets: Mapping[str, pr._Target],
     incoming_version: str,
@@ -479,9 +470,9 @@ def publish(
     site_root = Path(pkg_repo) / pr._SITE_SUBDIR
 
     for varver in sorted(targets):
-        _reject_stale(site_root, varver, engine, incoming_version)
+        _reject_stale(site_root, varver, incoming_version)
 
-    expected_public = pr._expected_public_member(engine, sign_key)
+    expected_public = pr._expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
     source_index: dict[Path, list[tuple[str, str]]] = {}
     for varver in sorted(targets):
@@ -491,15 +482,15 @@ def publish(
         # Evict before dropping, for the reason publish_release.publish spells out:
         # place-if-missing would otherwise skip the incoming dependency and then
         # unlink the undeclared leftover holding its name.
-        changed = pr._evict_undeclared_deps(dest_dir, engine=engine, row=target.row)
+        changed = pr._evict_undeclared_deps(dest_dir, row=target.row)
         if pr._drop_assets(dest_dir, asset_map):
             changed = True
-        if not changed and not pr._catalogue_descriptor_complete(dest_dir, engine):
+        if not changed and not pr._catalogue_descriptor_complete(dest_dir):
             changed = True
         if (
             not changed
             and expected_public is not None
-            and not pr._catalogue_carries_key(dest_dir, engine, expected_public)
+            and not pr._catalogue_carries_key(dest_dir, expected_public)
         ):
             changed = True
         # issue #2468: only the canonical asset feeds the fan-out identity index —
@@ -508,14 +499,12 @@ def publish(
             (_CHANNEL, varver)
         )
         if changed:
-            ca.prune_retained(site_root, _CHANNEL, varver, engine=engine)
-            ca.regenerate_catalogue(
-                site_root, _CHANNEL, varver, engine=engine, sign_key=sign_key
-            )
+            ca.prune_retained(site_root, _CHANNEL, varver)
+            ca.regenerate_catalogue(site_root, _CHANNEL, varver, sign_key=sign_key)
             touched.append((_CHANNEL, varver))
 
     if source_index:
-        ca.verify_multi_destination_identity(engine, site_root, source_index)
+        ca.verify_multi_destination_identity(site_root, source_index)
 
     return pr.PublishReport(touched=tuple(touched))
 
@@ -531,10 +520,8 @@ def run(
     results_dir: str | Path,
     pkg_repo: str | Path,
     source_run_id: str,
-    engine: pc.Engine | None = None,
     sign_key: Path | None = None,
 ) -> pr.PublishReport:
-    engine = engine if engine is not None else pc.load_engine()
 
     handoff_path = Path(handoff_path)
     try:
@@ -548,23 +535,17 @@ def run(
     except json.JSONDecodeError as exc:
         raise PublishNightlyError(f"{handoff_path} is not valid JSON: {exc}") from exc
 
-    validated = _validate_handoff(
-        handoff_raw, engine=engine, source_run_id=source_run_id
-    )
+    validated = _validate_handoff(handoff_raw, source_run_id=source_run_id)
     intake = pc.parse_intake(
         pc.EXPECTED_SOURCE_REPOSITORY, "", "", '["nightly"]', source_run_id
     )
 
     with tempfile.TemporaryDirectory(prefix="publish-nightly-verify-") as work_dir:
-        legs = _verify_builds(
-            engine, intake, validated, Path(results_dir), Path(work_dir)
-        )
-        targets = _route_targets(engine, validated.route_matrix, legs)
+        legs = _verify_builds(intake, validated, Path(results_dir), Path(work_dir))
+        targets = _route_targets(validated.route_matrix, legs)
         # publish() reads VerifiedAsset.work_path, which lives under work_dir — must
         # run to completion BEFORE this context manager tears work_dir down.
-        return publish(
-            engine, pkg_repo, targets, validated.pkg_version, sign_key=sign_key
-        )
+        return publish(pkg_repo, targets, validated.pkg_version, sign_key=sign_key)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -605,15 +586,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    engine = pc.load_engine()
-
     try:
         report = run(
             handoff_path=args.handoff,
             results_dir=args.results_dir,
             pkg_repo=args.pkg_repo,
             source_run_id=args.source_run_id,
-            engine=engine,
             sign_key=Path(args.sign_key) if args.sign_key else None,
         )
     except (
@@ -622,8 +600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ca.CatalogueAssemblyError,
         pr.PublishReleaseError,
         nc.ContractError,
-        engine.pfb_pkg.PkgError,
-        engine.catalogue_engine.BuildRepoError,
+        pfb_pkg.PkgError,
+        catalogue_engine.BuildRepoError,
     ) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1

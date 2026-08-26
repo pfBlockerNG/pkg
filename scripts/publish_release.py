@@ -48,7 +48,7 @@ reads that from a ``digests.json`` sidecar inside ``--assets-dir`` — ``{"<file
 "<sha256 hex>", ...}`` — that the caller (the release workflow) is expected to populate
 from the GitHub Releases API's own per-asset ``digest`` field before downloading.
 
-The engine is loaded from this pkg checkout via `publish_catalogues.load_engine()`.
+All verification code is imported from this pkg checkout.
 """
 
 from __future__ import annotations
@@ -65,18 +65,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-# scripts/ is not a package (no __init__.py); catalogue_assembly.py itself imports
-# publish_catalogues with a bare `from publish_catalogues import Engine`, so every
-# caller — including this one — needs scripts/ directly on sys.path. Running this file
-# directly already gets that for free (Python prepends the script's own directory);
-# this insert only matters when another module imports publish_release without having
-# done that itself first.
+# Direct execution already places scripts/ on sys.path; the explicit insert also
+# supports focused tests importing this module.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import catalogue_assembly as ca
+import catalogue_engine
 import catalogue_sig_only as cso
+import pfb_pkg
 import publish_catalogues as pc
 import tagged_release_handoff as trh
 
@@ -147,7 +145,6 @@ def _discover_assets(
 
 
 def _verify_all_assets(
-    engine: pc.Engine,
     intake: pc.Intake,
     assets_dir: Path,
     digests: Mapping[str, str],
@@ -155,7 +152,6 @@ def _verify_all_assets(
 ) -> list[pc.VerifiedAsset]:
     return [
         pc.verify_asset(
-            engine,
             path,
             name,
             intake=intake,
@@ -209,8 +205,8 @@ def _row_declares_dep(row: Mapping[str, object], dep: pc.VerifiedAsset) -> bool:
     return _row_declares_origin(row, dep.manifest.get("origin"))
 
 
-def _build_targets(engine: pc.Engine, run_result: pc.RunResult) -> dict[str, _Target]:
-    brp = engine.catalogue_engine
+def _build_targets(run_result: pc.RunResult) -> dict[str, _Target]:
+    brp = catalogue_engine
     targets: dict[str, _Target] = {}
     for asset in run_result.canonical_assets:
         row = pc._canonical_record(asset)["matrix_row"]
@@ -274,9 +270,7 @@ def _files_identical(a: Path, b: Path) -> bool:
     return a.read_bytes() == b.read_bytes()
 
 
-def _evict_undeclared_deps(
-    dest_dir: Path, *, engine: pc.Engine, row: Mapping[str, object]
-) -> bool:
+def _evict_undeclared_deps(dest_dir: Path, *, row: Mapping[str, object]) -> bool:
     """Unlink non-catalog, non-canonical .pkg files this dest row does not declare.
 
     issue #2402: prune_retained never touches dependency .pkg files, so a stray
@@ -286,8 +280,7 @@ def _evict_undeclared_deps(
     """
     if not dest_dir.is_dir():
         return False
-    brp = engine.catalogue_engine
-    pfb_pkg = engine.pfb_pkg
+    brp = catalogue_engine
     evicted = False
     for path in sorted(dest_dir.glob("*.pkg")):
         if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
@@ -325,14 +318,14 @@ def _drop_assets(dest_dir: Path, asset_map: Mapping[str, pc.VerifiedAsset]) -> b
     return changed
 
 
-def _catalogue_descriptor_complete(dest_dir: Path, engine: pc.Engine) -> bool:
-    brp = engine.catalogue_engine
+def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
+    brp = catalogue_engine
     return all(
         (dest_dir / name).is_file() for name in (*brp._CATALOG_PKG_FILES, "meta.conf")
     )
 
 
-def _expected_public_member(engine: pc.Engine, sign_key: Path | None) -> bytes | None:
+def _expected_public_member(sign_key: Path | None) -> bytes | None:
     """The `.pub` member a catalogue signed with ``sign_key`` carries, or None when
     there is no key.
 
@@ -344,13 +337,11 @@ def _expected_public_member(engine: pc.Engine, sign_key: Path | None) -> bytes |
     """
     if sign_key is None:
         return None
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     return brp.PKGSIGN_ECDSA_HEAD + brp.signing_public_der(sign_key)
 
 
-def _catalogue_carries_key(
-    dest_dir: Path, engine: pc.Engine, expected_public: bytes
-) -> bool:
+def _catalogue_carries_key(dest_dir: Path, expected_public: bytes) -> bool:
     """True when every catalogue archive under ``dest_dir`` already embeds ``expected_public``.
 
     Nothing else in the `changed` decision can see a signature, and a destination
@@ -360,7 +351,7 @@ def _catalogue_carries_key(
     with a signature-requiring conf (issue #2675). An unreadable archive answers
     False: republishing it is the recoverable direction.
     """
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     return all(
         cso.public_key_members(dest_dir / name) == [expected_public]
         for name in brp._CATALOG_PKG_FILES
@@ -384,7 +375,6 @@ class PublishReport:
 
 
 def publish(
-    engine: pc.Engine,
     run_result: pc.RunResult,
     pkg_repo: str | Path,
     *,
@@ -392,9 +382,9 @@ def publish(
 ) -> PublishReport:
     intake = run_result.intake
     site_root = Path(pkg_repo) / _SITE_SUBDIR
-    targets = _build_targets(engine, run_result)
+    targets = _build_targets(run_result)
 
-    expected_public = _expected_public_member(engine, sign_key)
+    expected_public = _expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
     source_index: dict[Path, list[tuple[str, str]]] = {}
     for varver in sorted(targets):
@@ -406,22 +396,20 @@ def publish(
             # missing, so an undeclared leftover under that same name has to go
             # before the drop, or the run would skip the incoming dependency and
             # then unlink the leftover — publishing a catalogue without the extra.
-            changed = _evict_undeclared_deps(dest_dir, engine=engine, row=target.row)
+            changed = _evict_undeclared_deps(dest_dir, row=target.row)
             if _drop_assets(dest_dir, asset_map):
                 changed = True
-            if not changed and not _catalogue_descriptor_complete(dest_dir, engine):
+            if not changed and not _catalogue_descriptor_complete(dest_dir):
                 changed = True
             if (
                 not changed
                 and expected_public is not None
-                and not _catalogue_carries_key(dest_dir, engine, expected_public)
+                and not _catalogue_carries_key(dest_dir, expected_public)
             ):
                 changed = True
             # Heal historical holes before prune: copy every canonical version
             # still on a slower tagged channel (never nightly) onto this dest.
-            copied = ca.backfill_from_slower_channels(
-                site_root, channel, varver, engine=engine
-            )
+            copied = ca.backfill_from_slower_channels(site_root, channel, varver)
             if copied:
                 changed = True
                 for src, destinations in copied.items():
@@ -436,14 +424,12 @@ def publish(
                 (channel, varver)
             )
             if changed:
-                ca.prune_retained(site_root, channel, varver, engine=engine)
-                ca.regenerate_catalogue(
-                    site_root, channel, varver, engine=engine, sign_key=sign_key
-                )
+                ca.prune_retained(site_root, channel, varver)
+                ca.regenerate_catalogue(site_root, channel, varver, sign_key=sign_key)
                 touched.append((channel, varver))
 
     if source_index:
-        ca.verify_multi_destination_identity(engine, site_root, source_index)
+        ca.verify_multi_destination_identity(site_root, source_index)
 
     return PublishReport(touched=tuple(touched))
 
@@ -481,7 +467,6 @@ def run(
     pkg_repo: str | Path,
     handoff_file: str | Path | None,
     compatibility_route_matrix_file: str | Path | None = None,
-    engine: pc.Engine | None = None,
     sign_key: Path | None = None,
 ) -> PublishReport:
     intake = pc.parse_intake(
@@ -506,16 +491,15 @@ def run(
             list[Mapping[str, object]],
             _load_compatibility_route_matrix(compatibility_route_matrix_file),
         )
-    engine = engine if engine is not None else pc.load_engine()
 
     assets_dir = Path(assets_dir)
     digests = _load_digests(assets_dir)
 
     with tempfile.TemporaryDirectory(prefix="publish-release-verify-") as work_dir:
         verified_assets = _verify_all_assets(
-            engine, intake, assets_dir, digests, Path(work_dir)
+            intake, assets_dir, digests, Path(work_dir)
         )
-        run_result = pc.verify_run(engine, intake, verified_assets, route_matrix_rows)
+        run_result = pc.verify_run(intake, verified_assets, route_matrix_rows)
         records = [
             cast(Mapping[str, object], asset.record)
             for asset in run_result.canonical_assets
@@ -536,7 +520,7 @@ def run(
         except trh.BuildRecordIdentityError as exc:
             if exc.field == "source_sha":
                 site_root = Path(pkg_repo) / _SITE_SUBDIR
-                for varver, target in _build_targets(engine, run_result).items():
+                for varver, target in _build_targets(run_result).items():
                     for channel in intake.destinations:
                         existing = (
                             site_root
@@ -550,7 +534,7 @@ def run(
                             ) from exc
                 raise DestinationConflictError(str(exc)) from exc
             raise
-        return publish(engine, run_result, pkg_repo, sign_key=sign_key)
+        return publish(run_result, pkg_repo, sign_key=sign_key)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -599,8 +583,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    engine = pc.load_engine()
-
     try:
         report = run(
             source_repository=args.source_repository,
@@ -617,7 +599,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.compatibility_route_matrix
                 else None
             ),
-            engine=engine,
             sign_key=Path(args.sign_key) if args.sign_key else None,
         )
     except (
@@ -625,8 +606,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         trh.HandoffError,
         pc.PublishError,
         ca.CatalogueAssemblyError,
-        engine.pfb_pkg.PkgError,
-        engine.catalogue_engine.BuildRepoError,
+        pfb_pkg.PkgError,
+        catalogue_engine.BuildRepoError,
     ) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
