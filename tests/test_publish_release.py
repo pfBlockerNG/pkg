@@ -199,6 +199,56 @@ def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> No
     )
 
 
+def _read_catalogue_member(path: Path, member_name: str) -> bytes:
+    raw = pfb_pkg.zstd_decompress(path.read_bytes())
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+        member = tf.extractfile(member_name)
+        if member is None:
+            raise AssertionError(f"{path.name}: missing {member_name}")
+        return member.read()
+
+
+def _write_catalogue_archive(
+    path: Path,
+    member_name: str,
+    payload: bytes,
+    *,
+    extra_members: Sequence[tuple[str, bytes]] = (),
+) -> None:
+    _write_tar_pkg(
+        path,
+        [
+            (name, data, 0o644, 0)
+            for name, data in ((member_name, payload), *extra_members)
+        ],
+    )
+
+
+def _packagesite_rows(catalogue_dir: Path) -> list[dict[str, object]]:
+    payload = _read_catalogue_member(
+        catalogue_dir / "packagesite.pkg", "packagesite.yaml"
+    )
+    return [json.loads(line) for line in payload.splitlines()]
+
+
+def _write_packagesite_rows(
+    catalogue_dir: Path,
+    rows: Sequence[dict[str, object]],
+    *,
+    member_name: str = "packagesite.yaml",
+    extra_members: Sequence[tuple[str, bytes]] = (),
+) -> None:
+    payload = b"".join(
+        json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n" for row in rows
+    )
+    _write_catalogue_archive(
+        catalogue_dir / "packagesite.pkg",
+        member_name,
+        payload,
+        extra_members=extra_members,
+    )
+
+
 def _wrap_canonical_pkg(
     directory: Path, record: dict, *, local_name: str
 ) -> tuple[Path, str]:
@@ -1537,42 +1587,225 @@ class OutcomeTests(_TempDirTestCase):
             ["NOOP: every destination already matches this run's verified assets"],
         )
 
-    def test_incomplete_descriptor_regenerated_on_identical_rerun(self) -> None:
-        """A rerun with byte-identical assets must still regenerate the catalog
-        descriptor if a prior run's write-back fault left it incomplete —
-        catalogue_assembly.regenerate_catalogue's own docstring names this fault
-        window. `changed=False` from the .pkg comparison alone must not report a
-        NOOP over a destination missing packagesite.pkg/data.pkg/meta.conf."""
+    def test_same_bytes_repair_stale_packagesite(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
             assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
         )
-        first = _run(
+        _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_dir,
             rows=(ROW_CE,),
             tag="v4.0.0.b1",
         )
-        self.assertTrue(first.touched)
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
-        (catalogue_dir / "packagesite.pkg").unlink()
+        stale = _packagesite_rows(catalogue_dir)
+        stale[0]["version"] = "3.3.0"
+        stale[0]["path"] = "pfSense-pkg-pfBlockerNG-3.3.0.pkg"
+        stale[0]["repopath"] = "pfSense-pkg-pfBlockerNG-3.3.0.pkg"
+        _write_packagesite_rows(catalogue_dir, stale)
 
-        second_assets_dir = self.new_assets_dir()
+        retry_assets = self.new_assets_dir()
         _populate_assets_dir(
-            second_assets_dir,
+            retry_assets,
             rows=(ROW_CE,),
             source_tag="v4.0.0.b1",
             include_dependency=False,
         )
-        second = _run(
+        report = _run(
             pkg_repo=self.pkg_repo,
-            assets_dir=second_assets_dir,
+            assets_dir=retry_assets,
             rows=(ROW_CE,),
             tag="v4.0.0.b1",
         )
-        self.assertEqual(second.touched, (("edge", "ce-2.8"),))
-        self.assertFalse(second.noop)
-        self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
+
+        self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+        self.assertEqual(
+            {
+                (row["name"], row["version"], row["repopath"])
+                for row in _packagesite_rows(catalogue_dir)
+            },
+            {
+                (
+                    "pfSense-pkg-pfBlockerNG",
+                    "4.0.0.b1",
+                    "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg",
+                )
+            },
+        )
+
+    def test_descriptor_validation_rejects_hostile_or_mismatched_content(
+        self,
+    ) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
+        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        pristine = {path.name: path.read_bytes() for path in catalogue_dir.iterdir()}
+        valid_rows = _packagesite_rows(catalogue_dir)
+
+        def restore() -> None:
+            for path in catalogue_dir.iterdir():
+                if path.name not in pristine:
+                    path.unlink()
+            for name, data in pristine.items():
+                (catalogue_dir / name).write_bytes(data)
+
+        for name in ("meta", "meta.conf"):
+            with self.subTest(case=f"invalid {name}"):
+                restore()
+                (catalogue_dir / name).write_text("invalid", encoding="utf-8")
+                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+        archive_cases = (
+            ("truncated archive", None, b"truncated", ()),
+            ("invalid UTF-8", "packagesite.yaml", b"\xff\n", ()),
+            ("hostile member path", "../packagesite.yaml", b"{}\n", ()),
+            (
+                "unexpected archive member",
+                "packagesite.yaml",
+                b"{}\n",
+                (("unexpected", b"x"),),
+            ),
+            (
+                "duplicate archive member",
+                "packagesite.yaml",
+                b"{}\n",
+                (("packagesite.yaml", b"{}\n"),),
+            ),
+        )
+        for label, member_name, payload, extra_members in archive_cases:
+            with self.subTest(case=label):
+                restore()
+                if member_name is None:
+                    (catalogue_dir / "packagesite.pkg").write_bytes(payload)
+                else:
+                    _write_catalogue_archive(
+                        catalogue_dir / "packagesite.pkg",
+                        member_name,
+                        payload,
+                        extra_members=extra_members,
+                    )
+                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+        row = valid_rows[0]
+        row_cases = (
+            ("missing payload", ()),
+            ("duplicate row", (row, row)),
+            (
+                "conflicting duplicate identity",
+                (row, {**row, "path": "other.pkg", "repopath": "other.pkg"}),
+            ),
+            (
+                "missing name",
+                ({key: value for key, value in row.items() if key != "name"},),
+            ),
+            (
+                "missing version",
+                ({key: value for key, value in row.items() if key != "version"},),
+            ),
+            (
+                "missing repopath",
+                ({key: value for key, value in row.items() if key != "repopath"},),
+            ),
+            ("non-string identity", ({**row, "version": 400},)),
+            ("wrong name", ({**row, "name": "other"},)),
+            ("wrong version", ({**row, "version": "3.3.0"},)),
+            (
+                "hostile package path",
+                ({**row, "path": "../payload.pkg", "repopath": "../payload.pkg"},),
+            ),
+            (
+                "unexpected payload",
+                ({**row, "path": "other.pkg", "repopath": "other.pkg"},),
+            ),
+        )
+        for label, rows in row_cases:
+            with self.subTest(case=label):
+                restore()
+                _write_packagesite_rows(catalogue_dir, rows)
+                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+        with self.subTest(case="unexpected on-disk payload"):
+            restore()
+            (catalogue_dir / "unexpected.pkg").write_bytes(
+                next(
+                    data
+                    for name, data in pristine.items()
+                    if name.endswith(".pkg")
+                    and name not in catalogue_engine._CATALOG_PKG_FILES
+                )
+            )
+            self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+        with self.subTest(case="malformed on-disk payload"):
+            restore()
+            (catalogue_dir / "malformed.pkg").write_bytes(b"not a package")
+            self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+        data_cases = (
+            ("invalid data archive", None, b"truncated"),
+            ("invalid data UTF-8", "data", b"\xff"),
+            ("invalid data JSON", "data", b"{"),
+            ("wrong data member", "../data", b"{}"),
+            (
+                "mismatched data packages",
+                "data",
+                json.dumps(
+                    {"groups": [], "expired_packages": [], "packages": []},
+                    separators=(",", ":"),
+                ).encode(),
+            ),
+        )
+        for label, member_name, payload in data_cases:
+            with self.subTest(case=label):
+                restore()
+                if member_name is None:
+                    (catalogue_dir / "data.pkg").write_bytes(payload)
+                else:
+                    _write_catalogue_archive(
+                        catalogue_dir / "data.pkg", member_name, payload
+                    )
+                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+
+    def test_incomplete_descriptor_regenerated_on_identical_rerun(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
+        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+
+        for descriptor in ("meta", "meta.conf", "data.pkg", "packagesite.pkg"):
+            with self.subTest(descriptor=descriptor):
+                (catalogue_dir / descriptor).unlink()
+                retry_assets = self.new_assets_dir()
+                _populate_assets_dir(
+                    retry_assets,
+                    rows=(ROW_CE,),
+                    source_tag="v4.0.0.b1",
+                    include_dependency=False,
+                )
+                report = _run(
+                    pkg_repo=self.pkg_repo,
+                    assets_dir=retry_assets,
+                    rows=(ROW_CE,),
+                    tag="v4.0.0.b1",
+                )
+                self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+                self.assertTrue((catalogue_dir / descriptor).is_file())
 
     def test_incomplete_descriptor_with_divergent_bytes_still_fails_closed(
         self,

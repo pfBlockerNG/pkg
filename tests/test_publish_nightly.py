@@ -510,6 +510,44 @@ class NoopTests(_TempDirTestCase):
         )
         self.assertEqual((catalogue_dir / canonical_name).read_bytes(), before_bytes)
 
+    def test_same_bytes_repair_malformed_packagesite(self) -> None:
+        handoff, results_dir, snapshot = self.base_handoff()
+        first = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        self.assertTrue(first.touched)
+        catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
+        _write_tar_pkg(
+            catalogue_dir / "packagesite.pkg",
+            [("packagesite.yaml", b"\xff\n", 0o644, 0)],
+        )
+
+        second = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+        self.assertEqual(second.touched, (("nightly", "ce-2.8"),))
+        self.assertFalse(second.noop)
+        canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+        payload = pfb_pkg.zstd_decompress(
+            (catalogue_dir / "packagesite.pkg").read_bytes()
+        )
+        with tarfile.open(fileobj=io.BytesIO(payload)) as tf:
+            member = tf.extractfile("packagesite.yaml")
+            self.assertIsNotNone(member)
+            rows = [json.loads(line) for line in member.read().splitlines()]
+        self.assertEqual(
+            {(row["name"], row["version"], row["repopath"]) for row in rows},
+            {
+                (
+                    "pfSense-pkg-pfBlockerNG",
+                    snapshot.pkg_version,
+                    canonical_name,
+                ),
+                (
+                    "py311-charset-normalizer",
+                    "3.4.0",
+                    "py311-charset-normalizer-3.4.0.pkg",
+                ),
+            },
+        )
+
 
 # --------------------------------------------------------------------------- #
 # T3 — same version, different bytes already at a destination: fail closed.
