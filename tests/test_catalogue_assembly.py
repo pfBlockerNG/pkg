@@ -4,14 +4,14 @@ files already sitting under ``site_root/channel/varver``, plus a
 per-(channel, varver) retention prune and the multi-destination byte/checksum/
 provenance identity post-condition. No intake parsing, no ledger, no git, no
 network, no scratch tree, no backup/rollback — this pins the collapsed module
-against the pfBlockerNG source-repo engine loaded from PFB_SRC (see
+against the pfBlockerNG pkg-local engine loaded from PFB_SRC (see
 tests/_srcrepo.py). Fixture .pkg archives are minimal, pure-Python zstd-tar
 files carrying only +COMPACT_MANIFEST (mirrors
 tests/test_publish_catalogues.py's _wrap_dependency_pkg style, simplified
 further) — the pool/dependency packages regenerate_catalogue/prune_retained
 handle never need the full canonical-package validation path (that only fires
 for a manifest carrying a pfb_build_record annotation, which these fixtures
-omit; see build-repo-portable.py's _validate_annotated_project_pkg /
+omit; see catalogue_engine.py's _validate_annotated_project_pkg /
 _canonical_build_record).
 
 Coverage dropped from the retired Plan-based suite, and why (issue #2146 R1
@@ -68,15 +68,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import catalogue_assembly as ca
+import catalogue_fixtures as tbrp
 import publish_catalogues as pc
-import test_build_repo_portable as tbrp
-from _srcrepo import SourceRepoError, resolve_src_root
+from _srcrepo import EngineRootError, resolve_src_root
 
 try:
     _SRC_ROOT = resolve_src_root()
     _ENGINE = pc.load_engine(_SRC_ROOT)
     _ENGINE_SKIP_REASON = ""
-except SourceRepoError as exc:  # pragma: no cover - environment gap, not a behaviour regression
+except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
     _SRC_ROOT = None
     _ENGINE = None
     _ENGINE_SKIP_REASON = str(exc)
@@ -244,7 +244,7 @@ def _pkg_names(catalogue_dir: Path) -> list[str]:
     if not catalogue_dir.is_dir():
         return []
     return sorted(
-        p.name for p in catalogue_dir.glob("*.pkg") if p.name not in _ENGINE.build_repo_portable._CATALOG_PKG_FILES
+        p.name for p in catalogue_dir.glob("*.pkg") if p.name not in _ENGINE.catalogue_engine._CATALOG_PKG_FILES
     )
 
 
@@ -445,7 +445,7 @@ class PoolContentHostileTests(_TempDirTestCase):
         catalogue_dir = out / "stable" / "ce-2.8"
         pkg = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:15:amd64")
         _drop(catalogue_dir, pkg)
-        with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
+        with self.assertRaises(_ENGINE.catalogue_engine.BuildRepoError):
             ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
@@ -455,7 +455,7 @@ class PoolContentHostileTests(_TempDirTestCase):
         pkg_a = _canonical_pkg(self.tmp, version="4.0.0", abi="FreeBSD:15:*")
         pkg_b = _dep_pkg(self.tmp, name="py311-foo", version="1.0", abi="FreeBSD:16:*")
         _drop(catalogue_dir, pkg_a, pkg_b)
-        with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
+        with self.assertRaises(_ENGINE.catalogue_engine.BuildRepoError):
             ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
     @_requires_engine
@@ -475,7 +475,7 @@ class PoolContentHostileTests(_TempDirTestCase):
             local_name="b.pkg",
         )
         _drop(catalogue_dir, pkg_a, pkg_b)
-        with self.assertRaises(_ENGINE.build_repo_portable.BuildRepoError):
+        with self.assertRaises(_ENGINE.catalogue_engine.BuildRepoError):
             ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
 
@@ -537,7 +537,7 @@ class BasicRegenerateTests(_TempDirTestCase):
 
 # --------------------------------------------------------------------------- #
 # Catalogue signing (issue #2675 step 1): sign_key threads straight through to
-# build_repo — the wire format itself is test_build_repo_portable.py's own
+# build_repo — the wire format itself is test_catalogue_engine.py's own
 # concern; these tests only pin that regenerate_catalogue actually reaches it
 # and that omitting sign_key stays byte-identical to today.
 # --------------------------------------------------------------------------- #
@@ -1284,7 +1284,7 @@ class FanOutIdentityTests(_TempDirTestCase):
         self.assertTrue(all(d == datas[0] for d in datas))
         self.assertTrue(all(s == shas[0] for s in shas))
         records = [
-            _ENGINE.build_repo_portable._canonical_build_record(p, _ENGINE.pfb_pkg.read_compact_manifest(p))
+            _ENGINE.catalogue_engine._canonical_build_record(p, _ENGINE.pfb_pkg.read_compact_manifest(p))
             for p in paths
         ]
         self.assertTrue(all(r == records[0] for r in records))
@@ -1309,6 +1309,21 @@ class FanOutIdentityTests(_TempDirTestCase):
         index = {source.resolve(): [("stable", "ce-2.8"), ("testing", "ce-2.8")]}
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
             ca.verify_multi_destination_identity(_ENGINE, out, index)
+        self.assertIn("multi-destination identity violation", str(ctx.exception))
+
+    @_requires_engine
+    def test_all_destinations_matching_the_same_wrong_package_are_rejected(self) -> None:
+        source = _canonical_pkg(self.tmp, version="4.0.0")
+        wrong = _canonical_pkg(self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL")
+        out = self.tmp / "out"
+        canonical_name = "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
+        destinations = [("stable", "ce-2.8"), ("testing", "ce-2.8")]
+        for channel, varver in destinations:
+            dest = out / channel / varver
+            dest.mkdir(parents=True)
+            shutil.copy2(wrong, dest / canonical_name)
+        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
+            ca.verify_multi_destination_identity(_ENGINE, out, {source.resolve(): destinations})
         self.assertIn("multi-destination identity violation", str(ctx.exception))
 
     @_requires_engine
@@ -1346,7 +1361,7 @@ class RecordIdentityTests(_TempDirTestCase):
         shutil.copy2(source, dest_b)
         self.assertEqual(dest_a.read_bytes(), dest_b.read_bytes())  # bytes/sha256 agree
 
-        real_fn = _ENGINE.build_repo_portable._canonical_build_record
+        real_fn = _ENGINE.catalogue_engine._canonical_build_record
 
         def _fake(path: Path, manifest: Mapping[str, object]) -> dict[str, object] | None:
             real = real_fn(path, manifest)
@@ -1357,7 +1372,7 @@ class RecordIdentityTests(_TempDirTestCase):
         index = {source.resolve(): [("stable", "ce-2.8"), ("testing", "ce-2.8")]}
         with (
             mock.patch.object(
-                _ENGINE.build_repo_portable,
+                _ENGINE.catalogue_engine,
                 "_canonical_build_record",
                 side_effect=_fake,
             ),

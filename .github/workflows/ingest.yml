@@ -102,7 +102,7 @@ jobs:
           esac
 
       - name: Download exact immutable Release input
-        if: startsWith(inputs.operation, 'tagged-') && inputs.operation != 'tagged-discard'
+        if: inputs.operation == 'tagged-stage'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
@@ -193,9 +193,11 @@ jobs:
             echo "::error::source_run_id does not match OCI handoff"; exit 1; }
           mkdir -p "${RUNNER_TEMP}/nightly/results"
           tar -xzf "${RUNNER_TEMP}/nightly/results.tar.gz" -C "${RUNNER_TEMP}/nightly/results"
-          printf 'HANDOFF_FILE=%s\n' "${RUNNER_TEMP}/nightly/nightly-handoff.json" >> "$GITHUB_ENV"
-          printf 'RESULTS_DIR=%s\n' "${RUNNER_TEMP}/nightly/results" >> "$GITHUB_ENV"
-          printf 'ROUTE_MATRIX=%s\n' "$(jq -c '.route_matrix' "${RUNNER_TEMP}/nightly/nightly-handoff.json")" >> "$GITHUB_ENV"
+          {
+            printf 'HANDOFF_FILE=%s\n' "${RUNNER_TEMP}/nightly/nightly-handoff.json"
+            printf 'RESULTS_DIR=%s\n' "${RUNNER_TEMP}/nightly/results"
+            printf 'ROUTE_MATRIX=%s\n' "$(jq -c '.route_matrix' "${RUNNER_TEMP}/nightly/nightly-handoff.json")"
+          } >> "$GITHUB_ENV"
 
       - name: Materialize catalogue signing key
         if: inputs.operation == 'tagged-stage' || inputs.operation == 'nightly'
@@ -217,6 +219,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           DESTINATIONS: ${{ inputs.destinations }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          NIGHTLY_ARTIFACT_REF: ${{ inputs.artifact_ref }}
           STAGING_PREFIX: ${{ inputs.staging_prefix }}
           BASE_URL: https://pkg.pfblockerng.com
         run: |
@@ -232,6 +235,10 @@ jobs:
               python3 scripts/publish_release.py --help | grep -F -- '--compatibility-route-matrix' >/dev/null
               ;;
             tagged-promote)
+              ROUTE_FILE="$GITHUB_WORKSPACE/docs/${STAGING_PREFIX}/.route-matrix.json"
+              [ -f "$ROUTE_FILE" ] || { echo "::error::staged ROUTE matrix is missing"; exit 1; }
+              ROUTE_MATRIX="$(cat "$ROUTE_FILE")"
+              export ROUTE_MATRIX
               export PUBLISH_KIND=tagged PUBLISH_STAGE=promote PUBLISH_RENDER_SITE=1
               ;;
             tagged-discard)
@@ -252,6 +259,11 @@ jobs:
           PREFIX=ghcr.io/pfblockerng/pfblockerng-nightly@sha256:
           case "$ARTIFACT_REF" in "${PREFIX}"*) ;; *) echo "::error::cleanup requires an exact digest reference"; exit 1 ;; esac
           DIGEST=${ARTIFACT_REF#"$PREFIX"}
+          python3 scripts/verify_nightly_publication.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --source-run-id "${{ inputs.source_run_id }}" \
+            --nightly-version "${{ inputs.nightly_version }}" \
+            --artifact-ref "$ARTIFACT_REF"
           case "$DIGEST" in ''|*[!0-9a-f]*) echo "::error::cleanup digest is malformed"; exit 1 ;; esac
           [ "${#DIGEST}" -eq 64 ] || { echo "::error::cleanup digest must have 64 hex characters"; exit 1; }
           oras manifest delete "$ARTIFACT_REF"

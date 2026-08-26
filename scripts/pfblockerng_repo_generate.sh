@@ -30,7 +30,7 @@
 # Detection (KISS): edition = "/etc/product_label contains 'Plus'" -> plus, else
 # ce; version = major.minor of /etc/version, with any dash suffix (e.g.
 # "-BETA"/"-RC") stripped FIRST. This MIRRORS catalog_name_from_version() in
-# scripts/build-repo-portable.py exactly, including that strip: a live box's
+# scripts/catalogue_engine.py exactly, including that strip: a live box's
 # /etc/version can carry a pre-release suffix the matrix's version never does
 # (issue #1786), and the producers strip it identically so a pre-release box and
 # the publisher agree on one catalog dir (issue #1965). Arch-less since issue #1806 (NO_ARCH) — the catalog
@@ -38,7 +38,7 @@
 # used to read `pkg config abi` only to derive that leaf).
 #
 # The emitted conf body is BYTE-IDENTICAL to `build-repo.sh --print-conf` and
-# `build-repo-portable.py --print-conf` (pinned by tests/test_repo_conf_generators.py).
+# `catalogue_engine.py --print-conf` (pinned by tests/test_repo_conf_generators.py).
 #
 # POSIX sh only; quote all expansions.
 
@@ -97,7 +97,7 @@ CONF_PRIORITY=100
 # resolved — the caller then leaves the existing conf untouched rather than
 # writing a malformed URL.
 _detect_catalog() {
-    # Edition: lowercase prefix matching build-repo-portable.py (ce | plus).
+    # Edition: lowercase prefix matching catalogue_engine.py (ce | plus).
     if grep -q 'Plus' "${PFB_PRODUCT_LABEL}" 2>/dev/null; then
         _dc_edition='plus'
     else

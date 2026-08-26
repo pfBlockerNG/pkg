@@ -48,9 +48,7 @@ reads that from a ``digests.json`` sidecar inside ``--assets-dir`` — ``{"<file
 "<sha256 hex>", ...}`` — that the caller (the release workflow) is expected to populate
 from the GitHub Releases API's own per-asset ``digest`` field before downloading.
 
-stdlib-only, Python 3.11. The engine is loaded via ``publish_catalogues.load_engine()``
-— explicit ``src_root`` or the ``PFB_SRC`` environment variable (the calling workflow
-sets ``PFB_SRC`` to the source-repo checkout it already has).
+The engine is loaded from this pkg checkout via `publish_catalogues.load_engine()`.
 """
 
 from __future__ import annotations
@@ -90,9 +88,7 @@ _PY_FLAVOR_ORIGIN = re.compile(r"^(py)(?:\d+)?-")
 
 class PublishReleaseError(Exception):
     """A digest-sidecar, target-resolution, or CLI-level failure this module itself
-    detected. Engine errors (``pc.PublishError`` / ``ca.CatalogueAssemblyError`` /
-    the dynamically-loaded ``pfb_pkg.PkgError`` / ``build_repo_portable.BuildRepoError``)
-    propagate UNWRAPPED — this module never re-derives a check those already make."""
+    detected. Local engine and catalogue errors propagate without rewrapping."""
 
 
 class DestinationConflictError(PublishReleaseError):
@@ -115,24 +111,38 @@ def _load_digests(assets_dir: Path) -> dict[str, str]:
     except json.JSONDecodeError as exc:
         raise PublishReleaseError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict) or not parsed:
-        raise PublishReleaseError(f"{path} must be a non-empty JSON object of {{filename: sha256-hex}}")
+        raise PublishReleaseError(
+            f"{path} must be a non-empty JSON object of {{filename: sha256-hex}}"
+        )
     for name, value in parsed.items():
-        if not isinstance(name, str) or not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
-            raise PublishReleaseError(f"{path}: entry {name!r} must map to 64 lowercase hex characters")
+        if (
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or not _SHA256_RE.fullmatch(value)
+        ):
+            raise PublishReleaseError(
+                f"{path}: entry {name!r} must map to 64 lowercase hex characters"
+            )
     return parsed
 
 
-def _discover_assets(assets_dir: Path, digests: Mapping[str, str]) -> tuple[tuple[str, Path], ...]:
+def _discover_assets(
+    assets_dir: Path, digests: Mapping[str, str]
+) -> tuple[tuple[str, Path], ...]:
     found = sorted(p for p in assets_dir.glob("*.pkg") if p.is_file())
     found_names = {p.name for p in found}
     if not found_names:
         raise PublishReleaseError(f"no .pkg assets found under {assets_dir}")
     missing_digest = sorted(found_names - set(digests))
     if missing_digest:
-        raise PublishReleaseError(f"asset(s) with no {_DIGESTS_FILENAME} entry: {missing_digest}")
+        raise PublishReleaseError(
+            f"asset(s) with no {_DIGESTS_FILENAME} entry: {missing_digest}"
+        )
     missing_file = sorted(set(digests) - found_names)
     if missing_file:
-        raise PublishReleaseError(f"{_DIGESTS_FILENAME} entries with no matching asset file: {missing_file}")
+        raise PublishReleaseError(
+            f"{_DIGESTS_FILENAME} entries with no matching asset file: {missing_file}"
+        )
     return tuple((p.name, p) for p in found)
 
 
@@ -200,7 +210,7 @@ def _row_declares_dep(row: Mapping[str, object], dep: pc.VerifiedAsset) -> bool:
 
 
 def _build_targets(engine: pc.Engine, run_result: pc.RunResult) -> dict[str, _Target]:
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     targets: dict[str, _Target] = {}
     for asset in run_result.canonical_assets:
         row = pc._canonical_record(asset)["matrix_row"]
@@ -228,7 +238,9 @@ def _build_targets(engine: pc.Engine, run_result: pc.RunResult) -> dict[str, _Ta
         target = targets.get(varver)
         if target is None:
             raise reject
-        if not brp._pkg_matches_abi(dep.manifest, f"FreeBSD:{target.row['freebsd_major']}:*"):
+        if not brp._pkg_matches_abi(
+            dep.manifest, f"FreeBSD:{target.row['freebsd_major']}:*"
+        ):
             raise reject
         if not _row_declares_dep(target.row, dep):
             raise reject
@@ -238,7 +250,9 @@ def _build_targets(engine: pc.Engine, run_result: pc.RunResult) -> dict[str, _Ta
 
 
 def _asset_map(target: _Target) -> dict[str, pc.VerifiedAsset]:
-    mapping: dict[str, pc.VerifiedAsset] = {target.canonical.canonical_name: target.canonical}
+    mapping: dict[str, pc.VerifiedAsset] = {
+        target.canonical.canonical_name: target.canonical
+    }
     for dep in target.dependencies:
         existing = mapping.get(dep.canonical_name)
         if existing is not None:
@@ -260,7 +274,9 @@ def _files_identical(a: Path, b: Path) -> bool:
     return a.read_bytes() == b.read_bytes()
 
 
-def _evict_undeclared_deps(dest_dir: Path, *, engine: pc.Engine, row: Mapping[str, object]) -> bool:
+def _evict_undeclared_deps(
+    dest_dir: Path, *, engine: pc.Engine, row: Mapping[str, object]
+) -> bool:
     """Unlink non-catalog, non-canonical .pkg files this dest row does not declare.
 
     issue #2402: prune_retained never touches dependency .pkg files, so a stray
@@ -270,7 +286,7 @@ def _evict_undeclared_deps(dest_dir: Path, *, engine: pc.Engine, row: Mapping[st
     """
     if not dest_dir.is_dir():
         return False
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     pfb_pkg = engine.pfb_pkg
     evicted = False
     for path in sorted(dest_dir.glob("*.pkg")):
@@ -310,8 +326,10 @@ def _drop_assets(dest_dir: Path, asset_map: Mapping[str, pc.VerifiedAsset]) -> b
 
 
 def _catalogue_descriptor_complete(dest_dir: Path, engine: pc.Engine) -> bool:
-    brp = engine.build_repo_portable
-    return all((dest_dir / name).is_file() for name in (*brp._CATALOG_PKG_FILES, "meta.conf"))
+    brp = engine.catalogue_engine
+    return all(
+        (dest_dir / name).is_file() for name in (*brp._CATALOG_PKG_FILES, "meta.conf")
+    )
 
 
 def _expected_public_member(engine: pc.Engine, sign_key: Path | None) -> bytes | None:
@@ -326,11 +344,13 @@ def _expected_public_member(engine: pc.Engine, sign_key: Path | None) -> bytes |
     """
     if sign_key is None:
         return None
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     return brp.PKGSIGN_ECDSA_HEAD + brp.signing_public_der(sign_key)
 
 
-def _catalogue_carries_key(dest_dir: Path, engine: pc.Engine, expected_public: bytes) -> bool:
+def _catalogue_carries_key(
+    dest_dir: Path, engine: pc.Engine, expected_public: bytes
+) -> bool:
     """True when every catalogue archive under ``dest_dir`` already embeds ``expected_public``.
 
     Nothing else in the `changed` decision can see a signature, and a destination
@@ -340,8 +360,11 @@ def _catalogue_carries_key(dest_dir: Path, engine: pc.Engine, expected_public: b
     with a signature-requiring conf (issue #2675). An unreadable archive answers
     False: republishing it is the recoverable direction.
     """
-    brp = engine.build_repo_portable
-    return all(cso.public_key_members(dest_dir / name) == [expected_public] for name in brp._CATALOG_PKG_FILES)
+    brp = engine.catalogue_engine
+    return all(
+        cso.public_key_members(dest_dir / name) == [expected_public]
+        for name in brp._CATALOG_PKG_FILES
+    )
 
 
 @dataclass(frozen=True)
@@ -354,7 +377,9 @@ class PublishReport:
 
     def describe(self) -> list[str]:
         if not self.touched:
-            return ["NOOP: every destination already matches this run's verified assets"]
+            return [
+                "NOOP: every destination already matches this run's verified assets"
+            ]
         return [f"updated {channel}/{varver}" for channel, varver in self.touched]
 
 
@@ -394,7 +419,9 @@ def publish(
                 changed = True
             # Heal historical holes before prune: copy every canonical version
             # still on a slower tagged channel (never nightly) onto this dest.
-            copied = ca.backfill_from_slower_channels(site_root, channel, varver, engine=engine)
+            copied = ca.backfill_from_slower_channels(
+                site_root, channel, varver, engine=engine
+            )
             if copied:
                 changed = True
                 for src, destinations in copied.items():
@@ -405,10 +432,14 @@ def publish(
             # issue #2468: only the canonical asset feeds the fan-out identity index —
             # a place-if-missing dependency skipped at one destination but placed
             # fresh at another would otherwise falsely trip verify_multi_destination_identity.
-            source_index.setdefault(target.canonical.work_path.resolve(), []).append((channel, varver))
+            source_index.setdefault(target.canonical.work_path.resolve(), []).append(
+                (channel, varver)
+            )
             if changed:
                 ca.prune_retained(site_root, channel, varver, engine=engine)
-                ca.regenerate_catalogue(site_root, channel, varver, engine=engine, sign_key=sign_key)
+                ca.regenerate_catalogue(
+                    site_root, channel, varver, engine=engine, sign_key=sign_key
+                )
                 touched.append((channel, varver))
 
     if source_index:
@@ -417,16 +448,24 @@ def publish(
     return PublishReport(touched=tuple(touched))
 
 
-def _load_compatibility_route_matrix(path: str | Path | None) -> list[dict[str, object]]:
+def _load_compatibility_route_matrix(
+    path: str | Path | None,
+) -> list[dict[str, object]]:
     if path is None:
-        raise trh.HandoffError("Release has no handoff and no pkg compatibility route matrix was provided")
+        raise trh.HandoffError(
+            "Release has no handoff and no pkg compatibility route matrix was provided"
+        )
     path = Path(path)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise trh.HandoffError(f"cannot read pkg compatibility route matrix {path}: {exc}") from exc
+        raise trh.HandoffError(
+            f"cannot read pkg compatibility route matrix {path}: {exc}"
+        ) from exc
     except json.JSONDecodeError as exc:
-        raise trh.HandoffError(f"pkg compatibility route matrix is not valid JSON: {exc}") from exc
+        raise trh.HandoffError(
+            f"pkg compatibility route matrix is not valid JSON: {exc}"
+        ) from exc
     return trh._route_matrix(raw)
 
 
@@ -445,7 +484,9 @@ def run(
     engine: pc.Engine | None = None,
     sign_key: Path | None = None,
 ) -> PublishReport:
-    intake = pc.parse_intake(source_repository, release_id, release_tag, destinations, source_run_id)
+    intake = pc.parse_intake(
+        source_repository, release_id, release_tag, destinations, source_run_id
+    )
     if intake.kind != "tagged":
         raise PublishReleaseError(
             f"publish_release.py only handles tagged intake; got kind={intake.kind!r} — "
@@ -471,9 +512,14 @@ def run(
     digests = _load_digests(assets_dir)
 
     with tempfile.TemporaryDirectory(prefix="publish-release-verify-") as work_dir:
-        verified_assets = _verify_all_assets(engine, intake, assets_dir, digests, Path(work_dir))
+        verified_assets = _verify_all_assets(
+            engine, intake, assets_dir, digests, Path(work_dir)
+        )
         run_result = pc.verify_run(engine, intake, verified_assets, route_matrix_rows)
-        records = [cast(Mapping[str, object], asset.record) for asset in run_result.canonical_assets]
+        records = [
+            cast(Mapping[str, object], asset.record)
+            for asset in run_result.canonical_assets
+        ]
         try:
             if handoff is not None:
                 trh.validate_build_records(handoff, records)
@@ -482,14 +528,26 @@ def run(
                 for index, record in enumerate(records):
                     if record.get("source_sha") != expected_source_sha:
                         raise trh.BuildRecordIdentityError(index, "source_sha")
+                ports_shas = {record.get("freebsd_ports_sha") for record in records}
+                if len(ports_shas) != 1:
+                    raise PublishReleaseError(
+                        "compatibility Release canonical records disagree on freebsd_ports_sha"
+                    )
         except trh.BuildRecordIdentityError as exc:
             if exc.field == "source_sha":
                 site_root = Path(pkg_repo) / _SITE_SUBDIR
                 for varver, target in _build_targets(engine, run_result).items():
                     for channel in intake.destinations:
-                        existing = site_root / channel / varver / target.canonical.canonical_name
+                        existing = (
+                            site_root
+                            / channel
+                            / varver
+                            / target.canonical.canonical_name
+                        )
                         if existing.is_file():
-                            raise DestinationConflictError(f"{existing}: {exc}") from exc
+                            raise DestinationConflictError(
+                                f"{existing}: {exc}"
+                            ) from exc
                 raise DestinationConflictError(str(exc)) from exc
             raise
         return publish(engine, run_result, pkg_repo, sign_key=sign_key)
@@ -518,7 +576,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         required=True,
         help="the checked-out pfBlockerNG/pkg working tree (site is <pkg-repo>/docs)",
     )
-    parser.add_argument("--handoff", default="", help="build-time tagged release handoff JSON")
+    parser.add_argument(
+        "--handoff", default="", help="build-time tagged release handoff JSON"
+    )
     parser.add_argument(
         "--compatibility-route-matrix",
         default="",
@@ -557,7 +617,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             pkg_repo=args.pkg_repo,
             handoff_file=Path(args.handoff) if args.handoff else None,
             compatibility_route_matrix_file=(
-                Path(args.compatibility_route_matrix) if args.compatibility_route_matrix else None
+                Path(args.compatibility_route_matrix)
+                if args.compatibility_route_matrix
+                else None
             ),
             engine=engine,
             sign_key=Path(args.sign_key) if args.sign_key else None,
@@ -568,7 +630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         pc.PublishError,
         ca.CatalogueAssemblyError,
         engine.pfb_pkg.PkgError,
-        engine.build_repo_portable.BuildRepoError,
+        engine.catalogue_engine.BuildRepoError,
     ) as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1

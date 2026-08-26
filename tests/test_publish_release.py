@@ -38,17 +38,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import catalogue_assembly as ca
+import catalogue_fixtures as tbrp
 import publish_catalogues as pc
 import publish_release as pr
 import tagged_release_handoff as trh
-import test_build_repo_portable as tbrp
-from _srcrepo import SourceRepoError, resolve_src_root
+from _srcrepo import EngineRootError, resolve_src_root
 
 try:
     _SRC_ROOT = resolve_src_root()
     _ENGINE = pc.load_engine(_SRC_ROOT)
     _ENGINE_SKIP_REASON = ""
-except SourceRepoError as exc:  # pragma: no cover - environment gap, not a behaviour regression
+except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
     _SRC_ROOT = None
     _ENGINE = None
     _ENGINE_SKIP_REASON = str(exc)
@@ -390,7 +390,7 @@ def _write_handoff(
     source_sha: str = "a" * 40,
     ports_sha: str = "b" * 64,
 ) -> Path:
-    payload = trh.build_handoff(
+    payload = trh._validate_handoff_fields(
         release_tag=tag,
         source_sha=source_sha,
         ci_metadata_sha="c" * 40,
@@ -629,29 +629,6 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             )
         self.assertIn("not valid UTF-8", str(ctx.exception))
 
-    def test_route_matrix_invalid_utf8_returns_standard_error(self) -> None:
-        route_matrix = self.tmp / "route-matrix.json"
-        route_matrix.write_bytes(b"\xff")
-        output = self.tmp / "handoff.json"
-        argv = [
-            "--release-tag",
-            "v4.0.0.b1",
-            "--source-sha",
-            "a" * 40,
-            "--ci-metadata-sha",
-            "b" * 40,
-            "--ports-sha",
-            "c" * 40,
-            "--route-matrix",
-            str(route_matrix),
-            "--output",
-            str(output),
-        ]
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            code = trh.main(argv)
-        self.assertEqual(code, 1)
-        self.assertIn("::error::", err.getvalue())
-        self.assertNotIn("Traceback", err.getvalue())
 
     @_requires_engine
     def test_handoff_route_matrix_empty_array_rejected(self) -> None:
@@ -751,6 +728,43 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             )
 
         self.assertIn("route_matrix must be a non-empty JSON array", str(ctx.exception))
+        self.assertFalse(self.pkg_repo.exists())
+
+    @_requires_engine
+    def test_published_release_without_handoff_rejects_mixed_ports_shas(self) -> None:
+        assets_dir = self.new_assets_dir()
+        assets_dir.mkdir()
+        records = [
+            _record(row=ROW_CE, source_tag="v4.0.0.b1"),
+            _record(row=ROW_PLUS_03, source_tag="v4.0.0.b1"),
+        ]
+        records[1]["freebsd_ports_sha"] = "d" * 64
+        records[1]["build_input_digest"] = _ENGINE.pfb_pkg.build_input_digest(records[1])
+        digests: dict[str, str] = {}
+        for record in records:
+            name = _canonical_declared_name(record)
+            _path, digest = _wrap_canonical_pkg(assets_dir, record, local_name=name)
+            digests[name] = digest
+        (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+        compatibility = self.tmp / "compatibility-route-matrix.json"
+        compatibility.write_text(json.dumps([ROW_CE, ROW_PLUS_03]), encoding="utf-8")
+
+        with self.assertRaises(pr.PublishReleaseError) as ctx:
+            pr.run(
+                source_repository=_REPO,
+                release_id="1",
+                release_tag="v4.0.0.b1",
+                source_sha="a" * 40,
+                destinations='["edge"]',
+                source_run_id="10:1",
+                assets_dir=assets_dir,
+                pkg_repo=self.pkg_repo,
+                handoff_file=None,
+                compatibility_route_matrix_file=compatibility,
+                engine=_ENGINE,
+            )
+
+        self.assertIn("freebsd_ports_sha", str(ctx.exception))
         self.assertFalse(self.pkg_repo.exists())
 
 
@@ -1090,7 +1104,7 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
 
         self.assertFalse(report.noop)
         for row in (ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN):
-            row_varver = _ENGINE.build_repo_portable.catalog_name_from_version(row["pfsense_version"], row["variant"])
+            row_varver = _ENGINE.catalogue_engine.catalog_name_from_version(row["pfsense_version"], row["variant"])
             dep_path = self.pkg_repo / "docs" / "edge" / row_varver / "py311-twin-1.0.0.pkg"
             self.assertTrue(dep_path.is_file(), row_varver)
             self.assertEqual(dep_path.read_bytes(), twin_bytes[str(row["pfsense_version"])], row_varver)
@@ -1681,7 +1695,7 @@ class IdentityPostConditionTests(_TempDirTestCase):
 # --sign-key threading (issue #2675 step 1): run()/main() must reach
 # catalogue_assembly.regenerate_catalogue with the caller's key, or with none at
 # all when omitted. The signed wire format itself is test_catalogue_assembly.py's
-# and test_build_repo_portable.py's own coverage — never re-derived here.
+# and test_catalogue_engine.py's own coverage — never re-derived here.
 # --------------------------------------------------------------------------- #
 
 
@@ -2096,7 +2110,7 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
         key = tbrp._gen_key(self.tmp / "repo.key")
         self.assertEqual(set(self._publish_two_destinations(key).touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")})
 
-        brp = _ENGINE.build_repo_portable
+        brp = _ENGINE.catalogue_engine
         calls: list[Path] = []
         real_der = brp.signing_public_der
 

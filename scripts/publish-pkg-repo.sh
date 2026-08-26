@@ -57,10 +57,8 @@
 # publish-then-gate flow untouched.
 #
 # Required environment — every mode:
-#   PFB_SRC              pfBlockerNG source-repo checkout (this repo; also exported
-#                        for the publisher's own engine loading)
-#   PKG_REPO              pfBlockerNG/pkg checkout, already cloned with a credentialed
-#                        remote (this script only fetches/checks out/pushes `main`)
+#   PFB_SRC               current pkg checkout containing the local publisher/site code
+#   PKG_REPO              same pkg checkout with a credentialed origin remote
 #   SOURCE_RUN_ID          identifies this run to the publisher (tagged:
 #                        publish_release.py intake; nightly: must equal the
 #                        handoff's own run_id — see publish_nightly.py --help).
@@ -103,11 +101,8 @@
 #                        before handoffs existed; satisfies the HANDOFF_FILE requirement
 #
 # Required environment — PUBLISH_KIND=tagged, PUBLISH_STAGE=promote only:
-#   RELEASE_TAG, DESTINATIONS  the promote commit message's own trailers
-#                        Never ASSETS_DIR/HANDOFF_FILE — promote never runs
-#                        publish_release.py or any renderer, and the workflow's
-#                        promote-pkg-repo job does not export ASSETS_DIR (issue
-#                        #2389).
+#   RELEASE_TAG, DESTINATIONS  commit trailers
+#   ROUTE_MATRIX          exact matrix stored by the corresponding stage
 #
 # Required environment — PUBLISH_KIND=tagged, PUBLISH_STAGE=discard only:
 #   (none beyond the unconditional PFB_SRC/PKG_REPO/SOURCE_RUN_ID above) —
@@ -115,8 +110,9 @@
 #   the publisher.
 #
 # Required environment — PUBLISH_KIND=nightly only:
-#   HANDOFF_FILE            path to the verified nightly_provenance.build_handoff JSON
-#   RESULTS_DIR             directory of downloaded nightly-result-<major>/ legs
+#   HANDOFF_FILE          exact Nightly handoff JSON
+#   RESULTS_DIR           downloaded nightly-result-<major>/ legs
+#   NIGHTLY_ARTIFACT_REF  exact digest reference recorded in the commit receipt
 #
 # Required environment — PUBLISH_STAGE=promote|discard only:
 #   STAGING_PREFIX          "staging/<segment>", as emitted by a prior "stage"
@@ -177,8 +173,13 @@ case "$PUBLISH_KIND" in
     nightly)
         : "${HANDOFF_FILE:?HANDOFF_FILE is required}"
         : "${RESULTS_DIR:?RESULTS_DIR is required}"
+        : "${NIGHTLY_ARTIFACT_REF:?NIGHTLY_ARTIFACT_REF is required}"
         ;;
 esac
+
+if [ "$PUBLISH_STAGE" = stage ]; then
+    : "${ROUTE_MATRIX:?ROUTE_MATRIX is required for tagged staging}"
+fi
 
 # nightly keeps today's publish-then-gate flow untouched — staging a Nightly
 # snapshot is out of scope here (see the header docblock).
@@ -352,13 +353,18 @@ filter_signature_only_touched() {
 }
 
 catalogue_tree_digest() {
+    catalogue_pathspec=""
+    for catalogue_dir in $CATALOGUE_DIRS; do
+        catalogue_pathspec="${catalogue_pathspec} docs/${catalogue_dir}"
+    done
     (
-        cd "$PKG_REPO"
-        for catalogue_dir in $CATALOGUE_DIRS; do
-            [ ! -d "docs/${catalogue_dir}" ] ||
-                find "docs/${catalogue_dir}" -type f -exec sha256sum {} \;
-        done
-    ) | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+        # shellcheck disable=SC2086  # controlled catalogue path list
+        git -C "$PKG_REPO" diff HEAD --binary -- $catalogue_pathspec
+        # Includes untracked paths and index/worktree state, so file type and
+        # mode changes cannot hide behind byte-identical content.
+        # shellcheck disable=SC2086  # controlled catalogue path list
+        git -C "$PKG_REPO" status --porcelain=v1 --untracked-files=all -- $catalogue_pathspec
+    ) | sha256sum | cut -d' ' -f1
 }
 
 
@@ -437,6 +443,7 @@ stage_touched() {
             git -C "$PKG_REPO" checkout --quiet -- "docs/${target}"
         fi
     done
+    printf '%s' "$ROUTE_MATRIX" | jq -c . >"${PKG_REPO}/docs/staging/${STAGING_SEGMENT}/.route-matrix.json"
     git -C "$PKG_REPO" add -- "docs/staging/${STAGING_SEGMENT}"
 }
 
@@ -665,8 +672,8 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
                         # set -e) before any commit — same containment rule as a non-zero
                         # exit from the publisher itself further up.
                         nightly_pkg_version=$(jq -er '.pkg_version' "$HANDOFF_FILE")
-                        commit_message=$(printf 'publish: nightly %s -> ["nightly"]\n\npfBlockerNG-Nightly-Version: %s\npfBlockerNG-Source-Run-Id: %s\n' \
-                            "$nightly_pkg_version" "$nightly_pkg_version" "$SOURCE_RUN_ID")
+                        commit_message=$(printf 'publish: nightly %s -> ["nightly"]\n\npfBlockerNG-Nightly-Version: %s\npfBlockerNG-Source-Run-Id: %s\npfBlockerNG-Nightly-Artifact-Ref: %s\n' \
+                            "$nightly_pkg_version" "$nightly_pkg_version" "$SOURCE_RUN_ID" "$NIGHTLY_ARTIFACT_REF")
                         ;;
                 esac
             fi

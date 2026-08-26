@@ -8,6 +8,10 @@ on:
       - pkg-site/**
       - scripts/gen_landing.py
       - scripts/render-pkg-site.sh
+      - scripts/install.sh
+      - scripts/pfblockerng_repo_generate.sh
+      - scripts/repo_conf.py
+      - scripts/pfb_pkg.py
       - publication/compatibility-route-matrix.json
 
 permissions:
@@ -34,5 +38,6 @@ jobs:
           set -eu
           export PFB_SRC="$GITHUB_WORKSPACE"
           export PKG_REPO="$GITHUB_WORKSPACE"
-          export ROUTE_MATRIX="$(jq -c . publication/compatibility-route-matrix.json)"
+          ROUTE_MATRIX="$(jq -c . publication/compatibility-route-matrix.json)"
+          export ROUTE_MATRIX
           sh scripts/render-pkg-site.sh

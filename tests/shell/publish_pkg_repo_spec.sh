@@ -221,16 +221,10 @@ def main():
 sys.exit(main())
 PY
 
-    # scripts/catalogue_sig_only.py is NOT stubbed like the publishers above
-    # (issue #2675 so*: it's the wrapper's own signature-only-delta check, not
-    # something under test doubling for a slow/networked dependency) — the
-    # wrapper invokes it via "${PFB_SRC}/scripts/catalogue_sig_only.py", so
-    # the fake PFB_SRC checkout needs the REAL file, plus its own real
-    # pfb_pkg.py/release_version.py dependencies, alongside the stub
-    # publishers above.
+    # Signature-only filtering uses the real local reader beside the publisher stubs.
     cp "${PFB_ROOT}/scripts/catalogue_sig_only.py" "${base}/fake-src/scripts/catalogue_sig_only.py"
     cp "${PFB_ROOT}/scripts/pfb_pkg.py" "${base}/fake-src/scripts/pfb_pkg.py"
-    cp "${PFB_ROOT}/scripts/release_version.py" "${base}/fake-src/scripts/release_version.py"
+    cp "${PFB_ROOT}/scripts/publication_identity.py" "${base}/fake-src/scripts/publication_identity.py"
 
     mkdir -p "${base}/fake-src/pkg-site"
     cat >"${base}/fake-src/scripts/gen_landing.py" <<'PY'
@@ -245,6 +239,8 @@ if os.environ.get("FAKE_RENDER_TOUCH_CATALOGUE"):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("hostile renderer\n")
+if os.environ.get("FAKE_RENDER_CHMOD_CATALOGUE"):
+    os.chmod(os.path.join(docs, "nightly", "ce-2.8", "marker.pkg"), 0o755)
 PY
 
     common_env() {
@@ -258,8 +254,9 @@ PY
         SOURCE_RUN_ID=10:1
         ASSETS_DIR="${base}/assets"
         HANDOFF_FILE="${base}/tagged-release-handoff.json"
+        ROUTE_MATRIX='[{"freebsd_major":"15","pfsense_version":"2.8","variant":"CE","php_version":"8.3","py_flavor":"py311"}]'
         printf '%s\n' '{"release_tag":"v4.0.0.b1","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' > "$HANDOFF_FILE"
-        export PFB_SRC PKG_REPO SOURCE_REPOSITORY RELEASE_ID RELEASE_TAG SOURCE_SHA DESTINATIONS SOURCE_RUN_ID ASSETS_DIR HANDOFF_FILE
+        export PFB_SRC PKG_REPO SOURCE_REPOSITORY RELEASE_ID RELEASE_TAG SOURCE_SHA DESTINATIONS SOURCE_RUN_ID ASSETS_DIR HANDOFF_FILE ROUTE_MATRIX
     }
     common_env
     mkdir -p "${base}/assets"
@@ -293,7 +290,8 @@ PY
     PUBLISH_KIND=nightly
     HANDOFF_FILE="${base}/nightly-handoff.json"
     RESULTS_DIR="${base}/results"
-    export PUBLISH_KIND HANDOFF_FILE RESULTS_DIR
+    NIGHTLY_ARTIFACT_REF="ghcr.io/pfblockerng/pfblockerng-nightly@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    export PUBLISH_KIND HANDOFF_FILE RESULTS_DIR NIGHTLY_ARTIFACT_REF
     mkdir -p "$RESULTS_DIR"
     cat > "$HANDOFF_FILE" <<'JSON'
 {"run_id":"10:1","pkg_version":"20260804153045.aaaaaaa","route_matrix":[{"freebsd_major":"16","pfsense_version":"2.9","variant":"Plus","php_version":"8.4","py_flavor":"py312"}]}
@@ -902,6 +900,7 @@ HOOK
     The variable msg should include 'publish: nightly 20260804153045.aaaaaaa -> ["nightly"]'
     The variable msg should include 'pfBlockerNG-Nightly-Version: 20260804153045.aaaaaaa'
     The variable msg should include 'pfBlockerNG-Source-Run-Id: 10:1'
+    The variable msg should include "pfBlockerNG-Nightly-Artifact-Ref: ${NIGHTLY_ARTIFACT_REF}"
     The variable msg should not include 'pfBlockerNG-Release-Tag'
     The variable msg should not include 'v4.0.0.b1'
   End
@@ -950,6 +949,9 @@ HOOK
     The variable original should equal 'seed'
     committed="$(git_fixture -C "${base}/pkg-repo" show --stat --format= HEAD | tr -s ' ' | sed 's/^ *//;s/ .*//')"
     The variable committed should include 'docs/staging/10-1/edge/ce-2.8/marker.pkg'
+    The variable committed should include 'docs/staging/10-1/.route-matrix.json'
+    staged_route="$(cat "${base}/pkg-repo/docs/staging/10-1/.route-matrix.json")"
+    The variable staged_route should equal "$ROUTE_MATRIX"
     msg="$(git_fixture -C "${base}/pkg-repo" log -1 --format=%B)"
     The variable msg should include 'publish: stage v4.0.0.b1 -> ["edge"]'
     The variable msg should include 'pfBlockerNG-Release-Tag: v4.0.0.b1'
@@ -1605,6 +1607,20 @@ PY
     export FAKE_TOUCHED=nightly/ce-2.8
     export PUBLISH_RENDER_SITE=1
     export FAKE_RENDER_TOUCH_CATALOGUE=1
+    export BASE_URL=https://pkg.pfblockerng.com
+    export ROUTE_MATRIX='[{"freebsd_major":"16","pfsense_version":"2.8","variant":"CE","php_version":"8.5","py_flavor":"py311"}]'
+    When run script "$script"
+    The status should equal 1
+    The stderr should include '::error::renderer changed catalogue-owned input'
+    The result of function remote_head_now should equal "$original_remote_head"
+  End
+
+  It 'a3 (hostile): renderer cannot change a catalogue file mode'
+    nightly_env
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=nightly/ce-2.8
+    export PUBLISH_RENDER_SITE=1
+    export FAKE_RENDER_CHMOD_CATALOGUE=1
     export BASE_URL=https://pkg.pfblockerng.com
     export ROUTE_MATRIX='[{"freebsd_major":"16","pfsense_version":"2.8","variant":"CE","php_version":"8.5","py_flavor":"py311"}]'
     When run script "$script"

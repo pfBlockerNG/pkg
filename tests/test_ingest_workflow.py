@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -55,6 +56,22 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertIn("pfblockerng-release-handoff.json", text)
         self.assertIn("HANDOFF_FILE", text)
 
+    def test_tagged_promote_uses_staged_route_input_without_redownloading_release(self) -> None:
+        text = INGEST.read_text(encoding="utf-8")
+        release_step = text[
+            text.index("- name: Download exact immutable Release input") : text.index("- name: Set up ORAS")
+        ]
+        self.assertIn("if: inputs.operation == 'tagged-stage'", release_step)
+        self.assertNotIn("tagged-promote", release_step)
+        self.assertIn('docs/${STAGING_PREFIX}/.route-matrix.json', text)
+
+    def test_compatibility_matrix_covers_every_production_route(self) -> None:
+        rows = json.loads((ROOT / "publication" / "compatibility-route-matrix.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            {(row["variant"], row["pfsense_version"]) for row in rows},
+            {("CE", "2.8"), ("CE", "2.9"), ("Plus", "26.03"), ("Plus", "26.07")},
+        )
+
     def test_nightly_pull_and_cleanup_use_only_the_validated_digest_reference(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
         self.assertIn("ghcr.io/pfblockerng/pfblockerng-nightly@sha256:", text.lower())
@@ -64,6 +81,10 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertIn('oras manifest delete "$ARTIFACT_REF"', text)
         self.assertNotRegex(text, r'oras pull "?[^\n]*:(?:latest|nightly)')
         self.assertLess(text.index("source_run_id does not match OCI handoff"), text.index('oras manifest delete "$ARTIFACT_REF"'))
+        self.assertLess(
+            text.index("verify_nightly_publication.py"),
+            text.index('oras manifest delete "$ARTIFACT_REF"'),
+        )
         self.assertIn("application/vnd.pfblockerng.nightly.handoff.v1+json", text)
 
     def test_tagged_stage_promote_discard_and_nightly_are_explicit(self) -> None:
@@ -82,6 +103,8 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         text = RENDER.read_text(encoding="utf-8")
         self.assertIn("pkg-site/**", text)
         self.assertIn("scripts/gen_landing.py", text)
+        self.assertIn("scripts/install.sh", text)
+        self.assertIn("scripts/pfblockerng_repo_generate.sh", text)
         self.assertIn("sh scripts/render-pkg-site.sh", text)
         self.assertEqual(text.count("uses: actions/checkout@"), 1)
         self.assertNotIn("pfBlockerNG/pfBlockerNG", text)

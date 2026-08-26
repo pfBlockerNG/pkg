@@ -2,9 +2,9 @@
 verification core for the four-channel staged publisher).
 
 No network, no git, no tree assembly, no ledger — this pins parse_intake, verify_asset,
-and verify_run against the pfBlockerNG source-repo engine loaded from PFB_SRC (see
+and verify_run against the pfBlockerNG pkg-local engine loaded from PFB_SRC (see
 tests/_srcrepo.py). Canonical .pkg fixtures are built in pure Python (mirrors the source
-repo's tests/test_build_repo_portable.py make_pkg / tests/test_pfb_pkg.py _synthetic_pkg),
+repo's tests/test_catalogue_engine.py make_pkg / tests/test_pfb_pkg.py _synthetic_pkg),
 and every fixture record's build_input_digest is computed by the engine's own
 pfb_pkg.build_input_digest — never hand-typed.
 """
@@ -27,13 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import publish_catalogues as pc
-from _srcrepo import SourceRepoError, resolve_src_root
+from _srcrepo import EngineRootError, resolve_src_root
 
 try:
     _SRC_ROOT = resolve_src_root()
     _ENGINE = pc.load_engine(_SRC_ROOT)
     _ENGINE_SKIP_REASON = ""
-except SourceRepoError as exc:  # pragma: no cover - environment gap, not a behaviour regression
+except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
     _SRC_ROOT = None
     _ENGINE = None
     _ENGINE_SKIP_REASON = str(exc)
@@ -254,7 +254,7 @@ def _fabricated_asset(
 
 
 class EngineLoadingTests(unittest.TestCase):
-    def test_missing_src_root_and_env_raises(self) -> None:
+    def test_missing_engine_root_and_env_raises(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PFB_SRC", None)
             with self.assertRaises(pc.EngineError):
@@ -269,20 +269,20 @@ class EngineLoadingTests(unittest.TestCase):
             root = Path(td)
             (root / "scripts").mkdir()
             (root / "scripts" / "pfb_pkg.py").write_text("# stub\n")
-            # build-repo-portable.py deliberately absent.
+            # catalogue_engine.py deliberately absent.
             with self.assertRaises(pc.EngineError) as ctx:
                 pc.load_engine(root)
-            self.assertIn("build-repo-portable.py", str(ctx.exception))
+            self.assertIn("catalogue_engine.py", str(ctx.exception))
 
     @_requires_engine
     def test_loads_real_engine(self) -> None:
         engine = pc.load_engine(_SRC_ROOT)
         self.assertTrue(hasattr(engine.pfb_pkg, "validate_project_pkg"))
-        self.assertTrue(hasattr(engine.build_repo_portable, "_canonical_build_record"))
+        self.assertTrue(hasattr(engine.catalogue_engine, "_canonical_build_record"))
 
     @_requires_engine
     def test_load_engine_rejects_missing_signing_symbols(self) -> None:
-        module = _ENGINE.build_repo_portable
+        module = _ENGINE.catalogue_engine
         for name in ("PKGSIGN_ECDSA_HEAD", "signing_public_der"):
             with self.subTest(name=name):
                 value = getattr(module, name)
@@ -296,16 +296,12 @@ class EngineLoadingTests(unittest.TestCase):
 
     @_requires_engine
     def test_mismatched_checkout_reload_raises(self) -> None:
-        """load_engine caches both engine modules under a fixed name/key, so a
-        second call naming a DIFFERENT checkout must fail loudly instead of
-        silently handing back the first root's modules while claiming the second
-        root. The module-level _ENGINE fixture already loaded _SRC_ROOT, so this
-        only needs a second, distinct root whose two required files exist."""
+        """A second call naming a different engine root must fail loudly."""
         with tempfile.TemporaryDirectory() as td:
             other_root = Path(td)
             (other_root / "scripts").mkdir()
             (other_root / "scripts" / "pfb_pkg.py").write_text("# stub\n")
-            (other_root / "scripts" / "build-repo-portable.py").write_text("# stub\n")
+            (other_root / "scripts" / "catalogue_engine.py").write_text("# stub\n")
             with self.assertRaises(pc.EngineError) as ctx:
                 pc.load_engine(other_root)
             message = str(ctx.exception)
@@ -408,7 +404,7 @@ class IntakeDestinationsTests(unittest.TestCase):
         self.assertIn("too large", str(ctx.exception))
 
     def test_destinations_stable_alone_rejected(self) -> None:
-        """F2: derive_destinations (release_version.py) never returns ("stable",)
+        """F2: derive_destinations (publication_identity.py) never returns ("stable",)
         alone — a final tag always fans to at least testing too. Structurally
         unreachable, so it must abort rather than be silently accepted."""
         with self.assertRaises(pc.IntakeError):
@@ -1124,9 +1120,9 @@ class EngineSymbolAllowlistTests(unittest.TestCase):
     def test_real_engine_carries_every_allowlisted_symbol(self) -> None:
         pc._require_attrs(_ENGINE.pfb_pkg, pc._REQUIRED_PFB_PKG_ATTRS, "pfb_pkg")
         pc._require_attrs(
-            _ENGINE.build_repo_portable,
-            pc._REQUIRED_BUILD_REPO_PORTABLE_ATTRS,
-            "build-repo-portable",
+            _ENGINE.catalogue_engine,
+            pc._REQUIRED_CATALOGUE_ENGINE_ATTRS,
+            "catalogue_engine",
         )
 
 

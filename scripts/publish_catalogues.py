@@ -1,17 +1,9 @@
 """Four-channel staged publisher — intake parsing + per-asset/run verification core.
 
-Scope (issue #2146 step S1): parse the five raw release-workflow intake fields into
-a validated Intake, verify one downloaded .pkg asset against its provenance annotation
-(pulled via the pfBlockerNG source repo's own engine — never re-derived here), and run
-the whole-run cross-asset checks the design calls "Verification axes" 1-13. Tree
-assembly, the durable ledger, git, and network I/O are later steps; nothing here writes
-outside a caller-supplied scratch directory.
-
-stdlib-only, Python 3.11. The engine (pfb_pkg.py + build-repo-portable.py) is loaded by
-path from a source-repo checkout named by ``PFB_SRC`` (env) or an explicit argument —
-never vendored, never re-implemented: this module calls the engine's own
-``validate_build_record`` / ``validate_project_pkg`` / ``_canonical_build_record`` and
-adds only the cross-input checks those do not already cover.
+Scope: parse raw workflow intake, verify downloaded .pkg assets against their
+embedded provenance, and apply whole-run cross-asset checks before publication.
+The repository-local engine is `pfb_pkg.py` plus `catalogue_engine.py`; no code
+is loaded from the source repository.
 """
 
 from __future__ import annotations
@@ -40,7 +32,7 @@ class PublishError(Exception):
 
 
 class EngineError(PublishError):
-    """The pfBlockerNG source-repo engine could not be loaded."""
+    """The pkg-local verification engine could not be loaded."""
 
 
 class IntakeError(PublishError):
@@ -55,13 +47,8 @@ class RunVerificationError(PublishError):
     """A whole-run cross-asset check (axes 1-13) failed."""
 
 
-# --------------------------------------------------------------------------- #
-# Engine loading — pfb_pkg (normal import) + build-repo-portable.py (by path,
-# mirroring tests/test_build_repo_portable.py's importlib idiom for a
-# hyphen-named script).
-# --------------------------------------------------------------------------- #
-
-_ENGINE_MODULE_NAME = "publish_catalogues_engine_build_repo_portable"
+# Repository-local engine modules.
+_ENGINE_MODULE_NAME = "publish_catalogues_catalogue_engine"
 
 _REQUIRED_PFB_PKG_ATTRS = (
     "PkgError",
@@ -79,15 +66,13 @@ _REQUIRED_PFB_PKG_ATTRS = (
     "_VARIANT",
     "_PF_VERSION",
 )
-_REQUIRED_BUILD_REPO_PORTABLE_ATTRS = (
+_REQUIRED_CATALOGUE_ENGINE_ATTRS = (
     "BuildRepoError",
     "_canonical_build_record",
     "catalog_name_from_version",
     "_validate_catalog_name",
     "_pkg_matches_abi",
-    # Dereferenced by this module's _verify_dependency_asset (_PKG_SEGMENT_RE) and by
-    # catalogue_assembly.py (_CATALOG_PKG_FILES, build_repo) — same allowlist covers
-    # every caller that receives its build_repo_portable module from load_engine().
+    # Dereferenced by this module and catalogue_assembly.py.
     "_PKG_SEGMENT_RE",
     "_CATALOG_PKG_FILES",
     "build_repo",
@@ -102,30 +87,25 @@ class Engine:
 
     src_root: Path
     pfb_pkg: ModuleType
-    build_repo_portable: ModuleType
+    catalogue_engine: ModuleType
 
 
 def load_engine(src_root: str | Path | None = None) -> Engine:
-    """Load the source-repo engine from ``src_root`` or the ``PFB_SRC`` env var.
-
-    Never falls back to a guessed path: a missing/incomplete engine is always a hard
-    ``EngineError``, quoting exactly what is absent.
-    """
+    """Load the pkg-local engine rooted at ``src_root`` or ``PFB_SRC``."""
     raw = src_root if src_root is not None else os.environ.get("PFB_SRC")
     if not raw:
-        raise EngineError(
-            "no pfBlockerNG source-repo checkout given: pass src_root or set the PFB_SRC "
-            "environment variable to a pfBlockerNG checkout"
-        )
+        raise EngineError("no pkg checkout given: pass src_root or set PFB_SRC")
     root = Path(raw).expanduser()
     if not root.is_dir():
         raise EngineError(f"PFB_SRC {str(root)!r} is not a directory")
     scripts_dir = root / "scripts"
     pfb_pkg_path = scripts_dir / "pfb_pkg.py"
-    build_repo_portable_path = scripts_dir / "build-repo-portable.py"
-    missing = [str(p) for p in (pfb_pkg_path, build_repo_portable_path) if not p.is_file()]
+    catalogue_engine_path = scripts_dir / "catalogue_engine.py"
+    missing = [str(p) for p in (pfb_pkg_path, catalogue_engine_path) if not p.is_file()]
     if missing:
-        raise EngineError(f"incomplete pfBlockerNG engine under PFB_SRC={str(root)!r}: missing {', '.join(missing)}")
+        raise EngineError(
+            f"incomplete pkg engine under PFB_SRC={str(root)!r}: missing {', '.join(missing)}"
+        )
 
     scripts_str = str(scripts_dir)
     path_added = scripts_str not in sys.path
@@ -146,35 +126,45 @@ def load_engine(src_root: str | Path | None = None) -> Engine:
         raise EngineError(f"cannot import pfb_pkg from {scripts_dir}: {exc}") from exc
     _require_attrs(pfb_pkg_mod, _REQUIRED_PFB_PKG_ATTRS, "pfb_pkg")
 
-    build_repo_portable_mod = sys.modules.get(_ENGINE_MODULE_NAME)
-    _require_same_origin(build_repo_portable_mod, build_repo_portable_path, label="build-repo-portable")
-    if build_repo_portable_mod is None:
-        spec = importlib.util.spec_from_file_location(_ENGINE_MODULE_NAME, build_repo_portable_path)
+    catalogue_engine_mod = sys.modules.get(_ENGINE_MODULE_NAME)
+    _require_same_origin(
+        catalogue_engine_mod, catalogue_engine_path, label="catalogue_engine"
+    )
+    if catalogue_engine_mod is None:
+        spec = importlib.util.spec_from_file_location(
+            _ENGINE_MODULE_NAME, catalogue_engine_path
+        )
         if spec is None or spec.loader is None:
-            raise EngineError(f"cannot load module spec for {build_repo_portable_path}")
-        build_repo_portable_mod = importlib.util.module_from_spec(spec)
-        sys.modules[_ENGINE_MODULE_NAME] = build_repo_portable_mod
+            raise EngineError(f"cannot load module spec for {catalogue_engine_path}")
+        catalogue_engine_mod = importlib.util.module_from_spec(spec)
+        sys.modules[_ENGINE_MODULE_NAME] = catalogue_engine_mod
         try:
-            spec.loader.exec_module(build_repo_portable_mod)
+            spec.loader.exec_module(catalogue_engine_mod)
         except Exception as exc:
             del sys.modules[_ENGINE_MODULE_NAME]
-            raise EngineError(f"cannot load {build_repo_portable_path}: {exc}") from exc
+            raise EngineError(f"cannot load {catalogue_engine_path}: {exc}") from exc
     _require_attrs(
-        build_repo_portable_mod,
-        _REQUIRED_BUILD_REPO_PORTABLE_ATTRS,
-        "build-repo-portable",
+        catalogue_engine_mod,
+        _REQUIRED_CATALOGUE_ENGINE_ATTRS,
+        "catalogue_engine",
     )
 
-    return Engine(src_root=root, pfb_pkg=pfb_pkg_mod, build_repo_portable=build_repo_portable_mod)
+    return Engine(
+        src_root=root, pfb_pkg=pfb_pkg_mod, catalogue_engine=catalogue_engine_mod
+    )
 
 
 def _require_attrs(module: ModuleType, names: Sequence[str], label: str) -> None:
     missing = [name for name in names if not hasattr(module, name)]
     if missing:
-        raise EngineError(f"{label} engine module is missing required symbol(s): {', '.join(missing)}")
+        raise EngineError(
+            f"{label} engine module is missing required symbol(s): {', '.join(missing)}"
+        )
 
 
-def _require_same_origin(cached: ModuleType | None, requested_path: Path, *, label: str) -> None:
+def _require_same_origin(
+    cached: ModuleType | None, requested_path: Path, *, label: str
+) -> None:
     """Fail loudly if ``cached`` (a module already in ``sys.modules`` under a fixed
     name/key) was loaded from a file other than ``requested_path``.
 
@@ -210,18 +200,10 @@ _NIGHTLY_DESTINATIONS: tuple[str, ...] = ("nightly",)
 _MAX_DESTINATIONS_TEXT = 256
 _MAX_DESTINATIONS_ELEMENTS = len(_CHANNEL_ORDER) + 1
 
-# The closed set of ordered destination tuples a tagged run may carry. Authority:
-# release_version.py's derive_destinations (source repo; read for context, never
-# imported here) — since its unconditional fan-out (issue #2251), it always returns
-# exactly one of three tuples: ("edge",), ("testing","edge"), or
-# ("stable","testing","edge"). ("testing",) and ("stable","testing") remain in this
-# allow-list only for defense-in-depth against already-published runs from before
-# that change; derive_destinations can no longer produce either. ("stable",) alone
-# and ("stable","edge") are NOT among its outputs: a final (stable-channel) tag
-# always fans to at least testing, and never skips testing to reach edge directly.
-# issue #2146's acceptance criteria require an unlisted destination to abort, so
-# this is the single, closed source of truth — never widen it to "any ordered
-# subset" elsewhere.
+# Closed tuples accepted from the source dispatch contract. Current releases use
+# edge-only, testing+edge, or stable+testing+edge; two historical tuples remain
+# for immutable pre-migration republish compatibility.
+# Stable-only and stable+edge are never legal; every other unlisted tuple fails closed.
 _VALID_TAGGED_DESTINATIONS: frozenset[tuple[str, ...]] = frozenset(
     {
         ("edge",),
@@ -271,7 +253,9 @@ def _parse_destinations(raw: str) -> tuple[str, ...]:
     if "nightly" in values:
         raise IntakeError("nightly must not be combined with any other destination")
     if values not in _VALID_TAGGED_DESTINATIONS:
-        raise IntakeError(f"destinations must be one of {sorted(_VALID_TAGGED_DESTINATIONS)!r}; got {values!r}")
+        raise IntakeError(
+            f"destinations must be one of {sorted(_VALID_TAGGED_DESTINATIONS)!r}; got {values!r}"
+        )
     return values
 
 
@@ -299,17 +283,23 @@ def parse_intake(
             raise IntakeError(f"{name} must be a string")
 
     if source_repository != EXPECTED_SOURCE_REPOSITORY:
-        raise IntakeError(f"source_repository must be {EXPECTED_SOURCE_REPOSITORY!r}, got {source_repository!r}")
+        raise IntakeError(
+            f"source_repository must be {EXPECTED_SOURCE_REPOSITORY!r}, got {source_repository!r}"
+        )
 
     if not _RUN_ID_RE.fullmatch(source_run_id):
-        raise IntakeError(f"source_run_id must be '<digits>:<digits>', got {source_run_id!r}")
+        raise IntakeError(
+            f"source_run_id must be '<digits>:<digits>', got {source_run_id!r}"
+        )
 
     destinations_tuple = _parse_destinations(destinations)
 
     if destinations_tuple == _NIGHTLY_DESTINATIONS:
         kind: IntakeKind = "nightly"
         if release_id != "" or release_tag != "":
-            raise IntakeError("nightly intake requires empty release_id and release_tag")
+            raise IntakeError(
+                "nightly intake requires empty release_id and release_tag"
+            )
     else:
         kind = "tagged"
         if release_id == "":
@@ -317,9 +307,13 @@ def parse_intake(
         if release_tag == "":
             raise IntakeError("tagged intake requires a non-empty release_tag")
         if not _RELEASE_ID_RE.fullmatch(release_id):
-            raise IntakeError(f"release_id must be a positive decimal integer string, got {release_id!r}")
+            raise IntakeError(
+                f"release_id must be a positive decimal integer string, got {release_id!r}"
+            )
         if not _RELEASE_TAG_RE.fullmatch(release_tag):
-            raise IntakeError(f"release_tag must match vX.Y.Z[.aN|.bN|.rN], got {release_tag!r}")
+            raise IntakeError(
+                f"release_tag must match vX.Y.Z[.aN|.bN|.rN], got {release_tag!r}"
+            )
 
     return Intake(
         kind=kind,
@@ -360,7 +354,9 @@ def _validate_asset_name(name: str) -> None:
     if not isinstance(name, str) or not name:
         raise AssetVerificationError("asset name must be a non-empty string")
     if any(char in name for char in _UNSAFE_NAME_CHARS):
-        raise AssetVerificationError(f"asset name contains control characters: {name!r}")
+        raise AssetVerificationError(
+            f"asset name contains control characters: {name!r}"
+        )
     if "/" in name or "\\" in name or ".." in name:
         raise AssetVerificationError(f"asset name must be a bare filename: {name!r}")
     if not name.endswith(".pkg"):
@@ -385,8 +381,12 @@ def verify_asset(
     provenance annotation is rejected — the legacy unannotated path is gone.
     """
     _validate_asset_name(asset_name)
-    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
-        raise AssetVerificationError(f"expected_sha256 must be 64 lowercase hex characters, got {expected_sha256!r}")
+    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(
+        expected_sha256
+    ):
+        raise AssetVerificationError(
+            f"expected_sha256 must be 64 lowercase hex characters, got {expected_sha256!r}"
+        )
 
     asset_path = Path(asset_path)
     try:
@@ -395,7 +395,9 @@ def verify_asset(
         raise AssetVerificationError(f"{asset_name}: cannot read asset: {exc}") from exc
     digest = hashlib.sha256(data).hexdigest()
     if digest != expected_sha256:
-        raise AssetVerificationError(f"{asset_name}: sha256 mismatch: expected {expected_sha256}, got {digest}")
+        raise AssetVerificationError(
+            f"{asset_name}: sha256 mismatch: expected {expected_sha256}, got {digest}"
+        )
 
     pfb_pkg = engine.pfb_pkg
     try:
@@ -438,7 +440,7 @@ def _verify_canonical_asset(
     digest: str,
 ) -> VerifiedAsset:
     pfb_pkg = engine.pfb_pkg
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     try:
         record = brp._canonical_build_record(asset_path, manifest)
     except brp.BuildRepoError as exc:
@@ -452,7 +454,9 @@ def _verify_canonical_asset(
     canonical_name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg"
     row = record["matrix_row"]
     if intake.kind == "tagged":
-        expected_declared = f"{canonical_name[:-4]}-{row['variant']}-{row['pfsense_version']}.pkg"
+        expected_declared = (
+            f"{canonical_name[:-4]}-{row['variant']}-{row['pfsense_version']}.pkg"
+        )
     else:
         expected_declared = canonical_name
     if asset_name != expected_declared:
@@ -510,15 +514,19 @@ def _verify_dependency_asset(
     the ABI against SOME ROUTE row. Here the suffix only has to be well-formed; it is
     returned on the VerifiedAsset (``release_suffix``) for the publisher to route on.
     """
-    brp = engine.build_repo_portable
+    brp = engine.catalogue_engine
     pfb_pkg = engine.pfb_pkg
     name = manifest.get("name")
     version = manifest.get("version")
     segment_re = brp._PKG_SEGMENT_RE
     if not isinstance(name, str) or not segment_re.fullmatch(name):
-        raise AssetVerificationError(f"{asset_name}: dependency manifest name is missing or unsafe")
+        raise AssetVerificationError(
+            f"{asset_name}: dependency manifest name is missing or unsafe"
+        )
     if not isinstance(version, str) or not segment_re.fullmatch(version):
-        raise AssetVerificationError(f"{asset_name}: dependency manifest version is missing or unsafe")
+        raise AssetVerificationError(
+            f"{asset_name}: dependency manifest version is missing or unsafe"
+        )
 
     canonical_name = f"{name}-{version}.pkg"
     release_suffix: tuple[str, str] | None = None
@@ -531,7 +539,11 @@ def _verify_dependency_asset(
             )
         suffix = asset_name[len(prefix) : -len(".pkg")]
         variant, sep, pfsense_version = suffix.rpartition("-")
-        if not sep or not pfb_pkg._VARIANT.fullmatch(variant) or not pfb_pkg._PF_VERSION.fullmatch(pfsense_version):
+        if (
+            not sep
+            or not pfb_pkg._VARIANT.fullmatch(variant)
+            or not pfb_pkg._PF_VERSION.fullmatch(pfsense_version)
+        ):
             raise AssetVerificationError(
                 f"{asset_name}: declared name does not carry a valid -<Variant>-<pfsense_version> Release-asset suffix"
             )
@@ -581,7 +593,7 @@ def _normalize_route_matrix(
 ]:
     """Validate+partition the pinned ROUTE matrix into build-role / route-only rows.
 
-    Mirrors nightly_provenance.build_handoff's own ROUTE-row normalization: "role" is
+    Mirrors Nightly handoff contract's own ROUTE-row normalization: "role" is
     popped before validate_build_matrix_row only for "route-only" (that function
     rejects any role other than absent/"build"), then reattached.
     """
@@ -604,7 +616,9 @@ def _normalize_route_matrix(
             raise RunVerificationError(f"invalid ROUTE matrix row: {exc}") from exc
         key = (normalized["variant"], normalized["pfsense_version"])
         if key in build_rows or key in route_only_rows:
-            raise RunVerificationError(f"ROUTE matrix has duplicate version identity {key!r}")
+            raise RunVerificationError(
+                f"ROUTE matrix has duplicate version identity {key!r}"
+            )
         if role == "route-only":
             route_only_rows[key] = normalized
         else:
@@ -626,14 +640,18 @@ def _canonical_record(asset: VerifiedAsset) -> Mapping[str, object]:
     that into one explicit, named RunVerificationError instead.
     """
     if asset.asset_class != "canonical" or asset.record is None:
-        raise RunVerificationError(f"{asset.declared_name}: expected a canonical asset with a record")
+        raise RunVerificationError(
+            f"{asset.declared_name}: expected a canonical asset with a record"
+        )
     return asset.record
 
 
 def _require_single_value(assets: Sequence[VerifiedAsset], field_name: str) -> object:
     values = {_canonical_record(asset)[field_name] for asset in assets}
     if len(values) != 1:
-        raise RunVerificationError(f"canonical assets disagree on {field_name}: {sorted(map(str, values))!r}")
+        raise RunVerificationError(
+            f"canonical assets disagree on {field_name}: {sorted(map(str, values))!r}"
+        )
     return next(iter(values))
 
 
@@ -670,7 +688,9 @@ def verify_run(
         row = _canonical_record(asset)["matrix_row"]
         key = (row["variant"], row["pfsense_version"])
         if key not in build_rows:
-            raise RunVerificationError(f"{asset.declared_name}: matrix_row {key!r} is not a build-role ROUTE row")
+            raise RunVerificationError(
+                f"{asset.declared_name}: matrix_row {key!r} is not a build-role ROUTE row"
+            )
         if build_rows[key] != row:
             raise RunVerificationError(
                 f"{asset.declared_name}: matrix_row does not exactly match the pinned ROUTE row {key!r}"
@@ -680,14 +700,21 @@ def verify_run(
         matched_keys.add(key)
     missing = set(build_rows) - matched_keys
     if missing:
-        raise RunVerificationError(f"ROUTE build row(s) with no asset: {sorted(map(str, missing))!r}")
+        raise RunVerificationError(
+            f"ROUTE build row(s) with no asset: {sorted(map(str, missing))!r}"
+        )
 
     # Axis 9: every dependency asset's ABI matches some ROUTE row (build or route-only).
-    route_abis = {f"FreeBSD:{row['freebsd_major']}:*" for row in {**build_rows, **route_only_rows}.values()}
-    brp = engine.build_repo_portable
+    route_abis = {
+        f"FreeBSD:{row['freebsd_major']}:*"
+        for row in {**build_rows, **route_only_rows}.values()
+    }
+    brp = engine.catalogue_engine
     for asset in dependency:
         if not any(brp._pkg_matches_abi(asset.manifest, abi) for abi in route_abis):
-            raise RunVerificationError(f"{asset.declared_name}: dependency ABI matches no ROUTE row")
+            raise RunVerificationError(
+                f"{asset.declared_name}: dependency ABI matches no ROUTE row"
+            )
 
     # Axis 12: source_run_id shape already enforced by parse_intake; recorded via intake.
     # Axis 13: destination legality (record.channel == primary) already enforced per
