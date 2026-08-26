@@ -1663,6 +1663,8 @@ class OutcomeTests(_TempDirTestCase):
         valid_rows = _packagesite_rows(catalogue_dir)
         row = valid_rows[0]
         valid_row_json = json.dumps(row, separators=(",", ":")).encode("utf-8")
+        valid_packagesite_payload = valid_row_json + b"\n"
+        valid_data_payload = _read_catalogue_member(catalogue_dir / "data.pkg", "data")
         name_field = f'"name":{json.dumps(row["name"])}'.encode()
         duplicate_key_json = (
             valid_row_json.replace(name_field, name_field + b"," + name_field, 1)
@@ -1687,18 +1689,23 @@ class OutcomeTests(_TempDirTestCase):
         archive_cases = (
             ("truncated archive", None, b"truncated", ()),
             ("invalid UTF-8", "packagesite.yaml", b"\xff\n", ()),
-            ("hostile member path", "../packagesite.yaml", b"{}\n", ()),
+            (
+                "hostile member path",
+                "../packagesite.yaml",
+                valid_packagesite_payload,
+                (),
+            ),
             (
                 "unexpected archive member",
                 "packagesite.yaml",
-                b"{}\n",
+                valid_packagesite_payload,
                 (("unexpected", b"x"),),
             ),
             (
                 "duplicate archive member",
                 "packagesite.yaml",
-                b"{}\n",
-                (("packagesite.yaml", b"{}\n"),),
+                valid_packagesite_payload,
+                (("packagesite.yaml", valid_packagesite_payload),),
             ),
             (
                 "duplicate JSON key",
@@ -1738,7 +1745,7 @@ class OutcomeTests(_TempDirTestCase):
             with tarfile.open(fileobj=raw, mode="w") as archive:
                 member = tarfile.TarInfo("packagesite.yaml")
                 member.type = tarfile.SYMTYPE
-                member.linkname = "elsewhere"
+                member.linkname = valid_packagesite_payload.decode()
                 archive.addfile(member)
             (catalogue_dir / "packagesite.pkg").write_bytes(
                 pfb_pkg.zstd_compress(
@@ -1856,7 +1863,7 @@ class OutcomeTests(_TempDirTestCase):
             ("invalid data archive", None, b"truncated"),
             ("invalid data UTF-8", "data", b"\xff"),
             ("invalid data JSON", "data", b"{"),
-            ("wrong data member", "../data", b"{}"),
+            ("wrong data member", "../data", valid_data_payload),
             (
                 "mismatched data packages",
                 "data",
