@@ -1,10 +1,7 @@
 #!/bin/sh
-# publish-pkg-repo.sh — verify + publish a Tagged release's or a Nightly snapshot's
-# .pkg assets into the pfBlockerNG/pkg catalogue tree, then commit + fast-forward-push
-# the result. Site rendering is NOT this script's job: pfBlockerNG/pkg's docs/ site
-# (index.html, browse/, .nojekyll, install.sh, …) is render-pkg-site.sh's own,
-# separately dispatched (issue #2450 step 2). This script owns catalogue paths
-# only: docs/<stable|testing|edge|nightly>/<varver>/ and docs/staging/<segment>/.
+# publish-pkg-repo.sh — verify and publish immutable package inputs with guarded
+# local commits. Tagged staging/discard touch catalogue paths only; tagged
+# promotion and Nightly render the site in the same atomic final commit.
 #
 # PUBLISH_KIND selects the mode (default "tagged" when unset):
 #   tagged   PFB_SRC/scripts/publish_release.py verifies + assembles a tagged

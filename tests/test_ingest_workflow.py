@@ -13,7 +13,9 @@ class IngestionWorkflowContractTests(unittest.TestCase):
     def test_ingestion_is_pkg_local_and_retryable_by_exact_input(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", text)
-        self.assertIn("run-name: Ingest ${{ inputs.operation }} ${{ inputs.source_run_id }}", text)
+        self.assertIn(
+            "run-name: Ingest ${{ inputs.operation }} ${{ inputs.source_run_id }}", text
+        )
         for name in (
             "operation",
             "source_repository",
@@ -30,10 +32,13 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("repository: pfBlockerNG/pfBlockerNG", text)
         self.assertNotRegex(text, r"(?m)^\s+ref:\s+(?:devel|main)$")
         self.assertEqual(text.count("uses: actions/checkout@"), 1)
+        self.assertIn("fetch-depth: 0", text)
 
     def test_permissions_and_commit_ownership_are_local(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?s)permissions:\n\s+contents: write\n\s+packages: write")
+        self.assertRegex(
+            text, r"(?s)permissions:\n\s+contents: write\n\s+packages: write"
+        )
         self.assertIn('export PFB_SRC="$GITHUB_WORKSPACE"', text)
         self.assertIn('export PKG_REPO="$GITHUB_WORKSPACE"', text)
         self.assertIn("sh scripts/publish-pkg-repo.sh", text)
@@ -43,7 +48,7 @@ class IngestionWorkflowContractTests(unittest.TestCase):
     def test_tagged_release_intake_is_exact_and_immutable(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
         for needle in (
-            'repos/${SOURCE_REPOSITORY}/releases/${RELEASE_ID}',
+            "repos/${SOURCE_REPOSITORY}/releases/${RELEASE_ID}",
             '[ "$ACTUAL_TAG" = "$RELEASE_TAG" ]',
             '[ "$DRAFT" = false ]',
             '[ "$IMMUTABLE" = true ]',
@@ -56,40 +61,75 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertIn("pfblockerng-release-handoff.json", text)
         self.assertIn("HANDOFF_FILE", text)
 
-    def test_tagged_promote_uses_staged_route_input_without_redownloading_release(self) -> None:
+    def test_tagged_promote_uses_staged_route_input_without_redownloading_release(
+        self,
+    ) -> None:
         text = INGEST.read_text(encoding="utf-8")
         release_step = text[
-            text.index("- name: Download exact immutable Release input") : text.index("- name: Set up ORAS")
+            text.index("- name: Download exact immutable Release input") : text.index(
+                "- name: Set up ORAS"
+            )
         ]
         self.assertIn("if: inputs.operation == 'tagged-stage'", release_step)
         self.assertNotIn("tagged-promote", release_step)
-        self.assertIn('docs/${STAGING_PREFIX}/.route-matrix.json', text)
+        self.assertIn("docs/${STAGING_PREFIX}/.route-matrix.json", text)
 
     def test_compatibility_matrix_covers_every_production_route(self) -> None:
-        rows = json.loads((ROOT / "publication" / "compatibility-route-matrix.json").read_text(encoding="utf-8"))
+        rows = json.loads(
+            (ROOT / "publication" / "compatibility-route-matrix.json").read_text(
+                encoding="utf-8"
+            )
+        )
         self.assertEqual(
             {(row["variant"], row["pfsense_version"]) for row in rows},
             {("CE", "2.8"), ("CE", "2.9"), ("Plus", "26.03"), ("Plus", "26.07")},
         )
 
-    def test_nightly_pull_and_cleanup_use_only_the_validated_digest_reference(self) -> None:
+    def test_nightly_pull_and_cleanup_use_only_the_validated_digest_reference(
+        self,
+    ) -> None:
         text = INGEST.read_text(encoding="utf-8")
         self.assertIn("ghcr.io/pfblockerng/pfblockerng-nightly@sha256:", text.lower())
-        pull_step = text[text.index("- name: Pull exact Nightly digest") : text.index("- name: Materialize catalogue signing key")]
-        self.assertIn("if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'", pull_step)
-        self.assertIn('oras pull "$ARTIFACT_REF"', text)
-        self.assertIn('oras manifest delete "$ARTIFACT_REF"', text)
-        self.assertNotRegex(text, r'oras pull "?[^\n]*:(?:latest|nightly)')
-        self.assertLess(text.index("source_run_id does not match OCI handoff"), text.index('oras manifest delete "$ARTIFACT_REF"'))
-        self.assertLess(
-            text.index("verify_nightly_publication.py"),
-            text.index('oras manifest delete "$ARTIFACT_REF"'),
+        pull_step = text[
+            text.index("- name: Pull exact Nightly digest") : text.index(
+                "- name: Materialize catalogue signing key"
+            )
+        ]
+        self.assertIn(
+            "if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'",
+            pull_step,
         )
+        self.assertIn('oras pull "$ARTIFACT_REF"', text)
+        self.assertNotIn('oras manifest delete "$ARTIFACT_REF"', text)
+        self.assertNotRegex(text, r'oras pull "?[^\n]*:(?:latest|nightly)')
+        self.assertLess(
+            text.index("source_run_id does not match OCI handoff"),
+            text.index("python3 scripts/verify_nightly_publication.py"),
+        )
+        self.assertRegex(
+            text, r"(?m)^          python3 scripts/verify_nightly_publication\.py \\$"
+        )
+        cleanup_step = text[
+            text.index("- name: Delete consumed Nightly OCI manifest") : text.index(
+                "- name: Record ingestion result"
+            )
+        ]
+        for argument in (
+            '--source-run-id "${{ inputs.source_run_id }}"',
+            '--nightly-version "${{ inputs.nightly_version }}"',
+            '--artifact-ref "$ARTIFACT_REF"',
+        ):
+            self.assertIn(argument, cleanup_step)
         self.assertIn("application/vnd.pfblockerng.nightly.handoff.v1+json", text)
 
     def test_tagged_stage_promote_discard_and_nightly_are_explicit(self) -> None:
         text = INGEST.read_text(encoding="utf-8")
-        for operation in ("tagged-stage", "tagged-promote", "tagged-discard", "nightly"):
+        for operation in (
+            "tagged-stage",
+            "tagged-promote",
+            "tagged-discard",
+            "nightly",
+        ):
             self.assertIn(operation, text)
         self.assertIn("PUBLISH_STAGE=stage", text)
         self.assertIn("PUBLISH_STAGE=promote", text)

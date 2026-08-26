@@ -39,16 +39,54 @@ def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     return repo, run_id, version, artifact_ref
 
 
-def test_exact_publication_receipt_allows_cleanup(tmp_path: Path) -> None:
+def _fake_oras(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "oras.log"
+    executable = bin_dir / "oras"
+    executable.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" > "$ORAS_LOG"\n', encoding="utf-8"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("ORAS_LOG", str(log))
+    return log
+
+
+def test_exact_publication_receipt_allows_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo, run_id, version, artifact_ref = _published_repo(tmp_path)
-    verify.verify_publication(
+    log = _fake_oras(tmp_path, monkeypatch)
+    verify.cleanup(
         repo, source_run_id=run_id, nightly_version=version, artifact_ref=artifact_ref
     )
+    assert log.read_text().strip() == f"manifest delete {artifact_ref}"
+
+
+def test_cleanup_finds_receipt_behind_later_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    (repo / "later").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later")
+    _git(repo, "commit", "-q", "-m", "render: later site change")
+    log = _fake_oras(tmp_path, monkeypatch)
+    verify.cleanup(
+        repo,
+        source_run_id=run_id,
+        nightly_version=version,
+        artifact_ref=artifact_ref,
+    )
+    assert log.read_text().strip() == f"manifest delete {artifact_ref}"
 
 
 @pytest.mark.parametrize("field", ["source_run_id", "nightly_version", "artifact_ref"])
-def test_cleanup_rejects_receipt_identity_mismatch(tmp_path: Path, field: str) -> None:
+def test_cleanup_rejects_receipt_identity_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
     repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    log = _fake_oras(tmp_path, monkeypatch)
     values = {
         "source_run_id": run_id,
         "nightly_version": version,
@@ -62,4 +100,5 @@ def test_cleanup_rejects_receipt_identity_mismatch(tmp_path: Path, field: str) -
     with pytest.raises(
         verify.PublicationReceiptError, match="no committed Nightly publication"
     ):
-        verify.verify_publication(repo, **values)
+        verify.cleanup(repo, **values)
+    assert not log.exists()
