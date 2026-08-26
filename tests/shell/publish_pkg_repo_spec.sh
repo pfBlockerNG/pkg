@@ -1593,6 +1593,8 @@ PY
     export ROUTE_MATRIX='[{"freebsd_major":"16","pfsense_version":"2.8","variant":"CE","php_version":"8.5","py_flavor":"py311"}]'
     When run script "$script"
     The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
     committed="$(git_fixture -C "${base}/pkg-repo" show --name-only --format= HEAD | sort | xargs)"
     The variable committed should equal 'docs/index.html docs/nightly/ce-2.8/marker.pkg'
   End
