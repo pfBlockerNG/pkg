@@ -360,10 +360,12 @@ def _catalogue_archive_payload(path: Path, member_name: str) -> tuple[bytes, boo
     return payload, is_signed
 
 
-def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
+def _catalogue_rows(
+    rows: object,
+) -> dict[tuple[str, str, str], dict[str, object]]:
     if not isinstance(rows, list) or not rows:
         raise ValueError("catalogue packages must be a non-empty array")
-    identities: set[tuple[str, str, str]] = set()
+    normalized: dict[tuple[str, str, str], dict[str, object]] = {}
     name_versions: set[tuple[str, str]] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -393,8 +395,8 @@ def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
         if name_version in name_versions:
             raise ValueError("duplicate catalogue name/version")
         name_versions.add(name_version)
-        identities.add((name, version, repopath))
-    return identities
+        normalized[(name, version, repopath)] = row
+    return normalized
 
 
 def _catalogue_destination_safe(dest_dir: Path, *, root: Path) -> bool:
@@ -433,7 +435,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
         ):
             return False
 
-        payload_identities: set[tuple[str, str, str]] = set()
+        payload_rows: dict[tuple[str, str, str], dict[str, object]] = {}
         for path in sorted(dest_dir.glob("*.pkg")):
             if path.name in catalogue_engine._CATALOG_PKG_FILES:
                 continue
@@ -448,10 +450,16 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
             if path.name != f"{name}-{version}.pkg":
                 return False
             identity = (name, version, path.name)
-            if identity in payload_identities:
+            if identity in payload_rows:
                 return False
-            payload_identities.add(identity)
-        if not payload_identities:
+            package_bytes = path.read_bytes()
+            payload_rows[identity] = catalogue_engine.catalog_object(
+                manifest,
+                pkg_name=path.name,
+                sum_=catalogue_engine.pkg_checksum(package_bytes),
+                pkgsize=len(package_bytes),
+            )
+        if not payload_rows:
             return False
 
         packagesite_raw, packagesite_signed = _catalogue_archive_payload(
@@ -460,7 +468,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
         packagesite_rows = [
             _strict_json(line) for line in packagesite_raw.splitlines() if line
         ]
-        if _catalogue_identities(packagesite_rows) != payload_identities:
+        if _catalogue_rows(packagesite_rows) != payload_rows:
             return False
 
         data_raw, data_signed = _catalogue_archive_payload(
@@ -475,7 +483,7 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
             return False
         if data["groups"] != [] or data["expired_packages"] != []:
             return False
-        return _catalogue_identities(data["packages"]) == payload_identities
+        return _catalogue_rows(data["packages"]) == payload_rows
     except _DESCRIPTOR_ERRORS:
         return False
 
