@@ -38,12 +38,10 @@
 
 set -eu
 
-# The hook source lives at the shipped path, under a checkout's src/usr/local/etc/rc.d/
-# sibling of this file's own scripts/ directory (issue #2675).
-# Resolved once at source time — CDPATH='' guard used throughout scripts/, see
-# tests/shell/cdpath_spec.sh.
+# The checkout form keeps the hook beside this script; the rendered form embeds
+# the same bytes. Resolve the local fallback once under a CDPATH-neutral lookup.
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
-HOOK_SRC="${SCRIPT_DIR}/../src/usr/local/etc/rc.d/pfblockerng_repo_generate.sh"
+HOOK_SRC="${SCRIPT_DIR}/pfblockerng_repo_generate.sh"
 
 PKG_BIN="${PKG_BIN:-/usr/local/sbin/pkg}"
 PFBLOCKERNG_ROOT="${PFBLOCKERNG_ROOT:-/}"
@@ -52,7 +50,8 @@ ROOT="${PFBLOCKERNG_ROOT%/}"
 # over plain HTTP, because pkg on pfSense Plus runs against a Netgate-pinned CA bundle
 # nothing we ship can widen — authenticity rides the catalogue signature instead (issue
 # #2675). Fetching THIS script has no signature to fall back on, so that stays HTTPS.
-PFB_REPO_HOST="${PFB_REPO_HOST:-pkg.pfblockerng.com}"
+PFB_DEFAULT_REPO_HOST='pkg.pfblockerng.com'
+PFB_REPO_HOST="${PFB_REPO_HOST:-${PFB_DEFAULT_REPO_HOST}}"
 PFB_DEFAULT_BASE_URL='http://pkg.pfblockerng.com'
 PFB_BASE_URL="${PFB_BASE_URL:-${PFB_DEFAULT_BASE_URL}}"
 # Normalised once, here at the input boundary, so nothing downstream rewrites a scheme:
@@ -329,8 +328,8 @@ USAGE
 
 # pfb_emit_embedded_hook — print the rc.d generator hook to stdout. In the repository
 # copy this is a STUB that fails loud: the standalone
-# src/usr/local/etc/rc.d/pfblockerng_repo_generate.sh is the source of truth, used
-# directly from a checkout via HOOK_SRC. The website build
+# scripts/pfblockerng_repo_generate.sh is the source of truth, used directly
+# from a checkout via HOOK_SRC. The website build
 # (gen_landing.py) replaces the body between the PFB_EMBED markers with the hook in a
 # single-quoted heredoc, producing the self-contained install.sh served at
 # <base>/install.sh for `fetch | sh`.
@@ -369,7 +368,7 @@ pfb_emit_embedded_hook() {
 # Detection (KISS): edition = "/etc/product_label contains 'Plus'" -> plus, else
 # ce; version = major.minor of /etc/version, with any dash suffix (e.g.
 # "-BETA"/"-RC") stripped FIRST. This MIRRORS catalog_name_from_version() in
-# scripts/build-repo-portable.py exactly, including that strip: a live box's
+# scripts/catalogue_engine.py exactly, including that strip: a live box's
 # /etc/version can carry a pre-release suffix the matrix's version never does
 # (issue #1786), and the producers strip it identically so a pre-release box and
 # the publisher agree on one catalog dir (issue #1965). Arch-less since issue #1806 (NO_ARCH) — the catalog
@@ -377,7 +376,7 @@ pfb_emit_embedded_hook() {
 # used to read `pkg config abi` only to derive that leaf).
 #
 # The emitted conf body is BYTE-IDENTICAL to `build-repo.sh --print-conf` and
-# `build-repo-portable.py --print-conf` (pinned by tests/test_repo_conf_generators.py).
+# `catalogue_engine.py --print-conf` (pinned by tests/test_repo_conf_generators.py).
 #
 # POSIX sh only; quote all expansions.
 
@@ -436,7 +435,7 @@ CONF_PRIORITY=100
 # resolved — the caller then leaves the existing conf untouched rather than
 # writing a malformed URL.
 _detect_catalog() {
-    # Edition: lowercase prefix matching build-repo-portable.py (ce | plus).
+    # Edition: lowercase prefix matching catalogue_engine.py (ce | plus).
     if grep -q 'Plus' "${PFB_PRODUCT_LABEL}" 2>/dev/null; then
         _dc_edition='plus'
     else
@@ -772,7 +771,7 @@ pfb_channel_install() {
         die 1 "'${PKG_BIN}' not found — run this ON a pfSense box, or set PKG_BIN"
 
     # 2. Boot-time generator hook: install/refresh only if missing or different.
-    #    Try the EMBEDDED hook first; HOOK_SRC (the checkout copy under src/) is
+    #    Try the EMBEDDED hook first; HOOK_SRC (the checkout copy under scripts/) is
     #    consulted only when the embedded hook is the repository stub
     #    (pfb_emit_embedded_hook fails). Die if neither source is available.
     _hook_tmp="$(mktemp "${TMPDIR:-/tmp}/pfb-hook.XXXXXX")" || die 1 "mktemp failed while staging the boot hook"
