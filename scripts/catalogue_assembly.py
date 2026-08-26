@@ -11,9 +11,9 @@ that one directory from whatever is now present, and commits ``site_root`` to
 ``main`` — a failed run simply never reaches that commit, so there is nothing
 here to roll back.
 
-The caller supplies the pkg-local `pfb_pkg.py` + `catalogue_engine.py` engine.
-This module adds directory-scoped staging, retention, and multi-destination
-identity checks around the engine's catalogue emission.
+The caller supplies the pkg-local engine. This module adds retention,
+slower-channel backfill, and multi-destination identity checks around direct
+catalogue emission.
 """
 
 from __future__ import annotations
@@ -23,16 +23,12 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from publish_catalogues import Engine
+import catalogue_engine
+import pfb_pkg
 
 
 class CatalogueAssemblyError(Exception):
-    """A validation/staging/post-condition failure this module itself detected.
-
-    Engine errors (``BuildRepoError`` from a mixed/concrete ABI or a name/version
-    collision, ``PkgError`` from a corrupt archive) propagate UNWRAPPED — this module
-    never re-derives a check ``build_repo``/``_emit_catalog_from_paths`` already makes.
-    """
+    """A validation or post-condition failure detected by catalogue assembly."""
 
 
 # The closed set of channels this repo's catalogue tree ever serves. Not derived from
@@ -73,22 +69,22 @@ def _validate_channel(channel: str) -> None:
         )
 
 
-def _validate_varver(varver: str, engine: Engine) -> None:
+def _validate_varver(varver: str) -> None:
     if len(varver) > _MAX_VARVER_LENGTH:
         raise CatalogueAssemblyError(
             f"varver exceeds {_MAX_VARVER_LENGTH} characters ({len(varver)}): {varver!r}"
         )
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     try:
         brp._validate_catalog_name(varver, single_segment=True)
     except brp.BuildRepoError as exc:
         raise CatalogueAssemblyError(f"invalid varver {varver!r}: {exc}") from exc
 
 
-def _catalogue_dir(site_root: Path, channel: str, varver: str, engine: Engine) -> Path:
+def _catalogue_dir(site_root: Path, channel: str, varver: str) -> Path:
     """Validate ``channel``/``varver`` and return the existing catalogue directory.
 
-    Everything checked here runs BEFORE any staging/build work — a rejected
+    Everything checked here runs before catalogue emission; a rejected
     (channel, varver) touches nothing beyond this existence check. A missing
     directory (including the case where ``site_root`` itself is not a directory —
     ``Path.is_dir()`` returns ``False`` rather than raising for any invalid
@@ -96,7 +92,7 @@ def _catalogue_dir(site_root: Path, channel: str, varver: str, engine: Engine) -
     itself, the caller (the release job) owns dropping assets into place first.
     """
     _validate_channel(channel)
-    _validate_varver(varver, engine)
+    _validate_varver(varver)
     catalogue_dir = Path(site_root) / channel / varver
     if not catalogue_dir.is_dir():
         raise CatalogueAssemblyError(
@@ -110,13 +106,12 @@ def regenerate_catalogue(
     channel: str,
     varver: str,
     *,
-    engine: Engine,
     sign_key: Path | None = None,
 ) -> None:
     """Rebuild one catalogue from its current installable package pool."""
     site_root = Path(site_root)
-    catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
-    brp = engine.catalogue_engine
+    catalogue_dir = _catalogue_dir(site_root, channel, varver)
+    brp = catalogue_engine
     pool = sorted(
         p
         for p in catalogue_dir.glob("*.pkg")
@@ -137,9 +132,7 @@ def _canonical_version(path: Path, manifest: Mapping[str, object]) -> str:
     return version
 
 
-def _protected_versions(
-    site_root: Path, channel: str, varver: str, *, engine: Engine
-) -> frozenset[str]:
+def _protected_versions(site_root: Path, channel: str, varver: str) -> frozenset[str]:
     """Canonical package versions one of ``channel``'s slower channels
     (``_SLOWER_CHANNELS[channel]``) still carries for this SAME ``varver`` — the set
     ``prune_retained`` must never evict from ``channel``, or a faster channel could
@@ -158,8 +151,7 @@ def _protected_versions(
     reject any divergence before this ever runs), so matching by version string alone
     is sufficient — this function has no reason to re-verify that post-condition.
     """
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     versions: set[str] = set()
     for slower_channel in _SLOWER_CHANNELS[channel]:
         slower_dir = site_root / slower_channel / varver
@@ -187,17 +179,14 @@ def _canonical_filename(path: Path, manifest: Mapping[str, object]) -> str:
     return f"{manifest['name']}-{_canonical_version(path, manifest)}.pkg"
 
 
-def _iter_canonical_packages(
-    catalogue_dir: Path, *, engine: Engine
-) -> list[tuple[Path, str]]:
+def _iter_canonical_packages(catalogue_dir: Path) -> list[tuple[Path, str]]:
     """Canonical ``.pkg`` files in ``catalogue_dir`` as ``(path, filename)``.
 
     Catalog descriptor files and non-canonical (dependency) packages are skipped,
     matching ``_protected_versions`` / ``prune_retained`` so a dependency can
     never be copied or compared as a containment source.
     """
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     found: list[tuple[Path, str]] = []
     for path in sorted(catalogue_dir.glob("*.pkg")):
         if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
@@ -213,8 +202,6 @@ def backfill_from_slower_channels(
     site_root: str | Path,
     channel: str,
     varver: str,
-    *,
-    engine: Engine,
 ) -> dict[Path, list[tuple[str, str]]]:
     """Copy every canonical package still retained on a slower tagged channel
     for this ``varver`` onto ``channel`` (byte-identical).
@@ -232,10 +219,10 @@ def backfill_from_slower_channels(
     site_root = Path(site_root)
     if channel == "nightly":
         _validate_channel(channel)
-        _validate_varver(varver, engine)
+        _validate_varver(varver)
         return {}
 
-    dest_dir = _catalogue_dir(site_root, channel, varver, engine)
+    dest_dir = _catalogue_dir(site_root, channel, varver)
     # name -> first source, then every slower (channel, path) that carries it
     first_source: dict[str, Path] = {}
     origins: dict[str, list[tuple[str, Path]]] = {}
@@ -245,7 +232,7 @@ def backfill_from_slower_channels(
         slower_dir = site_root / slower_channel / varver
         if not slower_dir.is_dir():
             continue
-        for path, name in _iter_canonical_packages(slower_dir, engine=engine):
+        for path, name in _iter_canonical_packages(slower_dir):
             existing = first_source.get(name)
             if existing is not None and not _files_byte_identical(existing, path):
                 raise CatalogueAssemblyError(
@@ -279,12 +266,10 @@ def prune_retained(
     site_root: str | Path,
     channel: str,
     varver: str,
-    *,
-    engine: Engine,
 ) -> tuple[Path, ...]:
     """Delete every CANONICAL ``.pkg`` in ``site_root/channel/varver`` beyond the
     newest ``DEFAULT_RETENTION_KEEP`` generations, newest-first by
-    ``engine.pfb_pkg.pkg_version_sort_key`` — EXCEPT a generation ``_protected_versions``
+    ``pfb_pkg.pkg_version_sort_key`` — EXCEPT a generation ``_protected_versions``
     reports as still retained by one of ``channel``'s slower channels for this same
     ``varver`` (containment-aware retention). Returns the deleted paths.
 
@@ -306,11 +291,10 @@ def prune_retained(
     rebuilt catalog; never mutates ``.pkg`` bytes, only removes whole files.
     """
     site_root = Path(site_root)
-    catalogue_dir = _catalogue_dir(site_root, channel, varver, engine)
+    catalogue_dir = _catalogue_dir(site_root, channel, varver)
     keep = DEFAULT_RETENTION_KEEP
 
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     canonical: list[tuple[object, Path, str]] = []
     for path in sorted(catalogue_dir.glob("*.pkg")):
         if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
@@ -325,9 +309,7 @@ def prune_retained(
     beyond_keep = canonical[keep:]
     # Skip the slower-channel scan entirely when nothing would be evicted anyway.
     protected = (
-        _protected_versions(site_root, channel, varver, engine=engine)
-        if beyond_keep
-        else frozenset()
+        _protected_versions(site_root, channel, varver) if beyond_keep else frozenset()
     )
     evicted = tuple(
         path for _, path, version in beyond_keep if version not in protected
@@ -338,7 +320,6 @@ def prune_retained(
 
 
 def verify_multi_destination_identity(
-    engine: Engine,
     site_root: str | Path,
     source_index: Mapping[Path, Sequence[tuple[str, str]]],
 ) -> None:
@@ -352,16 +333,11 @@ def verify_multi_destination_identity(
     ``site_root`` — this reads the real, published directories, not a scratch
     tree; there is no scratch tree in this design.
 
-    Every multi-destination source is dropped as the SAME file into every one of
-    its destinations, and ``build_repo`` writes staged bytes verbatim — so a
-    divergence here means something upstream of this check went wrong (wrong
-    file dropped, a canonical-name collision overwritten by the wrong package,
-    ...). This is the ticket's byte/checksum/provenance identity requirement as
-    an executable post-condition, not only a test assertion.
+    Every destination must carry the source package's exact bytes and provenance;
+    any divergence means the fan-out or catalogue write selected the wrong input.
     """
     site_root = Path(site_root)
-    pfb_pkg = engine.pfb_pkg
-    brp = engine.catalogue_engine
+    brp = catalogue_engine
     for source_path, destinations in source_index.items():
         if len(destinations) < 2:
             continue
