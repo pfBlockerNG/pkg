@@ -1,0 +1,5 @@
+--shell dash
+--default-path tests/shell
+--load-path tests/shell
+--require spec_helper
+--format documentation
