@@ -397,7 +397,7 @@ def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
     return identities
 
 
-def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
+def _catalogue_destination_safe(dest_dir: Path, *, root: Path) -> bool:
     try:
         relative = dest_dir.relative_to(root)
     except ValueError:
@@ -405,9 +405,20 @@ def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
     current = root
     for segment in relative.parts:
         current /= segment
-        if current.is_symlink():
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
             return False
-    if not dest_dir.is_dir() or not dest_dir.resolve().is_relative_to(root.resolve()):
+    return dest_dir.resolve().is_relative_to(root.resolve())
+
+
+def _require_safe_catalogue_destination(dest_dir: Path, *, root: Path) -> None:
+    if not _catalogue_destination_safe(dest_dir, root=root):
+        raise PublishReleaseError(
+            f"catalogue destination escapes or traverses a symlink: {dest_dir}"
+        )
+
+
+def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
+    if not _catalogue_destination_safe(dest_dir, root=root) or not dest_dir.is_dir():
         return False
     descriptor_names = ("meta", "meta.conf", "data.pkg", "packagesite.pkg")
     descriptor_paths = tuple(dest_dir / name for name in descriptor_names)
@@ -534,6 +545,7 @@ def publish(
         asset_map = _asset_map(target)
         for channel in intake.destinations:
             dest_dir = site_root / channel / varver
+            _require_safe_catalogue_destination(dest_dir, root=site_root)
             # Eviction runs FIRST: a dependency is placed only when its name is
             # missing, so an undeclared leftover under that same name has to go
             # before the drop, or the run would skip the incoming dependency and

@@ -470,6 +470,9 @@ def publish(
     site_root = Path(pkg_repo) / pr._SITE_SUBDIR
 
     for varver in sorted(targets):
+        pr._require_safe_catalogue_destination(
+            site_root / _CHANNEL / varver, root=site_root
+        )
         _reject_stale(site_root, varver, incoming_version)
 
     expected_public = pr._expected_public_member(sign_key)
