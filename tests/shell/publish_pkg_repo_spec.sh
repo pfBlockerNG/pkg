@@ -267,6 +267,7 @@ PY
 
     # Signature-only filtering uses the real local reader beside the publisher stubs.
     cp "${PFB_ROOT}/scripts/catalogue_sig_only.py" "${base}/fake-src/scripts/catalogue_sig_only.py"
+    cp "${PFB_ROOT}/scripts/catalogue_engine.py" "${base}/fake-src/scripts/catalogue_engine.py"
     cp "${PFB_ROOT}/scripts/pfb_pkg.py" "${base}/fake-src/scripts/pfb_pkg.py"
     cp "${PFB_ROOT}/scripts/publication_identity.py" "${base}/fake-src/scripts/publication_identity.py"
 
@@ -1504,6 +1505,17 @@ PY
         'packagesite.yaml=payload-A' 'packagesite.yaml.sig=repaired-2' 'packagesite.yaml.pub=public'
     write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/data.pkg" \
         'data=payload-A' 'data.sig=repaired-2' 'data.pub=public'
+    old_packagesite="${base}/corrupt-old-packagesite.pkg"
+    git_fixture -C "${base}/pkg-repo" show HEAD:docs/edge/ce-2.8/packagesite.pkg >"$old_packagesite"
+    if signature_reason="$(
+      python3 "${base}/fake-src/scripts/catalogue_sig_only.py" \
+        --require-valid-old-signature "$old_packagesite" \
+        "${base}/pkg-repo/docs/edge/ce-2.8/packagesite.pkg" 2>&1
+    )"; then
+      signature_status=0
+    else
+      signature_status=$?
+    fi
     export FAKE_MODE=phantom
     export FAKE_TOUCHED=edge/ce-2.8
     When run script "$script"
@@ -1511,6 +1523,8 @@ PY
     The output should include 'ADVANCE'
     The stderr should include 'main'
     The output should not include 'signature-only delta; not published'
+    The variable signature_status should equal 1
+    The variable signature_reason should include 'embedded catalogue signature is invalid'
   End
 
   It 'so2: one archive signature-only, the other genuinely changed -> the whole target still publishes'
