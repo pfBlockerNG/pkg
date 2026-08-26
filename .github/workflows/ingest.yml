@@ -254,12 +254,15 @@ jobs:
         if: inputs.operation == 'nightly-cleanup' && success()
         env:
           ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          NIGHTLY_VERSION: ${{ inputs.nightly_version }}
         run: |
           set -eu
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
           python3 scripts/verify_nightly_publication.py \
             --repo "$GITHUB_WORKSPACE" \
-            --source-run-id "${{ inputs.source_run_id }}" \
-            --nightly-version "${{ inputs.nightly_version }}" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --nightly-version "$NIGHTLY_VERSION" \
             --artifact-ref "$ARTIFACT_REF"
 
       - name: Record ingestion result

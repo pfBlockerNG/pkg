@@ -26,6 +26,7 @@ def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     _git(repo, "config", "commit.gpgsign", "false")
     (repo / "seed").write_text("seed\n", encoding="utf-8")
     _git(repo, "add", "seed")
+    _git(repo, "commit", "-q", "-m", "seed")
     run_id = "123:2"
     version = "20260826010101.abcdef1"
     artifact_ref = "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "a" * 64
@@ -35,7 +36,8 @@ def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
         f"pfBlockerNG-Source-Run-Id: {run_id}\n"
         f"pfBlockerNG-Nightly-Artifact-Ref: {artifact_ref}\n"
     )
-    _git(repo, "commit", "-q", "-m", message)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", message)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     return repo, run_id, version, artifact_ref
 
 
@@ -79,6 +81,24 @@ def test_cleanup_finds_receipt_behind_later_commit(
         artifact_ref=artifact_ref,
     )
     assert log.read_text().strip() == f"manifest delete --force {artifact_ref}"
+
+
+def test_cleanup_rejects_receipt_forged_only_on_dispatch_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD^")
+    log = _fake_oras(tmp_path, monkeypatch)
+    with pytest.raises(
+        verify.PublicationReceiptError, match="no committed Nightly publication"
+    ):
+        verify.cleanup(
+            repo,
+            source_run_id=run_id,
+            nightly_version=version,
+            artifact_ref=artifact_ref,
+        )
+    assert not log.exists()
 
 
 @pytest.mark.parametrize("field", ["source_run_id", "nightly_version", "artifact_ref"])

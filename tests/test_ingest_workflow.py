@@ -114,12 +114,15 @@ class IngestionWorkflowContractTests(unittest.TestCase):
                 "- name: Record ingestion result"
             )
         ]
-        for argument in (
-            '--source-run-id "${{ inputs.source_run_id }}"',
-            '--nightly-version "${{ inputs.nightly_version }}"',
+        for contract in (
+            "SOURCE_RUN_ID: ${{ inputs.source_run_id }}",
+            "NIGHTLY_VERSION: ${{ inputs.nightly_version }}",
+            'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"',
+            '--source-run-id "$SOURCE_RUN_ID"',
+            '--nightly-version "$NIGHTLY_VERSION"',
             '--artifact-ref "$ARTIFACT_REF"',
         ):
-            self.assertIn(argument, cleanup_step)
+            self.assertIn(contract, cleanup_step)
         self.assertIn("application/vnd.pfblockerng.nightly.handoff.v1+json", text)
 
     def test_tagged_stage_promote_discard_and_nightly_are_explicit(self) -> None:
