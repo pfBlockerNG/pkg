@@ -28,9 +28,9 @@
 # On a rejected push (another run advanced origin/main first), the ENTIRE cycle
 # reruns from a fresh sync — not a rebase of the local commit — because
 # the publisher's retention must see the racing run's tree, not stale local
-# state. checkout -B restores tracked files; `git clean -fd -- docs` drops
-# untracked leftovers under docs/ (issue #2407) so a dest autoindex without its
-# .pkgs cannot survive into the next attempt.
+# state. checkout -B restores tracked files; `git clean -fdx -- docs` drops
+# untracked and ignored publication leftovers under docs/ so residue from the
+# rejected local commit cannot make the fresh publisher falsely report NOOP.
 #
 # PUBLISH_STAGE additionally selects WHEN a tagged catalogue commit becomes the
 # live Pages site (issue #2389 — gate-before-announce). docs/ on `main` IS the
@@ -498,10 +498,10 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
     echo "publish-pkg-repo: sync attempt ${attempt}/${MAX_PUSH_ATTEMPTS} — fetching origin/main"
     git -C "$PKG_REPO" fetch --quiet origin main
     git -C "$PKG_REPO" checkout --quiet -B main origin/main
-    # checkout -B restores tracked files. Untracked leftovers from a rejected
-    # push (dest autoindex without its .pkgs) survive unless cleaned. Scope
-    # to docs/ so G1 debris at the repo root stays untracked (issue #2407).
-    git -C "$PKG_REPO" clean -fd -- docs
+    # checkout -B restores tracked files. Untracked or ignored publication
+    # leftovers from a rejected push survive unless cleaned. Scope to docs/ so
+    # unrelated repository-root debris stays untouched.
+    git -C "$PKG_REPO" clean -fdx -- docs
 
     case "$PUBLISH_STAGE" in
         promote)

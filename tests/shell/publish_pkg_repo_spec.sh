@@ -98,6 +98,27 @@ def main():
         print("NOOP: every destination already matches this run's verified assets")
         return 0
 
+    if mode == "retry_leftover":
+        target = os.path.join(pkg_repo, "docs", "edge", "ce-2.8")
+        leftover = os.path.join(target, "rejected-leftover.pkg")
+        descriptors = ("meta.conf", "data.pkg", "packagesite.pkg")
+        state = os.environ["FAKE_RETRY_STATE"]
+        if not os.path.exists(state):
+            with open(os.path.join(target, "first-attempt-marker.pkg"), "w") as fh:
+                fh.write("payload from rejected publisher call\n")
+            with open(state, "w") as fh:
+                fh.write("attempted\n")
+        elif os.path.exists(leftover) and all(
+            os.path.isfile(os.path.join(target, name)) for name in descriptors
+        ):
+            print("NOOP: rejected publication residue looked complete")
+            return 0
+        else:
+            with open(os.path.join(target, "landed-after-retry.pkg"), "w") as fh:
+                fh.write("payload from fresh retry\n")
+        print("updated edge/ce-2.8")
+        return 0
+
     if mode == "phantom":
         # Reports a target touched WITHOUT writing anything under docs/ — the
         # wrapper's own "reported changes but nothing is actually staged"
@@ -552,6 +573,34 @@ HOOK
     # top of the seed commit, however many attempts it took.
     commit_count="$(git_fixture -C "${base}/pkg-repo" rev-list --count main)"
     The variable commit_count should equal 2
+  End
+
+  It 'cleans ignored residue from a rejected local commit before retrying from origin/main'
+    reject_once="${base}/reject_once"
+    : >"$reject_once"
+    cat > "${base}/remote.git/hooks/pre-receive" <<HOOK
+#!/bin/sh
+if [ -f "$reject_once" ]; then
+    rm -f "$reject_once"
+    printf '%s\n' 'docs/edge/ce-2.8/rejected-leftover.pkg' >>"${base}/pkg-repo/.git/info/exclude"
+    printf '%s\n' 'ignored residue from rejected publication' >"${base}/pkg-repo/docs/edge/ce-2.8/rejected-leftover.pkg"
+    echo "simulated contention — fetch first" >&2
+    exit 1
+fi
+exit 0
+HOOK
+    chmod +x "${base}/remote.git/hooks/pre-receive"
+    export FAKE_MODE=retry_leftover
+    export FAKE_RETRY_STATE="${base}/retry-state"
+    When run script "$script"
+    The status should equal 0
+    The output should include 'sync attempt 2/5'
+    The output should include 'ADVANCE'
+    The output should not include 'rejected publication residue looked complete'
+    The stderr should include 'push rejected (attempt 1/5)'
+    The result of function remote_head_now should not equal "$original_remote_head"
+    landed="$(git_fixture -C "${base}/remote.git" ls-tree --name-only -r refs/heads/main -- docs/edge/ce-2.8/landed-after-retry.pkg)"
+    The variable landed should equal 'docs/edge/ce-2.8/landed-after-retry.pkg'
   End
 
   It 'gives up after MAX_PUSH_ATTEMPTS rejections, exits 1, and leaves the remote unmoved'

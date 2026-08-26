@@ -30,11 +30,11 @@ destination but freshly placed at another is expected, not a divergence.
 
 No-op behaviour: a ``(channel, varver)`` target whose canonical asset is already
 present, byte-identical, at the destination (dependency assets are irrelevant to this
-check — see above) AND whose catalog descriptor (meta.conf/data.pkg/packagesite.pkg)
-is complete is left untouched entirely — no copy, no prune, no regenerate. There is no
-ledger; "already published" is read straight off the files already on disk. A
-destination whose descriptor is incomplete (a prior run's write-back fault) is
-regenerated even when the ``.pkg`` payload itself is unchanged. A destination
+check — see above) AND whose ``meta``/``meta.conf``/``data.pkg``/``packagesite.pkg``
+descriptor content exactly describes every on-disk payload package is left untouched
+entirely — no copy, no prune, no regenerate. There is no ledger; "already published"
+is read straight off the files already on disk. An incomplete, unreadable, stale, or
+mismatched descriptor is regenerated even when the ``.pkg`` payload is unchanged. A
 CANONICAL file sharing an incoming asset's canonical name but carrying DIFFERENT
 bytes is never overwritten: same name/version with different bytes, source, or
 provenance raises ``DestinationConflictError`` instead.
@@ -55,10 +55,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import re
 import shutil
 import sys
+import tarfile
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -318,11 +320,140 @@ def _drop_assets(dest_dir: Path, asset_map: Mapping[str, pc.VerifiedAsset]) -> b
     return changed
 
 
-def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
-    brp = catalogue_engine
-    return all(
-        (dest_dir / name).is_file() for name in (*brp._CATALOG_PKG_FILES, "meta.conf")
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    obj: dict[str, object] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        obj[key] = value
+    return obj
+
+
+def _strict_json(raw: bytes) -> object:
+    def reject_constant(value: str) -> object:
+        raise ValueError(f"invalid JSON constant {value}")
+
+    return json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=_unique_json_object,
+        parse_constant=reject_constant,
     )
+
+
+def _catalogue_archive_payload(path: Path, member_name: str) -> bytes:
+    tar_bytes = pfb_pkg.zstd_decompress(path.read_bytes())
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as archive:
+        members = archive.getmembers()
+        names = [member.name for member in members]
+        unsigned = {member_name}
+        signed = {member_name, f"{member_name}.sig", f"{member_name}.pub"}
+        if len(names) != len(set(names)) or set(names) not in (unsigned, signed):
+            raise ValueError(f"{path.name}: invalid catalogue archive member set")
+        if any(not member.isfile() for member in members):
+            raise ValueError(f"{path.name}: catalogue members must be regular files")
+        payload_member = next(
+            member for member in members if member.name == member_name
+        )
+        payload = archive.extractfile(payload_member)
+        if payload is None:
+            raise ValueError(f"{path.name}: {member_name} carries no data")
+        return payload.read()
+
+
+def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("catalogue packages must be a non-empty array")
+    identities: set[tuple[str, str, str]] = set()
+    name_versions: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise TypeError("catalogue package row must be an object")
+        name, version, path, repopath = (
+            row.get("name"),
+            row.get("version"),
+            row.get("path"),
+            row.get("repopath"),
+        )
+        if any(
+            not isinstance(value, str) or not value
+            for value in (name, version, path, repopath)
+        ):
+            raise ValueError(
+                "catalogue name/version/path/repopath must be non-empty strings"
+            )
+        name = cast(str, name)
+        version = cast(str, version)
+        path = cast(str, path)
+        repopath = cast(str, repopath)
+        if path != repopath or Path(path).name != path:
+            raise ValueError(
+                "catalogue path/repopath must be the same package basename"
+            )
+        name_version = (name, version)
+        if name_version in name_versions:
+            raise ValueError("duplicate catalogue name/version")
+        name_versions.add(name_version)
+        identities.add((name, version, repopath))
+    return identities
+
+
+def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
+    descriptor_names = ("meta", "meta.conf", "data.pkg", "packagesite.pkg")
+    if not all((dest_dir / name).is_file() for name in descriptor_names):
+        return False
+    try:
+        meta = catalogue_engine.META_CONF.encode()
+        if any(
+            (dest_dir / name).read_bytes() != meta for name in ("meta", "meta.conf")
+        ):
+            return False
+
+        payload_identities: set[tuple[str, str, str]] = set()
+        for path in sorted(dest_dir.glob("*.pkg")):
+            if not path.is_file() or path.name in catalogue_engine._CATALOG_PKG_FILES:
+                continue
+            manifest = pfb_pkg.read_compact_manifest(path)
+            name, version = manifest.get("name"), manifest.get("version")
+            if not isinstance(name, str) or not name:
+                return False
+            if not isinstance(version, str) or not version:
+                return False
+            if path.name != f"{name}-{version}.pkg":
+                return False
+            identity = (name, version, path.name)
+            if identity in payload_identities:
+                return False
+            payload_identities.add(identity)
+        if not payload_identities:
+            return False
+
+        packagesite_raw = _catalogue_archive_payload(
+            dest_dir / "packagesite.pkg", "packagesite.yaml"
+        )
+        packagesite_rows = [
+            _strict_json(line) for line in packagesite_raw.splitlines() if line
+        ]
+        if _catalogue_identities(packagesite_rows) != payload_identities:
+            return False
+
+        data = _strict_json(_catalogue_archive_payload(dest_dir / "data.pkg", "data"))
+        if not isinstance(data, dict):
+            return False
+        if set(data) != {"groups", "expired_packages", "packages"}:
+            return False
+        if data["groups"] != [] or data["expired_packages"] != []:
+            return False
+        return _catalogue_identities(data["packages"]) == payload_identities
+    except (
+        EOFError,
+        OSError,
+        pfb_pkg.PkgError,
+        tarfile.TarError,
+        UnicodeDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        return False
 
 
 def _expected_public_member(sign_key: Path | None) -> bytes | None:
