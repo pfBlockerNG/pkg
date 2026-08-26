@@ -1473,6 +1473,28 @@ PY
     The variable porcelain should equal ''
   End
 
+  It 'so1b: a corrupt committed signature is repaired instead of filtered as signature-only'
+    mkdir -p "${base}/pkg-repo/docs/edge/ce-2.8"
+    write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/packagesite.pkg" \
+        'packagesite.yaml=payload-A' 'packagesite.yaml.sig=corrupt-1' 'packagesite.yaml.pub=public'
+    write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/data.pkg" \
+        'data=payload-A' 'data.sig=corrupt-1' 'data.pub=public'
+    git_fixture -C "${base}/pkg-repo" add docs/edge/ce-2.8
+    git_fixture -C "${base}/pkg-repo" commit -q -m 'seed corrupt signed catalog'
+    git_fixture -C "${base}/pkg-repo" push -q origin main
+    write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/packagesite.pkg" \
+        'packagesite.yaml=payload-A' 'packagesite.yaml.sig=repaired-2' 'packagesite.yaml.pub=public'
+    write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/data.pkg" \
+        'data=payload-A' 'data.sig=repaired-2' 'data.pub=public'
+    export FAKE_MODE=phantom
+    export FAKE_TOUCHED=edge/ce-2.8
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    The output should not include 'signature-only delta; not published'
+  End
+
   It 'so2: one archive signature-only, the other genuinely changed -> the whole target still publishes'
     seed_signed_catalog edge/ce-2.8 A 1
     write_min_catalog_archive "${base}/pkg-repo/docs/edge/ce-2.8/packagesite.pkg" \

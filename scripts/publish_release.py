@@ -398,6 +398,8 @@ def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
 
 
 def _catalogue_destination_safe(dest_dir: Path, *, root: Path) -> bool:
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        return False
     try:
         relative = dest_dir.relative_to(root)
     except ValueError:

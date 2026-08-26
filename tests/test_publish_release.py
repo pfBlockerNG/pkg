@@ -1946,6 +1946,31 @@ class OutcomeTests(_TempDirTestCase):
             {path.name: path.read_bytes() for path in outside.iterdir()}, before
         )
 
+    def test_symlinked_catalogue_root_is_rejected_before_mutation(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        outside = self.tmp / "outside-root"
+        outside.mkdir()
+        sentinel = outside / "sentinel.pkg"
+        sentinel.write_bytes(b"outside root must remain untouched")
+        self.pkg_repo.mkdir()
+        (self.pkg_repo / "docs").symlink_to(outside, target_is_directory=True)
+        before = {path.name: path.read_bytes() for path in outside.iterdir()}
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                tag="v4.0.0.b1",
+            )
+
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in outside.iterdir()}, before
+        )
+
     def test_incomplete_descriptor_regenerated_on_identical_rerun(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(

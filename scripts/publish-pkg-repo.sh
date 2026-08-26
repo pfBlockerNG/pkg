@@ -325,7 +325,7 @@ filter_signature_only_touched() {
             for archive in $sig_only_archives; do
                 old_tmp=$(mktemp)
                 if git -C "$PKG_REPO" show "HEAD:docs/${target}/${archive}" >"$old_tmp" 2>/dev/null \
-                    && python3 "${PFB_SRC}/scripts/catalogue_sig_only.py" "$old_tmp" "${PKG_REPO}/docs/${target}/${archive}" >/dev/null 2>&1
+                    && python3 "${PFB_SRC}/scripts/catalogue_sig_only.py" --require-valid-old-signature "$old_tmp" "${PKG_REPO}/docs/${target}/${archive}" >/dev/null 2>&1
                 then
                     :
                 else

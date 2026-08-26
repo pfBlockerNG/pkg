@@ -73,7 +73,43 @@ def public_key_members(archive: str | Path) -> list[bytes] | None:
         members = _read_members(Path(archive))
     except _READ_ERRORS:
         return None
-    return [data for name, (_kind, data) in sorted(members.items()) if name.endswith(".pub")]
+    return [
+        data for name, (_kind, data) in sorted(members.items()) if name.endswith(".pub")
+    ]
+
+
+def invalid_embedded_signature_reason(archive: str | Path) -> str | None:
+    """Reason a signed archive's embedded signature is invalid; unsigned is None."""
+    path = Path(archive)
+    try:
+        members = _read_members(path)
+    except _READ_ERRORS as exc:
+        return f"{path}: cannot read as a zstd catalogue archive: {exc}"
+    public_names = {name for name in members if name.endswith(".pub")}
+    if not public_names:
+        return None
+    payload_names = {
+        name
+        for name in members
+        if not name.endswith(".sig") and not name.endswith(".pub")
+    }
+    if len(payload_names) != 1:
+        return "signed catalogue must carry exactly one payload member"
+    payload_name = next(iter(payload_names))
+    signature_name, public_name = f"{payload_name}.sig", f"{payload_name}.pub"
+    if set(members) != {payload_name, signature_name, public_name}:
+        return "signed catalogue member set is incomplete or unexpected"
+    try:
+        from scripts import catalogue_engine
+    except ImportError:
+        import catalogue_engine
+    if not catalogue_engine.catalogue_signature_valid(
+        members[payload_name][1],
+        members[signature_name][1],
+        members[public_name][1],
+    ):
+        return "embedded catalogue signature is invalid"
+    return None
 
 
 def sig_only_reason(old_archive: str | Path, new_archive: str | Path) -> str | None:
@@ -119,9 +155,19 @@ def main(argv: list[str] | None = None) -> int:
             "otherwise, with a one-line reason on stderr."
         )
     )
+    parser.add_argument(
+        "--require-valid-old-signature",
+        action="store_true",
+        help="reject a signature-only delta when OLD carries an invalid embedded signature",
+    )
     parser.add_argument("old_archive")
     parser.add_argument("new_archive")
     args = parser.parse_args(argv)
+    if args.require_valid_old_signature:
+        reason = invalid_embedded_signature_reason(args.old_archive)
+        if reason is not None:
+            print(f"catalogue_sig_only: {reason}", file=sys.stderr)
+            return 1
 
     reason = sig_only_reason(args.old_archive, args.new_archive)
     if reason is not None:
