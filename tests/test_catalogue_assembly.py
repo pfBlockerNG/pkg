@@ -70,18 +70,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import catalogue_assembly as ca
 import catalogue_fixtures as tbrp
 import publish_catalogues as pc
-from _srcrepo import EngineRootError, resolve_src_root
 
-try:
-    _SRC_ROOT = resolve_src_root()
-    _ENGINE = pc.load_engine(_SRC_ROOT)
-    _ENGINE_SKIP_REASON = ""
-except EngineRootError as exc:  # pragma: no cover - environment gap, not a behaviour regression
-    _SRC_ROOT = None
-    _ENGINE = None
-    _ENGINE_SKIP_REASON = str(exc)
-
-_requires_engine = unittest.skipIf(_ENGINE is None, _ENGINE_SKIP_REASON)
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+_ENGINE = pc.load_engine()
+_requires_engine = unittest.skipIf(False, "")
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +92,9 @@ def _write_tar_pkg(path: Path, data: bytes) -> None:
         info.size = len(data)
         info.mtime = 0
         tf.addfile(info, io.BytesIO(data))
-    path.write_bytes(pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable"))
+    path.write_bytes(
+        pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable")
+    )
 
 
 def _make_pkg(
@@ -124,7 +118,9 @@ def _make_pkg(
     return path
 
 
-def _canonical_pkg(directory: Path, *, version: str, abi: str = "FreeBSD:15:*", **kw: str | None) -> Path:
+def _canonical_pkg(
+    directory: Path, *, version: str, abi: str = "FreeBSD:15:*", **kw: str | None
+) -> Path:
     return _make_pkg(
         directory,
         name=_ENGINE.pfb_pkg.CANONICAL_EMITTED_IDENTITY,
@@ -177,7 +173,9 @@ def _build_record(*, channel: str = "testing", release_line: str | None = None) 
     tag = {"stable": "v4.0.0", "testing": "v4.0.1.b1", "edge": "v4.0.0.b1"}[channel]
     info = pfb_pkg.parse_release_tag(tag, channel)
     native = (
-        pfb_pkg.CANONICAL_EMITTED_IDENTITY if channel == "stable" else f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{channel}"
+        pfb_pkg.CANONICAL_EMITTED_IDENTITY
+        if channel == "stable"
+        else f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{channel}"
     )
     record = {
         "schema": 1,
@@ -199,7 +197,9 @@ def _build_record(*, channel: str = "testing", release_line: str | None = None) 
     return record
 
 
-def _annotated_pkg(directory: Path, *, record: dict, local_name: str | None = None) -> Path:
+def _annotated_pkg(
+    directory: Path, *, record: dict, local_name: str | None = None
+) -> Path:
     """A minimal .pkg carrying a genuine, load_build_record-parseable pfb_build_record
     annotation. Consumed directly by verify_multi_destination_identity in these
     tests, never by build_repo/validate_project_pkg, so +COMPACT_MANIFEST alone is
@@ -210,7 +210,11 @@ def _annotated_pkg(directory: Path, *, record: dict, local_name: str | None = No
         "version": record["canonical_package_version"],
         "abi": f"FreeBSD:{record['matrix_row']['freebsd_major']}:*",
         "origin": "net/pfSense-pkg-pfBlockerNG",
-        "annotations": {pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(record, separators=(",", ":"), sort_keys=True)},
+        "annotations": {
+            pfb_pkg.PFB_BUILD_RECORD_KEY: json.dumps(
+                record, separators=(",", ":"), sort_keys=True
+            )
+        },
     }
     path = directory / (local_name or f"pkg-{next(_pkg_counter)}.pkg")
     _write_tar_pkg(path, json.dumps(manifest, separators=(",", ":")).encode())
@@ -225,7 +229,9 @@ def _drop(catalogue_dir: Path, *sources: Path) -> None:
         shutil.copy2(source, catalogue_dir / source.name)
 
 
-def _seed_canonical(tmp: Path, catalogue_dir: Path, versions: list[str], *, abi: str = "FreeBSD:15:*") -> None:
+def _seed_canonical(
+    tmp: Path, catalogue_dir: Path, versions: list[str], *, abi: str = "FreeBSD:15:*"
+) -> None:
     """Drop canonically-named .pkg fixtures for each of ``versions`` into
     ``catalogue_dir`` — shared by RetentionTests and ContainmentAwarePruningTests
     below. ``tmp`` is the scratch dir the source fixture files get written into
@@ -233,7 +239,9 @@ def _seed_canonical(tmp: Path, catalogue_dir: Path, versions: list[str], *, abi:
     for v in versions:
         _drop(
             catalogue_dir,
-            _canonical_pkg(tmp, version=v, abi=abi, local_name=f"pfSense-pkg-pfBlockerNG-{v}.pkg"),
+            _canonical_pkg(
+                tmp, version=v, abi=abi, local_name=f"pfSense-pkg-pfBlockerNG-{v}.pkg"
+            ),
         )
 
 
@@ -244,7 +252,9 @@ def _pkg_names(catalogue_dir: Path) -> list[str]:
     if not catalogue_dir.is_dir():
         return []
     return sorted(
-        p.name for p in catalogue_dir.glob("*.pkg") if p.name not in _ENGINE.catalogue_engine._CATALOG_PKG_FILES
+        p.name
+        for p in catalogue_dir.glob("*.pkg")
+        if p.name not in _ENGINE.catalogue_engine._CATALOG_PKG_FILES
     )
 
 
@@ -314,7 +324,9 @@ class VarverValidationTests(_TempDirTestCase):
         # and still raise downstream on directory-existence, silently
         # papering over a dropped guard.
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.regenerate_catalogue(self.tmp / "out", "stable", "ce-2.8/extra", engine=_ENGINE)
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "ce-2.8/extra", engine=_ENGINE
+            )
         self.assertIn("invalid varver", str(ctx.exception))
         self.assertIn("ONE segment", str(ctx.exception))
 
@@ -332,11 +344,15 @@ class VarverValidationTests(_TempDirTestCase):
 
     @_requires_engine
     def test_varver_data_pkg_rejected(self) -> None:
-        self._assert_varver_rejected("data.pkg", "collides with pkg(8) catalog plumbing")
+        self._assert_varver_rejected(
+            "data.pkg", "collides with pkg(8) catalog plumbing"
+        )
 
     @_requires_engine
     def test_varver_packagesite_pkg_rejected(self) -> None:
-        self._assert_varver_rejected("packagesite.pkg", "collides with pkg(8) catalog plumbing")
+        self._assert_varver_rejected(
+            "packagesite.pkg", "collides with pkg(8) catalog plumbing"
+        )
 
     @_requires_engine
     def test_varver_leading_hyphen_rejected(self) -> None:
@@ -364,7 +380,9 @@ class VarverValidationTests(_TempDirTestCase):
         # message text is what makes this test fail if the cap stops firing for
         # a 300-char varver specifically.
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.regenerate_catalogue(self.tmp / "out", "stable", "a" * 300, engine=_ENGINE)
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "a" * 300, engine=_ENGINE
+            )
         self.assertIn("exceeds", str(ctx.exception))
         self.assertIn("255 characters", str(ctx.exception))
 
@@ -390,7 +408,9 @@ class PathExistenceTests(_TempDirTestCase):
     @_requires_engine
     def test_catalogue_dir_missing_rejected(self) -> None:
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.regenerate_catalogue(self.tmp / "out", "stable", "ce-2.8", engine=_ENGINE)
+            ca.regenerate_catalogue(
+                self.tmp / "out", "stable", "ce-2.8", engine=_ENGINE
+            )
         self.assertIn("does not exist", str(ctx.exception))
 
     @_requires_engine
@@ -620,7 +640,9 @@ class RegenerateTwiceTrapTests(_TempDirTestCase):
         _drop(catalogue_dir, pkg)
         for _ in range(3):
             ca.regenerate_catalogue(out, "nightly", "ce-2.8", engine=_ENGINE)
-        self.assertEqual(_pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -637,7 +659,9 @@ class DirectoryDrivenChangeTests(_TempDirTestCase):
         old = _canonical_pkg(self.tmp, version="1.0.0", local_name="old.pkg")
         _drop(catalogue_dir, old)
         ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
-        self.assertEqual(_pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
+        )
 
         new = _dep_pkg(self.tmp, name="py311-charset-normalizer", version="3.4.0")
         _drop(catalogue_dir, new)
@@ -672,7 +696,9 @@ class DirectoryDrivenChangeTests(_TempDirTestCase):
 
         (catalogue_dir / "py311-charset-normalizer-3.4.0.pkg").unlink()
         ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
-        self.assertEqual(_pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
+        self.assertEqual(
+            _pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"]
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -719,7 +745,9 @@ class ReplaceInPlaceTests(_TempDirTestCase):
         ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
         ca.regenerate_catalogue(out, "testing", "ce-2.8", engine=_ENGINE)
         testing_before = {
-            p.relative_to(testing_dir): p.read_bytes() for p in sorted(testing_dir.rglob("*")) if p.is_file()
+            p.relative_to(testing_dir): p.read_bytes()
+            for p in sorted(testing_dir.rglob("*"))
+            if p.is_file()
         }
 
         (stable_dir / "pfSense-pkg-pfBlockerNG-1.0.0.pkg").unlink()
@@ -730,7 +758,9 @@ class ReplaceInPlaceTests(_TempDirTestCase):
         ca.regenerate_catalogue(out, "stable", "ce-2.8", engine=_ENGINE)
 
         testing_after = {
-            p.relative_to(testing_dir): p.read_bytes() for p in sorted(testing_dir.rglob("*")) if p.is_file()
+            p.relative_to(testing_dir): p.read_bytes()
+            for p in sorted(testing_dir.rglob("*"))
+            if p.is_file()
         }
         self.assertEqual(testing_before, testing_after)
         self.assertTrue((stable_dir / "pfSense-pkg-pfBlockerNG-2.0.0.pkg").is_file())
@@ -783,34 +813,27 @@ class RetentionTests(_TempDirTestCase):
         self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
 
     @_requires_engine
-    def test_keep_one(self) -> None:
-        out = self.tmp / "out"
-        catalogue_dir = out / "stable" / "ce-2.8"
-        self._seed(catalogue_dir, ["1.0.0", "2.0.0", "3.0.0"])
-        evicted = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: 1)
-        self.assertEqual(len(evicted), 2)
-        self.assertEqual(_pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-3.0.0.pkg"])
-
-    @_requires_engine
     def test_two_varvers_prune_independently(self) -> None:
         out = self.tmp / "out"
         dir_a = out / "stable" / "ce-2.8"
         dir_b = out / "stable" / "plus-26.03"
-        self._seed(dir_a, ["1.0.0", "2.0.0", "3.0.0"])
-        for v in ["1.0.0", "2.0.0"]:
+        self._seed(dir_a, [f"1.0.{i}" for i in range(ca.DEFAULT_RETENTION_KEEP + 1)])
+        for version in ["1.0.0", "2.0.0"]:
             _drop(
                 dir_b,
-                _canonical_pkg(self.tmp, version=v, abi="FreeBSD:16:*", local_name=f"b{v}.pkg"),
+                _canonical_pkg(
+                    self.tmp,
+                    version=version,
+                    abi="FreeBSD:16:*",
+                    local_name=f"b{version}.pkg",
+                ),
             )
 
-        def keep_for(channel: str, varver: str) -> int:
-            return {"ce-2.8": 1, "plus-26.03": 5}[varver]
-
-        evicted_a = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=keep_for)
-        evicted_b = ca.prune_retained(out, "stable", "plus-26.03", engine=_ENGINE, keep_count_for=keep_for)
-        self.assertEqual(len(evicted_a), 2)
+        evicted_a = ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
+        evicted_b = ca.prune_retained(out, "stable", "plus-26.03", engine=_ENGINE)
+        self.assertEqual(len(evicted_a), 1)
         self.assertEqual(evicted_b, ())
-        self.assertEqual(_pkg_names(dir_a), ["pfSense-pkg-pfBlockerNG-3.0.0.pkg"])
+        self.assertEqual(len(_pkg_names(dir_a)), ca.DEFAULT_RETENTION_KEEP)
         self.assertEqual(len(_pkg_names(dir_b)), 2)
 
     @_requires_engine
@@ -831,31 +854,10 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(evicted), 1)
         self.assertNotIn("py311-charset-normalizer", str(evicted[0]))
         self.assertIn("py311-charset-normalizer-3.4.0.pkg", _pkg_names(catalogue_dir))
-        canonical_remaining = [n for n in _pkg_names(catalogue_dir) if n.startswith("pfSense-pkg")]
+        canonical_remaining = [
+            n for n in _pkg_names(catalogue_dir) if n.startswith("pfSense-pkg")
+        ]
         self.assertEqual(len(canonical_remaining), ca.DEFAULT_RETENTION_KEEP)
-
-    @_requires_engine
-    def test_invalid_keep_count_rejected(self) -> None:
-        out = self.tmp / "out"
-        catalogue_dir = out / "stable" / "ce-2.8"
-        self._seed(catalogue_dir, ["1.0.0"])
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: 0)
-        self.assertIn("positive integer", str(ctx.exception))
-
-    @_requires_engine
-    def test_non_int_keep_count_rejected(self) -> None:
-        # type(keep) is not int -- a bool or float keep must be rejected the same as
-        # a plain out-of-range int (`type(...) is not int`, not `isinstance`, on
-        # purpose: bool IS an int subclass and must not sneak through as keep=True).
-        out = self.tmp / "out"
-        catalogue_dir = out / "stable" / "ce-2.8"
-        self._seed(catalogue_dir, ["1.0.0"])
-        with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: 5.0)
-        self.assertIn("positive integer", str(ctx.exception))
-        with self.assertRaises(ca.CatalogueAssemblyError):
-            ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE, keep_count_for=lambda c, v: True)
 
     @_requires_engine
     def test_canonical_manifest_version_must_be_string(self) -> None:
@@ -873,10 +875,15 @@ class RetentionTests(_TempDirTestCase):
                 if version is not None:
                     manifest["version"] = version
                 path = catalogue_dir / f"{label}.pkg"
-                _write_tar_pkg(path, json.dumps(manifest, separators=(",", ":")).encode())
+                _write_tar_pkg(
+                    path, json.dumps(manifest, separators=(",", ":")).encode()
+                )
                 with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
                     ca.prune_retained(out, "stable", "ce-2.8", engine=_ENGINE)
-                self.assertIn(f"{path}: canonical package manifest version must be a string", str(ctx.exception))
+                self.assertIn(
+                    f"{path}: canonical package manifest version must be a string",
+                    str(ctx.exception),
+                )
                 path.unlink()
 
     @_requires_engine
@@ -919,7 +926,9 @@ class ContainmentAwarePruningTests(_TempDirTestCase):
 
         self.assertEqual(evicted, ())
         self.assertEqual(len(_pkg_names(edge_dir)), len(versions))
-        self.assertIn(f"pfSense-pkg-pfBlockerNG-{versions[0]}.pkg", _pkg_names(edge_dir))
+        self.assertIn(
+            f"pfSense-pkg-pfBlockerNG-{versions[0]}.pkg", _pkg_names(edge_dir)
+        )
 
     @_requires_engine
     def test_edge_prunes_when_not_protected(self) -> None:
@@ -1034,7 +1043,12 @@ class ContainmentAwarePruningTests(_TempDirTestCase):
         _seed_canonical(self.tmp, edge_dir, versions)
         _drop(
             edge_dir,
-            _dep_pkg(self.tmp, name="py311-charset-normalizer", version="3.4.0", local_name="dep-edge.pkg"),
+            _dep_pkg(
+                self.tmp,
+                name="py311-charset-normalizer",
+                version="3.4.0",
+                local_name="dep-edge.pkg",
+            ),
         )
 
         _seed_canonical(self.tmp, stable_dir, ["9.9.9"])
@@ -1081,7 +1095,9 @@ class ContainmentBackfillTests(_TempDirTestCase):
         self.assertTrue(dest.is_file())
         self.assertEqual(dest.read_bytes(), slower.read_bytes())
         self.assertEqual(list(copied), [slower.resolve()])
-        self.assertEqual(copied[slower.resolve()], [("testing", "ce-2.8"), ("edge", "ce-2.8")])
+        self.assertEqual(
+            copied[slower.resolve()], [("testing", "ce-2.8"), ("edge", "ce-2.8")]
+        )
 
     @_requires_engine
     def test_already_identical_is_noop(self) -> None:
@@ -1174,7 +1190,9 @@ class ContainmentBackfillTests(_TempDirTestCase):
         _seed_canonical(self.tmp, testing_dir, ["1.0.0"])
         nightly_dir.mkdir(parents=True)
 
-        copied = ca.backfill_from_slower_channels(out, "nightly", "ce-2.8", engine=_ENGINE)
+        copied = ca.backfill_from_slower_channels(
+            out, "nightly", "ce-2.8", engine=_ENGINE
+        )
 
         self.assertEqual(copied, {})
         self.assertEqual(_pkg_names(nightly_dir), [])
@@ -1200,7 +1218,9 @@ class ContainmentBackfillTests(_TempDirTestCase):
         _seed_canonical(self.tmp, testing_dir, ["1.0.0"])
         stable_dir.mkdir(parents=True)
 
-        copied = ca.backfill_from_slower_channels(out, "stable", "ce-2.8", engine=_ENGINE)
+        copied = ca.backfill_from_slower_channels(
+            out, "stable", "ce-2.8", engine=_ENGINE
+        )
 
         self.assertEqual(copied, {})
         self.assertEqual(_pkg_names(stable_dir), [])
@@ -1233,7 +1253,9 @@ class SlowerChannelsConsistencyTests(unittest.TestCase):
     def test_keys_match_known_channels(self) -> None:
         self.assertEqual(set(ca._SLOWER_CHANNELS), ca._KNOWN_CHANNELS)
 
-    def test_values_are_subsets_of_known_channels_and_never_self_referential(self) -> None:
+    def test_values_are_subsets_of_known_channels_and_never_self_referential(
+        self,
+    ) -> None:
         for channel, slower in ca._SLOWER_CHANNELS.items():
             self.assertTrue(set(slower).issubset(ca._KNOWN_CHANNELS))
             self.assertNotIn(channel, slower)
@@ -1265,7 +1287,9 @@ class FanOutIdentityTests(_TempDirTestCase):
         self.assertTrue(path_b.is_file())
         data_a, data_b = path_a.read_bytes(), path_b.read_bytes()
         self.assertEqual(data_a, data_b)
-        self.assertEqual(hashlib.sha256(data_a).hexdigest(), hashlib.sha256(data_b).hexdigest())
+        self.assertEqual(
+            hashlib.sha256(data_a).hexdigest(), hashlib.sha256(data_b).hexdigest()
+        )
 
     @_requires_engine
     def test_multi_channel_fanout_identical_bytes_sha_and_record(self) -> None:
@@ -1276,7 +1300,10 @@ class FanOutIdentityTests(_TempDirTestCase):
             _drop(out / channel / "ce-2.8", shared)
             ca.regenerate_catalogue(out, channel, "ce-2.8", engine=_ENGINE)
 
-        paths = [out / channel / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg" for channel in channels]
+        paths = [
+            out / channel / "ce-2.8" / "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
+            for channel in channels
+        ]
         for p in paths:
             self.assertTrue(p.is_file())
         datas = [p.read_bytes() for p in paths]
@@ -1284,7 +1311,9 @@ class FanOutIdentityTests(_TempDirTestCase):
         self.assertTrue(all(d == datas[0] for d in datas))
         self.assertTrue(all(s == shas[0] for s in shas))
         records = [
-            _ENGINE.catalogue_engine._canonical_build_record(p, _ENGINE.pfb_pkg.read_compact_manifest(p))
+            _ENGINE.catalogue_engine._canonical_build_record(
+                p, _ENGINE.pfb_pkg.read_compact_manifest(p)
+            )
             for p in paths
         ]
         self.assertTrue(all(r == records[0] for r in records))
@@ -1299,7 +1328,9 @@ class FanOutIdentityTests(_TempDirTestCase):
         """A direct call proving verify_multi_destination_identity is a real,
         load-bearing post-condition — not merely something the happy path implies."""
         source = _canonical_pkg(self.tmp, version="4.0.0")
-        divergent = _canonical_pkg(self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL")
+        divergent = _canonical_pkg(
+            self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL"
+        )
         out = self.tmp / "out"
         (out / "stable" / "ce-2.8").mkdir(parents=True)
         (out / "testing" / "ce-2.8").mkdir(parents=True)
@@ -1312,9 +1343,13 @@ class FanOutIdentityTests(_TempDirTestCase):
         self.assertIn("multi-destination identity violation", str(ctx.exception))
 
     @_requires_engine
-    def test_all_destinations_matching_the_same_wrong_package_are_rejected(self) -> None:
+    def test_all_destinations_matching_the_same_wrong_package_are_rejected(
+        self,
+    ) -> None:
         source = _canonical_pkg(self.tmp, version="4.0.0")
-        wrong = _canonical_pkg(self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL")
+        wrong = _canonical_pkg(
+            self.tmp, version="4.0.0", origin="net/pfSense-pkg-pfBlockerNG-EVIL"
+        )
         out = self.tmp / "out"
         canonical_name = "pfSense-pkg-pfBlockerNG-4.0.0.pkg"
         destinations = [("stable", "ce-2.8"), ("testing", "ce-2.8")]
@@ -1323,7 +1358,9 @@ class FanOutIdentityTests(_TempDirTestCase):
             dest.mkdir(parents=True)
             shutil.copy2(wrong, dest / canonical_name)
         with self.assertRaises(ca.CatalogueAssemblyError) as ctx:
-            ca.verify_multi_destination_identity(_ENGINE, out, {source.resolve(): destinations})
+            ca.verify_multi_destination_identity(
+                _ENGINE, out, {source.resolve(): destinations}
+            )
         self.assertIn("multi-destination identity violation", str(ctx.exception))
 
     @_requires_engine
@@ -1354,7 +1391,9 @@ class RecordIdentityTests(_TempDirTestCase):
         out = self.tmp / "out"
         (out / "stable" / "ce-2.8").mkdir(parents=True)
         (out / "testing" / "ce-2.8").mkdir(parents=True)
-        canonical_name = f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}.pkg"
+        canonical_name = (
+            f"pfSense-pkg-pfBlockerNG-{record['canonical_package_version']}.pkg"
+        )
         dest_a = out / "stable" / "ce-2.8" / canonical_name
         dest_b = out / "testing" / "ce-2.8" / canonical_name
         shutil.copy2(source, dest_a)
@@ -1363,7 +1402,9 @@ class RecordIdentityTests(_TempDirTestCase):
 
         real_fn = _ENGINE.catalogue_engine._canonical_build_record
 
-        def _fake(path: Path, manifest: Mapping[str, object]) -> dict[str, object] | None:
+        def _fake(
+            path: Path, manifest: Mapping[str, object]
+        ) -> dict[str, object] | None:
             real = real_fn(path, manifest)
             if real is not None and Path(path) == dest_b:
                 return dict(real, release_line=f"{real['release_line']}-INJECTED")

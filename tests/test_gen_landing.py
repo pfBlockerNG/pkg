@@ -2641,6 +2641,26 @@ def test_write_site_bakes_the_sites_base_url_into_the_published_installer(tmp_pa
     assert f'url: "{_conf_url(fork_base)}/stable/ce-2.8"' in conf_text, conf_text
 
 
+def test_baked_repository_authority_is_inert_shell_data(tmp_path: Path) -> None:
+    probe = tmp_path / "pwned"
+    authority = "`touch${IFS}pwned`.example"
+    source = (_SCRIPTS_DIR / "install.sh").read_text()
+    baked = gl._bake_base_url(source, f"https://{authority}/pkg")
+    assignments = "\n".join(
+        line for line in baked.splitlines() if line.startswith(("PFB_DEFAULT_REPO_HOST=", "PFB_REPO_HOST="))
+    )
+    result = subprocess.run(
+        ["sh", "-c", f"{assignments}\nprintf '%s' \"$PFB_REPO_HOST\"\n"],
+        check=False,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == authority
+    assert not probe.exists()
+
+
 def test_write_site_bakes_a_base_url_containing_shell_metacharacters_as_inert_data(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -2772,7 +2792,7 @@ def test_build_site_tree_substitutes_base_in_non_sh_utf8_and_copies_binary_uncha
     """R4: a non-.sh UTF-8 file with {base} gets it substituted; a binary (non-UTF-8)
     file is copied unchanged, never crashing the {base} substitution pass."""
     tree = tmp_path / "tree"
-    _write_tree_file(tree, "readme.txt", "see {base}/install.sh\n".encode())
+    _write_tree_file(tree, "readme.txt", b"see {base}/install.sh\n")
     binary = bytes(range(256))
     _write_tree_file(tree, "blob.bin", binary)
 

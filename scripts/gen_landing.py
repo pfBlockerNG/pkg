@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 import repo_conf
 from pfb_pkg import (
     CANONICAL_EMITTED_IDENTITY,
+    PkgError,
     pkg_version_sort_key,
     read_compact_manifest,
 )
@@ -178,12 +179,17 @@ def artifact_epoch(manifest: dict) -> float | None:
     annotations = manifest.get("annotations")
     if not isinstance(annotations, dict):
         annotations = {}
-    for epoch in (annotations.get("created"), _build_record(manifest).get("source_date_epoch")):
+    for epoch in (
+        annotations.get("created"),
+        _build_record(manifest).get("source_date_epoch"),
+    ):
         if epoch is None:
             continue
         try:
             value = float(epoch)
-            artifact_datetime(value)  # reject out-of-range epochs the renderer would choke on
+            artifact_datetime(
+                value
+            )  # reject out-of-range epochs the renderer would choke on
             return value
         except (TypeError, ValueError, OverflowError, OSError):
             continue  # malformed or out-of-range — try the next source
@@ -213,7 +219,7 @@ def _display_epoch(path: str) -> float | None:
         return None
     try:
         manifest = read_compact_manifest(path)
-    except Exception:  # corrupt/foreign .pkg — a listing must never crash the publish
+    except (OSError, PkgError, ValueError):
         return None
     return artifact_epoch(manifest)
 
@@ -245,7 +251,11 @@ def commit_cell(sha: str) -> str:
 # pfSense edition display order + labels (the matrix `variant` field: CE / Plus).
 # A build whose ABI the matrix doesn't cover lands in a trailing "Other" section.
 EDITION_ORDER: list[str] = ["CE", "Plus"]
-EDITION_LABELS: dict[str, str] = {"CE": "pfSense CE", "Plus": "pfSense Plus", "Other": "Other builds"}
+EDITION_LABELS: dict[str, str] = {
+    "CE": "pfSense CE",
+    "Plus": "pfSense Plus",
+    "Other": "Other builds",
+}
 
 
 def _dotted_ver(token: str) -> str:
@@ -278,7 +288,9 @@ def _or_dash(value: str) -> str:
     return _esc(value) if value else '<span class="empty">&mdash;</span>'
 
 
-def collect_packages(site: str, read_manifest: Callable[[str], dict] | None = None) -> list[dict]:
+def collect_packages(
+    site: str, read_manifest: Callable[[str], dict] | None = None
+) -> list[dict]:
     """Walk <site>/, returning one row per published package (channel/name/version/abi/size/rel).
 
     A package's channel is read from its catalogue placement — the top-level directory
@@ -301,7 +313,11 @@ def collect_packages(site: str, read_manifest: Callable[[str], dict] | None = No
             if channel is None:
                 continue  # unrecognized top-level dir — not a channel; browsable only
             man = read_manifest(path)
-            name, ver, abi = man.get("name", ""), man.get("version", ""), man.get("abi", "")
+            name, ver, abi = (
+                man.get("name", ""),
+                man.get("version", ""),
+                man.get("abi", ""),
+            )
             if not is_pfblockerng_package(name):
                 continue  # a published dependency (issue #1806) — browsable, never a channel row
             deps = man.get("deps") or {}
@@ -313,7 +329,9 @@ def collect_packages(site: str, read_manifest: Callable[[str], dict] | None = No
                     "version": ver,
                     "abi": abi,
                     "size": os.path.getsize(path),
-                    "published": artifact_datetime(published_epoch) if published_epoch is not None else "",
+                    "published": artifact_datetime(published_epoch)
+                    if published_epoch is not None
+                    else "",
                     "published_epoch": published_epoch,
                     "commit": commit_sha(man),
                     # PHP/Python the build targets, read from its RUN_DEPENDS — the fallback
@@ -493,7 +511,11 @@ def _copyable(inner: str) -> str:
 def _ver_or_empty(latest: dict[str, str], channel: str) -> str:
     """The `Latest: <ver>` fragment for a channel, or an italic 'not yet published'."""
     lv = latest.get(channel)
-    return f"Latest <code>{_esc(lv)}</code>" if lv else '<span class="empty">not yet published</span>'
+    return (
+        f"Latest <code>{_esc(lv)}</code>"
+        if lv
+        else '<span class="empty">not yet published</span>'
+    )
 
 
 def _manual_conf_details(conf_fn: Callable[[str], str], channel: str) -> str:
@@ -521,7 +543,9 @@ _CARD_META: dict[str, dict[str, str]] = {
     "stable": {
         "title": "Stable",
         "badge": "",
-        "blurb": ("Final tagged releases (<code>X.Y.Z</code>) from a maintained release line. Production use."),
+        "blurb": (
+            "Final tagged releases (<code>X.Y.Z</code>) from a maintained release line. Production use."
+        ),
     },
     "testing": {
         "title": "Testing",
@@ -697,18 +721,32 @@ def _join_matrix(rows: list[dict], matrix: list[dict] | None) -> list[tuple[str,
     """
     idx = matrix_index(matrix)
     out: list[tuple[str, dict]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()  # (edition, minor, channel, version, file)
+    seen: set[tuple[str, str, str, str, str]] = (
+        set()
+    )  # (edition, minor, channel, version, file)
     for r in rows:
         entries = idx.get(r["abi"], [])
         if not entries and _is_wildcard_abi(r["abi"]):
-            entries = [e for e in (matrix or []) if _abi_matches(e.get("abi", ""), r["abi"])]
+            entries = [
+                e for e in (matrix or []) if _abi_matches(e.get("abi", ""), r["abi"])
+            ]
         vv = _row_varver(r["rel"])
-        pinned = [e for e in entries if _matrix_varver(e.get("pfsense_version", ""), e.get("variant", "")) == vv]
+        pinned = [
+            e
+            for e in entries
+            if _matrix_varver(e.get("pfsense_version", ""), e.get("variant", "")) == vv
+        ]
         entries = pinned or entries
         if entries:
             for e in entries:
                 ekey = _edition_key(e.get("variant", ""))
-                key = (ekey, e.get("pfsense_version", ""), r["channel"], r["version"], r["rel"])
+                key = (
+                    ekey,
+                    e.get("pfsense_version", ""),
+                    r["channel"],
+                    r["version"],
+                    r["rel"],
+                )
                 if key in seen:
                     continue
                 seen.add(key)
@@ -747,7 +785,9 @@ def _order_edition_keys(sections: dict[str, list[dict]]) -> list[str]:
     return keys
 
 
-def build_edition_sections(pkgs: list[dict], matrix: list[dict] | None) -> list[tuple[str, list[dict]]]:
+def build_edition_sections(
+    pkgs: list[dict], matrix: list[dict] | None
+) -> list[tuple[str, list[dict]]]:
     """Group the current installables into per-edition row lists, display-ordered.
 
     Each row is the newest version per (channel, ABI) (build_table), enriched with the
@@ -788,7 +828,11 @@ def _versions_table_html(rows: list[dict], *, with_channel: bool) -> str:
 def _row_html(r: dict, *, with_channel: bool) -> str:
     channel_td = f"<td>{_esc(r['channel'])}</td>" if with_channel else ""
     published_epoch = r.get("published_epoch")
-    published = _time_html(published_epoch) if published_epoch is not None else _or_dash(r.get("published", ""))
+    published = (
+        _time_html(published_epoch)
+        if published_epoch is not None
+        else _or_dash(r.get("published", ""))
+    )
     return (
         f"<tr><td>{_or_dash(r.get('pfsense_version', ''))}</td>{channel_td}"
         f'<td><a href="./{_esc(r["rel"])}">{_esc(r["version"])}</a></td>'
@@ -821,11 +865,15 @@ def _packages_html(pkgs: list[dict], matrix: list[dict] | None) -> str:
             older = [row for row in older_rows if row["channel"] == channel]
             if not current and not older:
                 continue
-            channel_body.append(f"<h4>{_esc(EDITION_LABELS.get(edition, edition))}</h4>")
+            channel_body.append(
+                f"<h4>{_esc(EDITION_LABELS.get(edition, edition))}</h4>"
+            )
             if current:
                 channel_body.append(_versions_table_html(current, with_channel=False))
             channel_body.append(
-                _older_nightlies_details(older) if channel == "nightly" else _older_releases_details(older)
+                _older_nightlies_details(older)
+                if channel == "nightly"
+                else _older_releases_details(older)
             )
         if channel_body:
             out.append(f"<h3>{_esc(channel.capitalize())}</h3>{''.join(channel_body)}")
@@ -846,7 +894,9 @@ def older_nightlies(pkgs: list[dict]) -> list[dict]:
     return rows
 
 
-def _older_nightlies_by_edition(pkgs: list[dict], matrix: list[dict] | None) -> dict[str, list[dict]]:
+def _older_nightlies_by_edition(
+    pkgs: list[dict], matrix: list[dict] | None
+) -> dict[str, list[dict]]:
     """The retained older nightlies grouped by edition key (matrix-joined by ABI), so each
     edition's disclosure folds in directly under that edition's table. Empty when none.
 
@@ -884,13 +934,22 @@ def older_releases(pkgs: list[dict]) -> list[dict]:
     ABI. Empty when no older versions are retained.
     """
     latest = latest_versions(pkgs)
-    rows = [p for p in pkgs if p["channel"] != "nightly" and p["version"] != latest.get(p["channel"])]
+    rows = [
+        p
+        for p in pkgs
+        if p["channel"] != "nightly" and p["version"] != latest.get(p["channel"])
+    ]
     rows.sort(key=lambda p: p["abi"])
-    rows.sort(key=lambda p: (CH_ORDER.index(p["channel"]), ver_key(p["version"])), reverse=True)
+    rows.sort(
+        key=lambda p: (CH_ORDER.index(p["channel"]), ver_key(p["version"])),
+        reverse=True,
+    )
     return rows
 
 
-def _older_releases_by_edition(pkgs: list[dict], matrix: list[dict] | None) -> dict[str, list[dict]]:
+def _older_releases_by_edition(
+    pkgs: list[dict], matrix: list[dict] | None
+) -> dict[str, list[dict]]:
     """The retained older releases grouped by edition key (matrix-joined by ABI), so each
     edition's disclosure folds in directly under that edition's table. Empty when none.
 
@@ -916,7 +975,9 @@ def _older_releases_details(rows: list[dict]) -> str:
     )
 
 
-def eol_versions(pkgs: list[dict], matrix: list[dict] | None) -> list[tuple[str, str, dict]]:
+def eol_versions(
+    pkgs: list[dict], matrix: list[dict] | None
+) -> list[tuple[str, str, dict]]:
     """The last-served .pkg for each EOL (route-only) pfSense version.
 
     A matrix entry is EOL iff ``role == "route-only"``. For each such entry, this function
@@ -959,7 +1020,9 @@ def eol_versions(pkgs: list[dict], matrix: list[dict] | None) -> list[tuple[str,
     # entry's slice would report a stale last-served version.
     by_varver: dict[str, list[dict]] = {}
     for e in eol_entries:
-        by_varver.setdefault(_matrix_varver(e.get("pfsense_version", ""), e.get("variant", "")), []).append(e)
+        by_varver.setdefault(
+            _matrix_varver(e.get("pfsense_version", ""), e.get("variant", "")), []
+        ).append(e)
 
     out: list[tuple[str, str, dict]] = []
     for varver, entries in by_varver.items():
@@ -967,13 +1030,21 @@ def eol_versions(pkgs: list[dict], matrix: list[dict] | None) -> list[tuple[str,
         # the served .pkg and the matrix entry may disagree on the CPU segment (a legacy
         # concrete-ABI asset against today's wildcarded matrix, or the reverse).
         served = varver_pkgs.get(varver, [])
-        pool = [p for p in served if any(_abi_matches(p["abi"], e.get("abi", "")) for e in entries)]
+        pool = [
+            p
+            for p in served
+            if any(_abi_matches(p["abi"], e.get("abi", "")) for e in entries)
+        ]
         if not pool:
             continue  # nothing served for this varver — skip silently
 
         # The displayed flavors come from an entry that actually matches a served file, so
         # an unserved flavor never speaks for the varver.
-        entry = next(e for e in entries if any(_abi_matches(p["abi"], e.get("abi", "")) for p in pool))
+        entry = next(
+            e
+            for e in entries
+            if any(_abi_matches(p["abi"], e.get("abi", "")) for p in pool)
+        )
         version = entry.get("pfsense_version", "")
 
         # Newest served version = highest ver_key.
@@ -1011,7 +1082,9 @@ def _eol_versions_html(pkgs: list[dict], matrix: list[dict] | None) -> str:
         by_edition.setdefault(ekey, []).append(row)
 
     ordered_keys = [k for k in EDITION_ORDER if k in by_edition]
-    ordered_keys += [k for k in sorted(by_edition) if k not in EDITION_ORDER and k != "Other"]
+    ordered_keys += [
+        k for k in sorted(by_edition) if k not in EDITION_ORDER and k != "Other"
+    ]
     if "Other" in by_edition:
         ordered_keys.append("Other")
 
@@ -1040,7 +1113,9 @@ def render_page(
     latest = latest_versions(pkgs)
     cards = "".join(_channel_card(ch, latest, conf_fn, site_tree) for ch in CH_ORDER)
     eol_block = _eol_versions_html(pkgs, matrix)
-    eol_section = f'<section class="pkg-section">{eol_block}</section>' if eol_block else ""
+    eol_section = (
+        f'<section class="pkg-section">{eol_block}</section>' if eol_block else ""
+    )
     return (
         f'<!doctype html><html lang="en">{_head("pfBlockerNG — self-hosted pkg repository")}<body>'
         f'{_SITE_HEADER}<main id="main-content" class="pkg-shell">'
@@ -1240,16 +1315,17 @@ def _bake_base_url(script_text: str, base: str) -> str:
         )
     host_count = script_text.count(_REPO_HOST_DEFAULT_LINE)
     if host_count != 1:
-        raise ValueError(f"expected exactly one PFB_REPO_HOST default line in install.sh, found {host_count}")
-    script_text = script_text.replace(
-        _REPO_HOST_DEFAULT_LINE,
-        f'PFB_REPO_HOST="${{PFB_REPO_HOST:-{_repo_host(base)}}}"',
-        1,
+        raise ValueError(
+            f"expected exactly one PFB_REPO_HOST default line in install.sh, found {host_count}"
+        )
+    host = _repo_host(base)
+    host_replacement = (
+        f"PFB_DEFAULT_REPO_HOST={_shell_single_quote(host)}\n"
+        'PFB_REPO_HOST="${PFB_REPO_HOST:-${PFB_DEFAULT_REPO_HOST}}"'
     )
+    script_text = script_text.replace(_REPO_HOST_DEFAULT_LINE, host_replacement, 1)
     base = _catalogue_base(base)
-    replacement = (
-        f'PFB_DEFAULT_BASE_URL={_shell_single_quote(base)}\nPFB_BASE_URL="${{PFB_BASE_URL:-${{PFB_DEFAULT_BASE_URL}}}}"'
-    )
+    replacement = f'PFB_DEFAULT_BASE_URL={_shell_single_quote(base)}\nPFB_BASE_URL="${{PFB_BASE_URL:-${{PFB_DEFAULT_BASE_URL}}}}"'
     return script_text.replace(_BASE_URL_DEFAULT_LINE, replacement, 1)
 
 
@@ -1273,7 +1349,9 @@ def _embed_hook(script_text: str, hook_text: str) -> str:
         None,
     )
     if begin_idx is None or end_idx is None or begin_idx >= end_idx:
-        raise ValueError(f"script is missing the embed markers ({_HOOK_EMBED_BEGIN!r} / {_HOOK_EMBED_END!r})")
+        raise ValueError(
+            f"script is missing the embed markers ({_HOOK_EMBED_BEGIN!r} / {_HOOK_EMBED_END!r})"
+        )
     if _HOOK_HEREDOC in hook_text:
         raise ValueError(
             f"hook text contains the heredoc delimiter {_HOOK_HEREDOC!r} — choose a different delimiter or fix the hook"
@@ -1365,7 +1443,9 @@ def _symlinked_component(docs: str, rel: str) -> str | None:
     return None
 
 
-def sync_site(docs: str, desired: dict[str, tuple[bytes, int]]) -> tuple[list[str], list[str]]:
+def sync_site(
+    docs: str, desired: dict[str, tuple[bytes, int]]
+) -> tuple[list[str], list[str]]:
     """Mirror *desired* into *docs*: write every desired file, then delete whatever
     under docs is neither under a ``CATALOGUE_DIRS`` prefix nor in *desired* (issue
     #2450). A catalogue-prefixed path is never added, modified, or deleted here —
@@ -1381,9 +1461,13 @@ def sync_site(docs: str, desired: dict[str, tuple[bytes, int]]) -> tuple[list[st
     """
     for rel in desired:
         if _catalogue_prefix(rel) is not None:
-            raise ValueError(f"desired site path {rel!r} sits under a catalogue-owned prefix — refusing to write")
+            raise ValueError(
+                f"desired site path {rel!r} sits under a catalogue-owned prefix — refusing to write"
+            )
         if rel.startswith("/") or any(segment == ".." for segment in rel.split("/")):
-            raise ValueError(f"desired site path {rel!r} is not a safe relative path — refusing to write")
+            raise ValueError(
+                f"desired site path {rel!r} is not a safe relative path — refusing to write"
+            )
         symlinked = _symlinked_component(docs, rel)
         if symlinked is not None:
             raise ValueError(
@@ -1422,7 +1506,9 @@ def _render_conf(base: str, channel: str) -> str:
     return repo_conf.render(url, channel).rstrip("\n")
 
 
-def write_site(site: str, base: str, site_tree: str, matrix: list[dict] | None = None) -> int:
+def write_site(
+    site: str, base: str, site_tree: str, matrix: list[dict] | None = None
+) -> int:
     """Render the pkg-site tree onto *site* (docs/) and mirror it there (issue
     #2450): build the site tree from *site_tree*, collect the published packages,
     render the landing page + the browse view (root + every catalogue dir, never
@@ -1439,7 +1525,10 @@ def write_site(site: str, base: str, site_tree: str, matrix: list[dict] | None =
 
     desired = dict(built)
     # A rendered page always wins over a same-named site-tree file (H4, issue #2450).
-    desired["index.html"] = (render_page(base, pkgs, conf_fn, built, matrix).encode(), 0o644)
+    desired["index.html"] = (
+        render_page(base, pkgs, conf_fn, built, matrix).encode(),
+        0o644,
+    )
     desired["browse.html"] = (render_browse_root(site, built).encode(), 0o644)
     for ch in CH_ORDER:
         if not os.path.isdir(os.path.join(site, ch)):
@@ -1456,10 +1545,22 @@ def write_site(site: str, base: str, site_tree: str, matrix: list[dict] | None =
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Render the pkg-site tree onto the pkg repo's docs/ and mirror it there.")
-    ap.add_argument("site", help="the docs/ tree to render into (the built catalog trees already live there)")
-    ap.add_argument("base_url", help="the package repository base URL, e.g. https://pkg.pfblockerng.com")
-    ap.add_argument("--site-tree", required=True, help="the pkg-site/ source tree to render (this repo's pkg-site/)")
+    ap = argparse.ArgumentParser(
+        description="Render the pkg-site tree onto the pkg repo's docs/ and mirror it there."
+    )
+    ap.add_argument(
+        "site",
+        help="the docs/ tree to render into (the built catalog trees already live there)",
+    )
+    ap.add_argument(
+        "base_url",
+        help="the package repository base URL, e.g. https://pkg.pfblockerng.com",
+    )
+    ap.add_argument(
+        "--site-tree",
+        required=True,
+        help="the pkg-site/ source tree to render (this repo's pkg-site/)",
+    )
     ap.add_argument(
         "--matrix",
         help="supported-versions build matrix JSON (list of {abi, pfsense_version, variant, "

@@ -9,18 +9,17 @@ is loaded from the source repository.
 from __future__ import annotations
 
 import hashlib
-import importlib
-import importlib.util
 import json
-import os
 import re
 import shutil
-import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Literal
+
+import catalogue_engine as catalogue_engine_module
+import pfb_pkg as pfb_pkg_module
 
 # --------------------------------------------------------------------------- #
 # Errors — one dedicated type per stage, all rooted at PublishError.
@@ -31,160 +30,33 @@ class PublishError(Exception):
     """Base for every error this module raises."""
 
 
-class EngineError(PublishError):
-    """The pkg-local verification engine could not be loaded."""
-
-
 class IntakeError(PublishError):
-    """One or more raw release-workflow intake fields are invalid."""
+    """Workflow intake is malformed."""
 
 
 class AssetVerificationError(PublishError):
-    """A single downloaded .pkg asset failed verification."""
+    """A downloaded package failed verification."""
 
 
 class RunVerificationError(PublishError):
-    """A whole-run cross-asset check (axes 1-13) failed."""
-
-
-# Repository-local engine modules.
-_ENGINE_MODULE_NAME = "publish_catalogues_catalogue_engine"
-
-_REQUIRED_PFB_PKG_ATTRS = (
-    "PkgError",
-    "PFB_BUILD_RECORD_KEY",
-    "CANONICAL_EMITTED_IDENTITY",
-    "validate_build_record",
-    "validate_build_matrix_row",
-    "validate_project_pkg",
-    "read_compact_manifest",
-    "load_build_record",
-    "pkg_version_sort_key",
-    # Private engine patterns _verify_dependency_asset dereferences. Allowlisted so an
-    # engine that renames one fails by name here, not on an uncaught AttributeError at
-    # the first dependency asset.
-    "_VARIANT",
-    "_PF_VERSION",
-)
-_REQUIRED_CATALOGUE_ENGINE_ATTRS = (
-    "BuildRepoError",
-    "_canonical_build_record",
-    "catalog_name_from_version",
-    "_validate_catalog_name",
-    "_pkg_matches_abi",
-    # Dereferenced by this module and catalogue_assembly.py.
-    "_PKG_SEGMENT_RE",
-    "_CATALOG_PKG_FILES",
-    "build_repo",
-    "PKGSIGN_ECDSA_HEAD",
-    "signing_public_der",
-)
+    """Cross-asset or ROUTE validation failed."""
 
 
 @dataclass(frozen=True)
 class Engine:
-    """The two loaded engine modules, plus the checkout root they came from."""
-
-    src_root: Path
     pfb_pkg: ModuleType
     catalogue_engine: ModuleType
 
 
-def load_engine(src_root: str | Path | None = None) -> Engine:
-    """Load the pkg-local engine rooted at ``src_root`` or ``PFB_SRC``."""
-    raw = src_root if src_root is not None else os.environ.get("PFB_SRC")
-    if not raw:
-        raise EngineError("no pkg checkout given: pass src_root or set PFB_SRC")
-    root = Path(raw).expanduser()
-    if not root.is_dir():
-        raise EngineError(f"PFB_SRC {str(root)!r} is not a directory")
-    scripts_dir = root / "scripts"
-    pfb_pkg_path = scripts_dir / "pfb_pkg.py"
-    catalogue_engine_path = scripts_dir / "catalogue_engine.py"
-    missing = [str(p) for p in (pfb_pkg_path, catalogue_engine_path) if not p.is_file()]
-    if missing:
-        raise EngineError(
-            f"incomplete pkg engine under PFB_SRC={str(root)!r}: missing {', '.join(missing)}"
-        )
-
-    scripts_str = str(scripts_dir)
-    path_added = scripts_str not in sys.path
-    if path_added:
-        sys.path.insert(0, scripts_str)
-
-    # Both engine modules are cached by a FIXED name (sys.modules["pfb_pkg"] /
-    # sys.modules[_ENGINE_MODULE_NAME]), so a second load_engine() call naming a
-    # different src_root would otherwise silently hand back the FIRST root's
-    # modules while this call's returned Engine.src_root claims the second root —
-    # a real but latent split (today's callers each use one root per process).
-    # Caught here, by comparing the already-cached module's own file against what
-    # THIS call would load, before either cache is trusted.
-    _require_same_origin(sys.modules.get("pfb_pkg"), pfb_pkg_path, label="pfb_pkg")
-    try:
-        pfb_pkg_mod = importlib.import_module("pfb_pkg")
-    except ImportError as exc:
-        raise EngineError(f"cannot import pfb_pkg from {scripts_dir}: {exc}") from exc
-    _require_attrs(pfb_pkg_mod, _REQUIRED_PFB_PKG_ATTRS, "pfb_pkg")
-
-    catalogue_engine_mod = sys.modules.get(_ENGINE_MODULE_NAME)
-    _require_same_origin(
-        catalogue_engine_mod, catalogue_engine_path, label="catalogue_engine"
-    )
-    if catalogue_engine_mod is None:
-        spec = importlib.util.spec_from_file_location(
-            _ENGINE_MODULE_NAME, catalogue_engine_path
-        )
-        if spec is None or spec.loader is None:
-            raise EngineError(f"cannot load module spec for {catalogue_engine_path}")
-        catalogue_engine_mod = importlib.util.module_from_spec(spec)
-        sys.modules[_ENGINE_MODULE_NAME] = catalogue_engine_mod
-        try:
-            spec.loader.exec_module(catalogue_engine_mod)
-        except Exception as exc:
-            del sys.modules[_ENGINE_MODULE_NAME]
-            raise EngineError(f"cannot load {catalogue_engine_path}: {exc}") from exc
-    _require_attrs(
-        catalogue_engine_mod,
-        _REQUIRED_CATALOGUE_ENGINE_ATTRS,
-        "catalogue_engine",
-    )
-
-    return Engine(
-        src_root=root, pfb_pkg=pfb_pkg_mod, catalogue_engine=catalogue_engine_mod
-    )
+_LOCAL_ENGINE = Engine(
+    pfb_pkg=pfb_pkg_module,
+    catalogue_engine=catalogue_engine_module,
+)
 
 
-def _require_attrs(module: ModuleType, names: Sequence[str], label: str) -> None:
-    missing = [name for name in names if not hasattr(module, name)]
-    if missing:
-        raise EngineError(
-            f"{label} engine module is missing required symbol(s): {', '.join(missing)}"
-        )
-
-
-def _require_same_origin(
-    cached: ModuleType | None, requested_path: Path, *, label: str
-) -> None:
-    """Fail loudly if ``cached`` (a module already in ``sys.modules`` under a fixed
-    name/key) was loaded from a file other than ``requested_path``.
-
-    load_engine() reuses ``cached`` as-is when present — the right behaviour for
-    a repeated call with the SAME src_root — but a caller naming a different
-    src_root in the same process must never receive that stale module silently.
-    """
-    if cached is None:
-        return
-    cached_file = getattr(cached, "__file__", None)
-    if not cached_file:
-        return
-    cached_path = Path(cached_file).resolve()
-    requested = requested_path.resolve()
-    if cached_path != requested:
-        raise EngineError(
-            f"{label} is already loaded from {cached_path} — cannot also load it from "
-            f"{requested}: load_engine() caches engine modules by a fixed name and "
-            "cannot back two different PFB_SRC checkouts in one process"
-        )
+def load_engine() -> Engine:
+    """Return the repository-local publisher engine."""
+    return _LOCAL_ENGINE
 
 
 # --------------------------------------------------------------------------- #
@@ -581,8 +453,6 @@ class RunResult:
     intake: Intake
     canonical_assets: tuple[VerifiedAsset, ...]
     dependency_assets: tuple[VerifiedAsset, ...]
-    build_route_rows: tuple[Mapping[str, object], ...]
-    route_only_rows: tuple[Mapping[str, object], ...] = field(default_factory=tuple)
 
 
 def _normalize_route_matrix(
@@ -605,7 +475,9 @@ def _normalize_route_matrix(
             raise RunVerificationError("ROUTE matrix row must be an object")
         row = dict(raw_row)
         role = row.get("role")
-        row.pop("ci", None)
+        ci = row.pop("ci", None)
+        if ci is not None and type(ci) is not bool:
+            raise RunVerificationError("ROUTE matrix ci must be boolean")
         if role not in (None, "build", "route-only"):
             raise RunVerificationError(f"ROUTE matrix row has invalid role {role!r}")
         if role == "route-only":
@@ -715,7 +587,6 @@ def verify_run(
             raise RunVerificationError(
                 f"{asset.declared_name}: dependency ABI matches no ROUTE row"
             )
-
     # Axis 12: source_run_id shape already enforced by parse_intake; recorded via intake.
     # Axis 13: destination legality (record.channel == primary) already enforced per
     # asset in verify_asset for every canonical asset.
@@ -724,6 +595,4 @@ def verify_run(
         intake=intake,
         canonical_assets=canonical,
         dependency_assets=dependency,
-        build_route_rows=tuple(build_rows.values()),
-        route_only_rows=tuple(route_only_rows.values()),
     )

@@ -1,11 +1,9 @@
 #!/bin/sh
 # render-pkg-site.sh — renders the pkg website (everything under pfBlockerNG/pkg's
 # docs/ EXCEPT the catalogue-owned trees) from this repo's pkg-site/ via
-# gen_landing.py, then commits + pushes the result onto docs/ on `main`. Split out
-# from publish-pkg-repo.sh (issue #2450 step 2): that script owns catalogue paths
-# only (docs/<stable|testing|edge|nightly>/<varver>/, docs/staging/<segment>/);
-# this script is the SOLE place that renders and ships the site around them —
-# dispatched independently, after a publish or on its own.
+# gen_landing.py, then commits and pushes a standalone site-source render.
+# Publication promotion and Nightly use publish-pkg-repo.sh's integrated renderer
+# so catalogue and site land atomically; this entry point handles site-only changes.
 #
 # GUARD: a render commit may never touch a catalogue-owned path (CATALOGUE_DIRS,
 # which MUST equal gen_landing.py's own constant of the same name) — enforced by

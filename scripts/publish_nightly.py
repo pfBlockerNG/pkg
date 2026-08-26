@@ -92,7 +92,7 @@ def _validate_handoff(
         raise PublishNightlyError(
             f"handoff exact fields required (missing={missing}, unknown={unknown})"
         )
-    if handoff["schema"] != 1:
+    if type(handoff["schema"]) is not int or handoff["schema"] != 1:
         raise PublishNightlyError(
             f"handoff schema must be 1, got {handoff['schema']!r}"
         )
@@ -605,11 +605,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    try:
-        engine = pc.load_engine()
-    except pc.EngineError as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        return 1
+    engine = pc.load_engine()
 
     try:
         report = run(

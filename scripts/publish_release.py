@@ -599,11 +599,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    try:
-        engine = pc.load_engine()
-    except pc.EngineError as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        return 1
+    engine = pc.load_engine()
 
     try:
         report = run(

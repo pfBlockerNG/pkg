@@ -70,7 +70,7 @@ def cleanup(
         artifact_ref=artifact_ref,
     )
     proc = subprocess.run(
-        ["oras", "manifest", "delete", artifact_ref],
+        ["oras", "manifest", "delete", "--force", artifact_ref],
         check=False,
         capture_output=True,
         text=True,

@@ -61,7 +61,7 @@ def test_exact_publication_receipt_allows_cleanup(
     verify.cleanup(
         repo, source_run_id=run_id, nightly_version=version, artifact_ref=artifact_ref
     )
-    assert log.read_text().strip() == f"manifest delete {artifact_ref}"
+    assert log.read_text().strip() == f"manifest delete --force {artifact_ref}"
 
 
 def test_cleanup_finds_receipt_behind_later_commit(
@@ -78,7 +78,7 @@ def test_cleanup_finds_receipt_behind_later_commit(
         nightly_version=version,
         artifact_ref=artifact_ref,
     )
-    assert log.read_text().strip() == f"manifest delete {artifact_ref}"
+    assert log.read_text().strip() == f"manifest delete --force {artifact_ref}"
 
 
 @pytest.mark.parametrize("field", ["source_run_id", "nightly_version", "artifact_ref"])

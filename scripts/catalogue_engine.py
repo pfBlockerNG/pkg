@@ -66,27 +66,12 @@ class BuildRepoError(Exception):
     """A fatal, user-facing error (bad input / collision / missing tool)."""
 
 
-def _require_wildcard_abi(path: Path, abi: object, *, route_only: bool = False) -> str:
-    """Validate ``abi`` is a NO_ARCH package's wildcard ABI, or raise ``BuildRepoError``.
-
-    Shared by ``build_repo()`` and ``_emit_catalog_from_paths()`` so the reject wording
-    (and the NO_ARCH policy behind it) has exactly one canonical source instead of two
-    verbatim-duplicated copies. Returns the validated ABI as ``str`` (narrowed via
-    ``_is_wildcard_abi``'s ``TypeGuard``) so callers need no further cast. ``route_only``
-    selects the settled pre-#1806 frozen-tag remedy without mislabeling other inputs.
-    """
+def _require_wildcard_abi(path: Path, abi: object) -> str:
+    """Validate one NO_ARCH package ABI."""
     if not _is_wildcard_abi(abi):
-        remedy = (
-            "For a frozen route-only package, a concrete ABI identifies a pre-#1806 tag; "
-            "a pre-#1806 tag is unservable as route-only. Refusing to emit it."
-            if route_only
-            else "Ship a wildcard-ABI (NO_ARCH) build instead."
-        )
         raise BuildRepoError(
-            f"{path.name}: catalog requires a NO_ARCH (wildcard-ABI) package — got "
-            f"concrete ABI {abi!r}. The catalog tree is arch-less (one directory serves "
-            f"every arch of a FreeBSD major); a concrete-ABI package would silently "
-            f"install on only one arch. {remedy}"
+            f"{path}: package ABI {abi!r} is not CPU-wildcarded; "
+            "ship a wildcard-ABI (NO_ARCH) build instead"
         )
     return abi
 
@@ -161,6 +146,8 @@ def catalog_object(manifest: dict, *, pkg_name: str, sum_: str, pkgsize: int) ->
     """Build the packagesite object for one package from its compact manifest."""
     obj: dict = {}
     for key, value in manifest.items():
+        if key in {"sum", "path", "repopath", "pkgsize"}:
+            continue
         obj[key] = value
         if key == "prefix":
             # sum immediately follows prefix; flatsize (already in the manifest)
@@ -569,61 +556,6 @@ def _validate_catalog_name(name: str, *, single_segment: bool = False) -> None:
         )
 
 
-def build_repo(
-    in_dir: Path,
-    out_dir: Path,
-    *,
-    catalog_name: str | None = None,
-    sign_key: Path | None = None,
-) -> list[str]:
-    """Build the arch-less (NO_ARCH-only) catalog from a directory of .pkg files.
-
-    Every pfBlockerNG .pkg is NO_ARCH (issue #1806): its manifest ABI is
-    CPU-wildcarded (e.g. ``"FreeBSD:15:*"``, see ``_is_wildcard_abi``), so the
-    catalog has no per-ABI subdirectory to bucket into — one directory serves
-    every CPU arch of a FreeBSD major (mirrors ``scripts/build-repo.sh``'s
-    ``require_noarch_abi``). A concrete-ABI package is a hard error — the
-    tripwire that would otherwise let it install silently on only one arch.
-    Mixing more than one ABI in a single call is also a hard error: filter
-    ``in_dir`` to one ABI and invoke once per major (mirrors build-repo.sh's
-    "mixed ABIs in one run" guard).
-
-    The catalog is written DIRECTLY at ``out_dir`` (or ``out_dir / catalog_name``
-    when supplied, e.g. ``"ce-2.8"``) — meta.conf, meta, packagesite.pkg, data.pkg,
-    plus each canonically-named ``<name>-<version>.pkg``. ``catalog_name`` is
-    validated (``_validate_catalog_name``, issue #1786) before anything is read or
-    written — it becomes a ``shutil.rmtree()``d path segment. Emission (dedup by
-    (name, version), the flavor-collision guard, the catalog descriptor) is
-    delegated to ``_emit_catalog_from_paths``. Returns the single wildcard ABI
-    built, as a one-element sorted list.
-    """
-    # `is not None`, not truthiness: an empty catalog_name is a caller bug, and
-    # silently treating it as "no catalog name" would publish at the output root.
-    if catalog_name is not None:
-        _validate_catalog_name(catalog_name)
-
-    pkgs = sorted(p for p in in_dir.glob("*.pkg") if p.is_file())
-    if not pkgs:
-        raise BuildRepoError(f"no .pkg files in {in_dir}")
-
-    # Validate every input is NO_ARCH and shares one ABI BEFORE emitting anything
-    # (fail-closed; mirrors build-repo.sh's require_noarch_abi + mixed-ABI guard).
-    abis: set[str] = set()
-    for path in pkgs:
-        manifest = read_compact_manifest(path)
-        abis.add(_require_wildcard_abi(path, manifest.get("abi")))
-    if len(abis) > 1:
-        raise BuildRepoError(
-            f"mixed ABIs in one build_repo() call: {sorted(abis)} — filter in_dir to one "
-            f"ABI and invoke once per major (mirrors build-repo.sh's per-run ABI requirement)."
-        )
-
-    catalog_root = out_dir / catalog_name if catalog_name else out_dir
-    n = _emit_catalog_from_paths(catalog_root, pkgs, root=out_dir, sign_key=sign_key)
-    sys.stderr.write(f"==> built catalog {catalog_root} ({n} package(s))\n")
-    return sorted(abis)
-
-
 def _write_catalog_dir(
     dest: Path,
     items: dict[tuple[str, str], tuple[Path, dict]],
@@ -746,12 +678,11 @@ def _require_contained(root: Path, dest: Path) -> Path:
     return dest
 
 
-def _emit_catalog_from_paths(
+def emit_catalog(
     dest: Path,
     pkg_paths: list[Path],
     *,
     root: Path,
-    route_only: bool = False,
     sign_key: Path | None = None,
 ) -> int:
     """Read each .pkg's manifest, dedup by (name, version), collision-check, emit at dest.
@@ -773,11 +704,16 @@ def _emit_catalog_from_paths(
     entries: list[tuple[Path, dict]] = [
         (p, read_compact_manifest(p)) for p in sorted(set(pkg_paths))
     ]
+    if not entries:
+        raise BuildRepoError("catalogue package pool is empty")
     for path, manifest in entries:
         _validate_annotated_project_pkg(path, manifest)
     _check_collisions(entries)
-    for path, manifest in entries:
-        _require_wildcard_abi(path, manifest.get("abi"), route_only=route_only)
+    abis = {
+        _require_wildcard_abi(path, manifest.get("abi")) for path, manifest in entries
+    }
+    if len(abis) != 1:
+        raise BuildRepoError(f"mixed ABIs in one catalogue: {sorted(abis)}")
     items: dict[tuple[str, str], tuple[Path, dict]] = {}
     for path, manifest in entries:
         nv = (manifest["name"], manifest["version"])
