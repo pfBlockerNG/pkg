@@ -231,6 +231,14 @@ def _packagesite_rows(catalogue_dir: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in payload.splitlines()]
 
 
+def _data_rows(catalogue_dir: Path) -> list[dict[str, object]]:
+    payload = _read_catalogue_member(catalogue_dir / "data.pkg", "data")
+    data = json.loads(payload)
+    if not isinstance(data, dict) or not isinstance(data.get("packages"), list):
+        raise TypeError("data.pkg does not carry a packages array")
+    return cast(list[dict[str, object]], data["packages"])
+
+
 def _write_packagesite_rows(
     catalogue_dir: Path,
     rows: Sequence[dict[str, object]],
@@ -571,6 +579,31 @@ class DigestSidecarTests(_TempDirTestCase):
                 tag="v4.0.0.b1",
             )
         self.assertIn("64 lowercase hex", str(ctx.exception))
+
+    def test_corrupt_asset_rejected_against_external_sidecar_digest(self) -> None:
+        assets_dir = self.new_assets_dir()
+        recorded = _populate_assets_dir(
+            assets_dir,
+            rows=(ROW_CE,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
+        asset = next(assets_dir.glob("*.pkg"))
+        expected = recorded[asset.name]
+        corrupted = bytearray(asset.read_bytes())
+        corrupted[len(corrupted) // 2] ^= 1
+        asset.write_bytes(corrupted)
+        self.assertNotEqual(hashlib.sha256(corrupted).hexdigest(), expected)
+
+        with self.assertRaises(pc.AssetVerificationError) as ctx:
+            _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                tag="v4.0.0.b1",
+            )
+
+        self.assertIn("sha256 mismatch", str(ctx.exception))
 
 
 class AssetDiscoveryTests(_TempDirTestCase):
@@ -1632,7 +1665,7 @@ class OutcomeTests(_TempDirTestCase):
         self.assertEqual(report.touched, (("edge", "ce-2.8"),))
         self.assertEqual(
             {
-                (row["name"], row["version"], row["repopath"])
+                (row["name"], row["version"], row["path"], row["repopath"])
                 for row in _packagesite_rows(catalogue_dir)
             },
             {
@@ -1640,31 +1673,33 @@ class OutcomeTests(_TempDirTestCase):
                     "pfSense-pkg-pfBlockerNG",
                     "4.0.0.b1",
                     "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg",
+                    "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg",
                 )
             },
         )
 
-    def test_descriptor_validation_rejects_hostile_or_mismatched_content(
+    def test_second_publish_repairs_hostile_or_mismatched_descriptors(
         self,
     ) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
             assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
         )
-        _run(
+        first = _run(
             pkg_repo=self.pkg_repo,
             assets_dir=assets_dir,
             rows=(ROW_CE,),
             tag="v4.0.0.b1",
         )
+        self.assertEqual(first.touched, (("edge", "ce-2.8"),))
         site_root = self.pkg_repo / "docs"
-        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        catalogue_dir = site_root / "edge" / "ce-2.8"
         pristine = {path.name: path.read_bytes() for path in catalogue_dir.iterdir()}
-        valid_rows = _packagesite_rows(catalogue_dir)
-        row = valid_rows[0]
-        valid_row_json = json.dumps(row, separators=(",", ":")).encode("utf-8")
+        row = _packagesite_rows(catalogue_dir)[0]
+        valid_row_json = json.dumps(row, separators=(",", ":")).encode()
         valid_packagesite_payload = valid_row_json + b"\n"
         valid_data_payload = _read_catalogue_member(catalogue_dir / "data.pkg", "data")
+        valid_data = json.loads(valid_data_payload)
         name_field = f'"name":{json.dumps(row["name"])}'.encode()
         duplicate_key_json = (
             valid_row_json.replace(name_field, name_field + b"," + name_field, 1)
@@ -1678,6 +1713,51 @@ class OutcomeTests(_TempDirTestCase):
             for name, data in pristine.items():
                 (catalogue_dir / name).write_bytes(data)
 
+        def assert_repaired() -> None:
+            retry_assets = self.new_assets_dir()
+            _populate_assets_dir(
+                retry_assets,
+                rows=(ROW_CE,),
+                source_tag="v4.0.0.b1",
+                include_dependency=False,
+            )
+            report = _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=retry_assets,
+                rows=(ROW_CE,),
+                tag="v4.0.0.b1",
+            )
+            self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+            self.assertTrue(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
+            packagesite_rows = _packagesite_rows(catalogue_dir)
+            data_rows = _data_rows(catalogue_dir)
+            self.assertEqual(data_rows, packagesite_rows)
+            payloads = {
+                path.name: path
+                for path in catalogue_dir.glob("*.pkg")
+                if path.name not in catalogue_engine._CATALOG_PKG_FILES
+            }
+            self.assertEqual(
+                {item["repopath"] for item in packagesite_rows}, set(payloads)
+            )
+            for item in packagesite_rows:
+                name = cast(str, item["repopath"])
+                path = payloads[name]
+                package_bytes = path.read_bytes()
+                manifest = pfb_pkg.read_compact_manifest(path)
+                self.assertEqual(item["path"], name)
+                self.assertEqual(item["pkgsize"], len(package_bytes))
+                self.assertEqual(
+                    item["sum"], catalogue_engine.pkg_checksum(package_bytes)
+                )
+                self.assertEqual(
+                    set(item), set(manifest) | {"sum", "path", "repopath", "pkgsize"}
+                )
+                for key, value in manifest.items():
+                    self.assertEqual(item[key], value, key)
+
         for name in ("meta", "meta.conf"):
             with self.subTest(case=f"invalid {name}"):
                 restore()
@@ -1685,6 +1765,7 @@ class OutcomeTests(_TempDirTestCase):
                 self.assertFalse(
                     pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
                 )
+                assert_repaired()
 
         archive_cases = (
             ("truncated archive", None, b"truncated", ()),
@@ -1729,6 +1810,7 @@ class OutcomeTests(_TempDirTestCase):
                 self.assertFalse(
                     pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
                 )
+                assert_repaired()
 
         with self.subTest(case="raw tar framing"):
             restore()
@@ -1738,14 +1820,15 @@ class OutcomeTests(_TempDirTestCase):
             self.assertFalse(
                 pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
             )
+            assert_repaired()
 
-        with self.subTest(case="non-regular archive member"):
+        with self.subTest(case="non-regular symlink archive member"):
             restore()
             raw = io.BytesIO()
             with tarfile.open(fileobj=raw, mode="w") as archive:
                 member = tarfile.TarInfo("packagesite.yaml")
                 member.type = tarfile.SYMTYPE
-                member.linkname = valid_packagesite_payload.decode()
+                member.linkname = "elsewhere"
                 archive.addfile(member)
             (catalogue_dir / "packagesite.pkg").write_bytes(
                 pfb_pkg.zstd_compress(
@@ -1755,42 +1838,7 @@ class OutcomeTests(_TempDirTestCase):
             self.assertFalse(
                 pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
             )
-
-        with self.subTest(case="symlinked descriptor"):
-            restore()
-            outside_meta = self.tmp / "outside-meta"
-            outside_meta.write_bytes(pristine["meta"])
-            (catalogue_dir / "meta").unlink()
-            (catalogue_dir / "meta").symlink_to(outside_meta)
-            self.assertFalse(
-                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
-            )
-
-        with self.subTest(case="symlinked payload"):
-            restore()
-            payload_path = next(
-                path
-                for path in catalogue_dir.glob("*.pkg")
-                if path.name not in catalogue_engine._CATALOG_PKG_FILES
-            )
-            outside_payload = self.tmp / payload_path.name
-            outside_payload.write_bytes(payload_path.read_bytes())
-            payload_path.unlink()
-            payload_path.symlink_to(outside_payload)
-            self.assertFalse(
-                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
-            )
-
-        with self.subTest(case="symlinked destination"):
-            restore()
-            linked_dest = site_root / "edge" / "linked"
-            linked_dest.symlink_to(catalogue_dir, target_is_directory=True)
-            try:
-                self.assertFalse(
-                    pr._catalogue_descriptor_complete(linked_dest, root=site_root)
-                )
-            finally:
-                linked_dest.unlink()
+            assert_repaired()
 
         row_cases = (
             ("missing payload", ()),
@@ -1814,15 +1862,13 @@ class OutcomeTests(_TempDirTestCase):
             ("non-string identity", ({**row, "version": 400},)),
             ("wrong name", ({**row, "name": "other"},)),
             ("wrong version", ({**row, "version": "3.3.0"},)),
-            (
-                "path/repopath mismatch",
-                ({**row, "path": "other.pkg"},),
-            ),
-            (
-                "non-finite JSON constant",
-                ({**row, "pkgsize": float("nan")},),
-            ),
+            ("path/repopath mismatch", ({**row, "path": "other.pkg"},)),
+            ("NaN", ({**row, "pkgsize": float("nan")},)),
+            ("Infinity", ({**row, "pkgsize": float("inf")},)),
+            ("negative Infinity", ({**row, "pkgsize": float("-inf")},)),
             ("wrong finite pkgsize", ({**row, "pkgsize": 1},)),
+            ("wrong checksum", ({**row, "sum": "1$" + "0" * 64},)),
+            ("wrong manifest field", ({**row, "origin": "security/not-this-port"},)),
             (
                 "hostile package path",
                 ({**row, "path": "../payload.pkg", "repopath": "../payload.pkg"},),
@@ -1839,19 +1885,23 @@ class OutcomeTests(_TempDirTestCase):
                 self.assertFalse(
                     pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
                 )
+                assert_repaired()
 
         with self.subTest(case="unexpected valid on-disk payload"):
             restore()
-            _wrap_dependency_pkg(
+            extra, _digest = _wrap_dependency_pkg(
                 catalogue_dir,
                 name="extra",
                 version="1.0",
                 abi="FreeBSD:15:*",
                 local_name="extra-1.0.pkg",
             )
+            self.assertEqual(pfb_pkg.read_compact_manifest(extra)["name"], "extra")
             self.assertFalse(
                 pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
             )
+            assert_repaired()
+            self.assertFalse(extra.exists())
 
         with self.subTest(case="malformed on-disk payload"):
             restore()
@@ -1860,11 +1910,25 @@ class OutcomeTests(_TempDirTestCase):
                 pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
             )
 
-        data_cases = (
+        data_duplicate_key = valid_data_payload.replace(
+            b'"groups":[]', b'"groups":[],"groups":[]', 1
+        )
+        data_row_cases = (
+            ("wrong data finite pkgsize", {**row, "pkgsize": 1}),
+            ("wrong data checksum", {**row, "sum": "1$" + "0" * 64}),
+            (
+                "wrong data manifest field",
+                {**row, "origin": "security/not-this-port"},
+            ),
+            ("data NaN", {**row, "pkgsize": float("nan")}),
+            ("data Infinity", {**row, "pkgsize": float("inf")}),
+        )
+        data_cases = [
             ("invalid data archive", None, b"truncated"),
             ("invalid data UTF-8", "data", b"\xff"),
             ("invalid data JSON", "data", b"{"),
-            ("wrong data member", "../data", valid_data_payload),
+            ("hostile data member", "../data", valid_data_payload),
+            ("duplicate data JSON key", "data", data_duplicate_key),
             (
                 "mismatched data packages",
                 "data",
@@ -1873,6 +1937,17 @@ class OutcomeTests(_TempDirTestCase):
                     separators=(",", ":"),
                 ).encode(),
             ),
+        ]
+        data_cases.extend(
+            (
+                label,
+                "data",
+                json.dumps(
+                    {**valid_data, "packages": [bad_row]},
+                    separators=(",", ":"),
+                ).encode(),
+            )
+            for label, bad_row in data_row_cases
         )
         for label, member_name, payload in data_cases:
             with self.subTest(case=label):
@@ -1886,6 +1961,7 @@ class OutcomeTests(_TempDirTestCase):
                 self.assertFalse(
                     pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
                 )
+                assert_repaired()
 
     def test_same_bytes_repair_malformed_data_descriptor(self) -> None:
         assets_dir = self.new_assets_dir()
@@ -1945,6 +2021,48 @@ class OutcomeTests(_TempDirTestCase):
 
         self.assertEqual(
             {path.name: path.read_bytes() for path in outside.iterdir()}, before
+        )
+
+    def test_all_tagged_destinations_are_checked_before_any_mutation(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir,
+            channel="testing",
+            rows=(ROW_CE,),
+            source_tag="v4.0.1.b1",
+            include_dependency=False,
+        )
+        outside = self.tmp / "outside-later-destination"
+        outside.mkdir()
+        (outside / "sentinel.pkg").write_bytes(b"outside must remain byte-identical")
+        unsafe = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        unsafe.parent.mkdir(parents=True)
+        unsafe.symlink_to(outside, target_is_directory=True)
+        safe = self.pkg_repo / "docs" / "testing" / "ce-2.8"
+        outside_before = {
+            path.relative_to(outside): path.read_bytes()
+            for path in outside.rglob("*")
+            if path.is_file()
+        }
+
+        with self.assertRaises(pr.PublishReleaseError):
+            _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                channel="testing",
+                destinations='["testing","edge"]',
+                tag="v4.0.1.b1",
+            )
+
+        self.assertFalse(safe.exists())
+        self.assertEqual(
+            {
+                path.relative_to(outside): path.read_bytes()
+                for path in outside.rglob("*")
+                if path.is_file()
+            },
+            outside_before,
         )
 
     def test_symlinked_catalogue_root_is_rejected_before_mutation(self) -> None:

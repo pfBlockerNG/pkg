@@ -152,6 +152,9 @@ def main():
         return 0
 
     if mode == "real_race":
+        target = os.path.join(pkg_repo, "docs", "edge", "ce-2.8")
+        leftover = os.path.join(target, "rejected-leftover.pkg")
+        descriptors = ("meta.conf", "data.pkg", "packagesite.pkg")
         state = os.environ["FAKE_RACE_STATE"]
         if not os.path.exists(state):
             subprocess.run(
@@ -167,9 +170,15 @@ def main():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            with open(leftover, "w") as fh:
+                fh.write("ignored residue from rejected publication\n")
             with open(state, "w") as fh:
                 fh.write("advanced\n")
-
+        elif os.path.exists(leftover) and all(
+            os.path.isfile(os.path.join(target, name)) for name in descriptors
+        ):
+            print("NOOP: rejected publication residue looked complete")
+            return 0
     for target in os.environ.get("FAKE_TOUCHED", "").split(","):
         target = target.strip()
         if not target:
@@ -603,6 +612,8 @@ HOOK
     printf '%s\n' competitor >"${base}/competitor/docs/competitor.txt"
     git_fixture -C "${base}/competitor" add docs/competitor.txt
     git_fixture -C "${base}/competitor" commit -q -m competitor
+    printf '%s\n' 'ignored-root.txt' 'docs/edge/ce-2.8/rejected-leftover.pkg' >>"${base}/pkg-repo/.git/info/exclude"
+    printf '%s\n' 'must survive docs cleanup' >"${base}/pkg-repo/ignored-root.txt"
     export FAKE_MODE=real_race
     export FAKE_TOUCHED=edge/ce-2.8
     export FAKE_RACE_STATE="${base}/race-state"
@@ -612,12 +623,19 @@ HOOK
     The output should include 'sync attempt 2/5'
     The output should include 'ADVANCE'
     The stderr should include 'fetch first'
+    The output should not include 'rejected publication residue looked complete'
     competitor_landed="$(git_fixture -C "${base}/remote.git" show refs/heads/main:docs/competitor.txt)"
     The variable competitor_landed should equal 'competitor'
     marker_landed="$(git_fixture -C "${base}/remote.git" show refs/heads/main:docs/edge/ce-2.8/marker.pkg)"
     The variable marker_landed should equal 'edge/ce-2.8'
     commit_count="$(git_fixture -C "${base}/remote.git" rev-list --count refs/heads/main)"
     The variable commit_count should equal 3
+    rejected_landed="$(git_fixture -C "${base}/remote.git" ls-tree --name-only -r refs/heads/main -- docs/edge/ce-2.8/rejected-leftover.pkg)"
+    The variable rejected_landed should equal ''
+    The path "${base}/pkg-repo/docs/edge/ce-2.8/rejected-leftover.pkg" should not be exist
+    The path "${base}/pkg-repo/ignored-root.txt" should be file
+    ignored_root="$(cat "${base}/pkg-repo/ignored-root.txt")"
+    The variable ignored_root should equal 'must survive docs cleanup'
   End
 
   It 'cleans ignored residue from a rejected local commit before retrying from origin/main'

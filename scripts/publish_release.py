@@ -547,6 +547,12 @@ def publish(
     site_root = Path(pkg_repo) / _SITE_SUBDIR
     targets = _build_targets(run_result)
 
+    for varver in sorted(targets):
+        for channel in intake.destinations:
+            _require_safe_catalogue_destination(
+                site_root / channel / varver, root=site_root
+            )
+
     expected_public = _expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
     source_index: dict[Path, list[tuple[str, str]]] = {}
@@ -555,7 +561,6 @@ def publish(
         asset_map = _asset_map(target)
         for channel in intake.destinations:
             dest_dir = site_root / channel / varver
-            _require_safe_catalogue_destination(dest_dir, root=site_root)
             # Eviction runs FIRST: a dependency is placed only when its name is
             # missing, so an undeclared leftover under that same name has to go
             # before the drop, or the run would skip the incoming dependency and
