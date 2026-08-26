@@ -3069,6 +3069,27 @@ def test_write_site_base_with_trailing_slash_stripped_once(tmp_path: Path, monke
     assert "https://x/pkg//install.sh" not in recipe
 
 
+
+@pytest.mark.parametrize("channel", ("stable", "testing", "edge", "nightly"))
+def test_real_channel_recipe_is_the_canonical_one_line_installer(channel: str) -> None:
+    recipe = (_PKG_SITE_DIR / "recipes" / f"{channel}.sh").read_text(encoding="utf-8")
+    assert recipe == f"fetch -qo - {{base}}/install.sh | sh -s -- --channel {channel}\n"
+
+
+def _shell_catalogue_dirs(path: Path) -> tuple[str, ...]:
+    prefix = 'CATALOGUE_DIRS="'
+    line = next(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith(prefix)
+    )
+    return tuple(line.removeprefix(prefix).removesuffix('"').split())
+
+
+def test_catalogue_ownership_prefixes_match_every_renderer_and_publisher() -> None:
+    assert _shell_catalogue_dirs(_SCRIPTS_DIR / "render-pkg-site.sh") == gl.CATALOGUE_DIRS
+    assert _shell_catalogue_dirs(_SCRIPTS_DIR / "publish-pkg-repo.sh") == gl.CATALOGUE_DIRS
+
 # ── write_site / main(): the pkg-site renderer CLI (issue #2450) ──────────────
 
 
