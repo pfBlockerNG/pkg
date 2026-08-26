@@ -135,9 +135,11 @@ def _route_matrix(value: object) -> list[dict[str, object]]:
             if not isinstance(raw_row, Mapping):
                 raise HandoffError("route_matrix rows must be JSON objects")
             route_row = dict(raw_row)
-            ci = route_row.pop("ci", None)
-            if ci is not None and type(ci) is not bool:
-                raise HandoffError("route_matrix row ci must be boolean")
+            ci = None
+            if "ci" in route_row:
+                ci = route_row.pop("ci")
+                if type(ci) is not bool:
+                    raise HandoffError("route_matrix row ci must be boolean")
             role = route_row.get("role")
             if role == "route-only":
                 del route_row["role"]
@@ -654,6 +656,7 @@ def _validate_dependency_package(
         if (
             entry["uname"] != "root"
             or entry["gname"] != "wheel"
+            or type(entry["fflags"]) is not int
             or entry["fflags"] != 0
             or not isinstance(perm, str)
             or not re.fullmatch(r"0[0-7]{3}", perm)
@@ -672,7 +675,8 @@ def _validate_dependency_package(
             or member.gname != "wheel"
             or member.mode != mode
             or mode != expected_mode
-            or int(member.mtime) != mtime
+            or type(member.mtime) is not int
+            or member.mtime != mtime
             or mtime != identity["source_date_epoch"]
             or member.size != len(data)
             or ("size" in entry and size != len(data))
