@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeGuard
@@ -314,6 +315,58 @@ def catalog_signature(data: bytes, sign_key: Path) -> bytes:
     return PKGSIGN_ECDSA_HEAD + _openssl(
         ["dgst", "-sha256", "-sign", str(sign_key)], stdin=message
     )
+
+
+def catalogue_signature_valid(
+    data: bytes, signature_member: bytes, public_member: bytes
+) -> bool:
+    """Whether pkg's embedded ECDSA signature verifies ``data``."""
+    head = PKGSIGN_ECDSA_HEAD
+    if not signature_member.startswith(head) or not public_member.startswith(head):
+        return False
+    signature = signature_member[len(head) :]
+    public_der = public_member[len(head) :]
+    if not signature or not public_der:
+        return False
+    with tempfile.TemporaryDirectory(prefix="pfb-catalogue-verify-") as tmp:
+        root = Path(tmp)
+        signature_path = root / "signature"
+        public_path = root / "public.der"
+        signature_path.write_bytes(signature)
+        public_path.write_bytes(public_der)
+        try:
+            public_text = _openssl(
+                [
+                    "pkey",
+                    "-pubin",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    str(public_path),
+                    "-text",
+                    "-noout",
+                ]
+            ).decode(errors="replace")
+            curve = re.search(r"^\s*ASN1 OID:\s*(\S+)\s*$", public_text, re.MULTILINE)
+            if curve is None or curve.group(1) not in PKG_ACCEPTED_CURVES:
+                return False
+            message = hashlib.sha256(data).hexdigest().encode()
+            _openssl(
+                [
+                    "dgst",
+                    "-sha256",
+                    "-verify",
+                    str(public_path),
+                    "-keyform",
+                    "DER",
+                    "-signature",
+                    str(signature_path),
+                ],
+                stdin=message,
+            )
+        except BuildRepoError:
+            return False
+    return True
 
 
 # Archive emission (zstd tar) — same framing contract as build-pkg-portable.py:

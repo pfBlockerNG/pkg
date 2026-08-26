@@ -1571,6 +1571,11 @@ class OutcomeTests(_TempDirTestCase):
             tag="v4.0.0.b1",
         )
         self.assertTrue(first.touched)
+        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        before = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in catalogue_dir.iterdir()
+        }
 
         second_assets_dir = self.new_assets_dir()
         _populate_assets_dir(second_assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1")
@@ -1586,6 +1591,11 @@ class OutcomeTests(_TempDirTestCase):
             second.describe(),
             ["NOOP: every destination already matches this run's verified assets"],
         )
+        after = {
+            path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in catalogue_dir.iterdir()
+        }
+        self.assertEqual(after, before)
 
     def test_same_bytes_repair_stale_packagesite(self) -> None:
         assets_dir = self.new_assets_dir()
@@ -1647,13 +1657,21 @@ class OutcomeTests(_TempDirTestCase):
             rows=(ROW_CE,),
             tag="v4.0.0.b1",
         )
+        site_root = self.pkg_repo / "docs"
         catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
         pristine = {path.name: path.read_bytes() for path in catalogue_dir.iterdir()}
         valid_rows = _packagesite_rows(catalogue_dir)
+        row = valid_rows[0]
+        valid_row_json = json.dumps(row, separators=(",", ":")).encode("utf-8")
+        name_field = f'"name":{json.dumps(row["name"])}'.encode()
+        duplicate_key_json = (
+            valid_row_json.replace(name_field, name_field + b"," + name_field, 1)
+            + b"\n"
+        )
 
         def restore() -> None:
             for path in catalogue_dir.iterdir():
-                if path.name not in pristine:
+                if path.is_symlink() or path.name not in pristine:
                     path.unlink()
             for name, data in pristine.items():
                 (catalogue_dir / name).write_bytes(data)
@@ -1662,7 +1680,9 @@ class OutcomeTests(_TempDirTestCase):
             with self.subTest(case=f"invalid {name}"):
                 restore()
                 (catalogue_dir / name).write_text("invalid", encoding="utf-8")
-                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+                self.assertFalse(
+                    pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+                )
 
         archive_cases = (
             ("truncated archive", None, b"truncated", ()),
@@ -1680,6 +1700,12 @@ class OutcomeTests(_TempDirTestCase):
                 b"{}\n",
                 (("packagesite.yaml", b"{}\n"),),
             ),
+            (
+                "duplicate JSON key",
+                "packagesite.yaml",
+                duplicate_key_json,
+                (),
+            ),
         )
         for label, member_name, payload, extra_members in archive_cases:
             with self.subTest(case=label):
@@ -1693,9 +1719,72 @@ class OutcomeTests(_TempDirTestCase):
                         payload,
                         extra_members=extra_members,
                     )
-                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+                self.assertFalse(
+                    pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+                )
 
-        row = valid_rows[0]
+        with self.subTest(case="raw tar framing"):
+            restore()
+            (catalogue_dir / "packagesite.pkg").write_bytes(
+                pfb_pkg.zstd_decompress(pristine["packagesite.pkg"])
+            )
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
+
+        with self.subTest(case="non-regular archive member"):
+            restore()
+            raw = io.BytesIO()
+            with tarfile.open(fileobj=raw, mode="w") as archive:
+                member = tarfile.TarInfo("packagesite.yaml")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "elsewhere"
+                archive.addfile(member)
+            (catalogue_dir / "packagesite.pkg").write_bytes(
+                pfb_pkg.zstd_compress(
+                    raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable"
+                )
+            )
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
+
+        with self.subTest(case="symlinked descriptor"):
+            restore()
+            outside_meta = self.tmp / "outside-meta"
+            outside_meta.write_bytes(pristine["meta"])
+            (catalogue_dir / "meta").unlink()
+            (catalogue_dir / "meta").symlink_to(outside_meta)
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
+
+        with self.subTest(case="symlinked payload"):
+            restore()
+            payload_path = next(
+                path
+                for path in catalogue_dir.glob("*.pkg")
+                if path.name not in catalogue_engine._CATALOG_PKG_FILES
+            )
+            outside_payload = self.tmp / payload_path.name
+            outside_payload.write_bytes(payload_path.read_bytes())
+            payload_path.unlink()
+            payload_path.symlink_to(outside_payload)
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
+
+        with self.subTest(case="symlinked destination"):
+            restore()
+            linked_dest = site_root / "edge" / "linked"
+            linked_dest.symlink_to(catalogue_dir, target_is_directory=True)
+            try:
+                self.assertFalse(
+                    pr._catalogue_descriptor_complete(linked_dest, root=site_root)
+                )
+            finally:
+                linked_dest.unlink()
+
         row_cases = (
             ("missing payload", ()),
             ("duplicate row", (row, row)),
@@ -1719,6 +1808,14 @@ class OutcomeTests(_TempDirTestCase):
             ("wrong name", ({**row, "name": "other"},)),
             ("wrong version", ({**row, "version": "3.3.0"},)),
             (
+                "path/repopath mismatch",
+                ({**row, "path": "other.pkg"},),
+            ),
+            (
+                "non-finite JSON constant",
+                ({**row, "pkgsize": float("nan")},),
+            ),
+            (
                 "hostile package path",
                 ({**row, "path": "../payload.pkg", "repopath": "../payload.pkg"},),
             ),
@@ -1731,24 +1828,29 @@ class OutcomeTests(_TempDirTestCase):
             with self.subTest(case=label):
                 restore()
                 _write_packagesite_rows(catalogue_dir, rows)
-                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
-
-        with self.subTest(case="unexpected on-disk payload"):
-            restore()
-            (catalogue_dir / "unexpected.pkg").write_bytes(
-                next(
-                    data
-                    for name, data in pristine.items()
-                    if name.endswith(".pkg")
-                    and name not in catalogue_engine._CATALOG_PKG_FILES
+                self.assertFalse(
+                    pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
                 )
+
+        with self.subTest(case="unexpected valid on-disk payload"):
+            restore()
+            _wrap_dependency_pkg(
+                catalogue_dir,
+                name="extra",
+                version="1.0",
+                abi="FreeBSD:15:*",
+                local_name="extra-1.0.pkg",
             )
-            self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
 
         with self.subTest(case="malformed on-disk payload"):
             restore()
             (catalogue_dir / "malformed.pkg").write_bytes(b"not a package")
-            self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+            self.assertFalse(
+                pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+            )
 
         data_cases = (
             ("invalid data archive", None, b"truncated"),
@@ -1773,7 +1875,43 @@ class OutcomeTests(_TempDirTestCase):
                     _write_catalogue_archive(
                         catalogue_dir / "data.pkg", member_name, payload
                     )
-                self.assertFalse(pr._catalogue_descriptor_complete(catalogue_dir))
+                self.assertFalse(
+                    pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+                )
+
+    def test_same_bytes_repair_malformed_data_descriptor(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+        )
+        _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
+        site_root = self.pkg_repo / "docs"
+        catalogue_dir = site_root / "edge" / "ce-2.8"
+        (catalogue_dir / "data.pkg").write_bytes(b"truncated")
+
+        retry_assets = self.new_assets_dir()
+        _populate_assets_dir(
+            retry_assets,
+            rows=(ROW_CE,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+        )
+        report = _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=retry_assets,
+            rows=(ROW_CE,),
+            tag="v4.0.0.b1",
+        )
+
+        self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+        self.assertTrue(
+            pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+        )
 
     def test_incomplete_descriptor_regenerated_on_identical_rerun(self) -> None:
         assets_dir = self.new_assets_dir()
@@ -2585,6 +2723,31 @@ class ResignUnsignedCatalogueTests(_TempDirTestCase):
         key = tbrp._gen_key(self.tmp / "repo.key")
         self.assertEqual(self._publish(key).touched, (("edge", "ce-2.8"),))
         self.assertEqual(self._publish(key).touched, ())
+
+    def test_republish_repairs_a_corrupt_catalogue_signature(self) -> None:
+        key = tbrp._gen_key(self.tmp / "repo.key")
+        self.assertEqual(self._publish(key).touched, (("edge", "ce-2.8"),))
+        site_root = self.pkg_repo / "docs"
+        catalogue_dir = site_root / "edge" / "ce-2.8"
+        archive = catalogue_dir / "packagesite.pkg"
+        signature_members = tbrp._sig_members(archive)
+        _write_catalogue_archive(
+            archive,
+            "packagesite.yaml",
+            _read_catalogue_member(archive, "packagesite.yaml"),
+            extra_members=(
+                (
+                    "packagesite.yaml.sig",
+                    catalogue_engine.PKGSIGN_ECDSA_HEAD + b"corrupt",
+                ),
+                ("packagesite.yaml.pub", signature_members["packagesite.yaml.pub"]),
+            ),
+        )
+
+        self.assertEqual(self._publish(key).touched, (("edge", "ce-2.8"),))
+        self.assertTrue(
+            pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+        )
 
     def _publish_two_destinations(self, key: Path) -> pr.PublishReport:
         assets_dir = self.new_assets_dir()

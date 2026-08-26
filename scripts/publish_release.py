@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import re
 import shutil
@@ -84,6 +83,13 @@ _SITE_SUBDIR = "docs"
 _DIGESTS_FILENAME = "digests.json"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PY_FLAVOR_ORIGIN = re.compile(r"^(py)(?:\d+)?-")
+_DESCRIPTOR_ERRORS = (
+    *cso._READ_ERRORS,
+    pfb_pkg.PkgError,
+    RecursionError,
+    UnicodeDecodeError,
+    TypeError,
+)
 
 
 class PublishReleaseError(Exception):
@@ -320,44 +326,38 @@ def _drop_assets(dest_dir: Path, asset_map: Mapping[str, pc.VerifiedAsset]) -> b
     return changed
 
 
-def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    obj: dict[str, object] = {}
-    for key, value in pairs:
-        if key in obj:
-            raise ValueError(f"duplicate JSON key {key!r}")
-        obj[key] = value
-    return obj
-
-
 def _strict_json(raw: bytes) -> object:
     def reject_constant(value: str) -> object:
         raise ValueError(f"invalid JSON constant {value}")
 
     return json.loads(
         raw.decode("utf-8"),
-        object_pairs_hook=_unique_json_object,
+        object_pairs_hook=pfb_pkg._reject_duplicate_json_keys,
         parse_constant=reject_constant,
     )
 
 
-def _catalogue_archive_payload(path: Path, member_name: str) -> bytes:
-    tar_bytes = pfb_pkg.zstd_decompress(path.read_bytes())
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as archive:
-        members = archive.getmembers()
-        names = [member.name for member in members]
-        unsigned = {member_name}
-        signed = {member_name, f"{member_name}.sig", f"{member_name}.pub"}
-        if len(names) != len(set(names)) or set(names) not in (unsigned, signed):
-            raise ValueError(f"{path.name}: invalid catalogue archive member set")
-        if any(not member.isfile() for member in members):
-            raise ValueError(f"{path.name}: catalogue members must be regular files")
-        payload_member = next(
-            member for member in members if member.name == member_name
-        )
-        payload = archive.extractfile(payload_member)
-        if payload is None:
-            raise ValueError(f"{path.name}: {member_name} carries no data")
-        return payload.read()
+def _catalogue_archive_payload(path: Path, member_name: str) -> tuple[bytes, bool]:
+    with path.open("rb") as descriptor:
+        if descriptor.read(4) != pfb_pkg.ZSTD_MAGIC:
+            raise ValueError(f"{path.name}: catalogue archive is not zstd-framed")
+    members = cso._read_members(path)
+    unsigned = {member_name}
+    signed = {member_name, f"{member_name}.sig", f"{member_name}.pub"}
+    names = set(members)
+    if names not in (unsigned, signed):
+        raise ValueError(f"{path.name}: invalid catalogue archive member set")
+    if any(kind != tarfile.REGTYPE for kind, _content in members.values()):
+        raise ValueError(f"{path.name}: catalogue members must be regular files")
+    payload = members[member_name][1]
+    is_signed = names == signed
+    if is_signed and not catalogue_engine.catalogue_signature_valid(
+        payload,
+        members[f"{member_name}.sig"][1],
+        members[f"{member_name}.pub"][1],
+    ):
+        raise ValueError(f"{path.name}: invalid catalogue signature")
+    return payload, is_signed
 
 
 def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
@@ -397,9 +397,21 @@ def _catalogue_identities(rows: object) -> set[tuple[str, str, str]]:
     return identities
 
 
-def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
+def _catalogue_descriptor_complete(dest_dir: Path, *, root: Path) -> bool:
+    try:
+        relative = dest_dir.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    for segment in relative.parts:
+        current /= segment
+        if current.is_symlink():
+            return False
+    if not dest_dir.is_dir() or not dest_dir.resolve().is_relative_to(root.resolve()):
+        return False
     descriptor_names = ("meta", "meta.conf", "data.pkg", "packagesite.pkg")
-    if not all((dest_dir / name).is_file() for name in descriptor_names):
+    descriptor_paths = tuple(dest_dir / name for name in descriptor_names)
+    if any(path.is_symlink() or not path.is_file() for path in descriptor_paths):
         return False
     try:
         meta = catalogue_engine.META_CONF.encode()
@@ -410,8 +422,10 @@ def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
 
         payload_identities: set[tuple[str, str, str]] = set()
         for path in sorted(dest_dir.glob("*.pkg")):
-            if not path.is_file() or path.name in catalogue_engine._CATALOG_PKG_FILES:
+            if path.name in catalogue_engine._CATALOG_PKG_FILES:
                 continue
+            if path.is_symlink() or not path.is_file():
+                return False
             manifest = pfb_pkg.read_compact_manifest(path)
             name, version = manifest.get("name"), manifest.get("version")
             if not isinstance(name, str) or not name:
@@ -427,7 +441,7 @@ def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
         if not payload_identities:
             return False
 
-        packagesite_raw = _catalogue_archive_payload(
+        packagesite_raw, packagesite_signed = _catalogue_archive_payload(
             dest_dir / "packagesite.pkg", "packagesite.yaml"
         )
         packagesite_rows = [
@@ -436,7 +450,12 @@ def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
         if _catalogue_identities(packagesite_rows) != payload_identities:
             return False
 
-        data = _strict_json(_catalogue_archive_payload(dest_dir / "data.pkg", "data"))
+        data_raw, data_signed = _catalogue_archive_payload(
+            dest_dir / "data.pkg", "data"
+        )
+        if packagesite_signed != data_signed:
+            return False
+        data = _strict_json(data_raw)
         if not isinstance(data, dict):
             return False
         if set(data) != {"groups", "expired_packages", "packages"}:
@@ -444,15 +463,7 @@ def _catalogue_descriptor_complete(dest_dir: Path) -> bool:
         if data["groups"] != [] or data["expired_packages"] != []:
             return False
         return _catalogue_identities(data["packages"]) == payload_identities
-    except (
-        EOFError,
-        OSError,
-        pfb_pkg.PkgError,
-        tarfile.TarError,
-        UnicodeDecodeError,
-        TypeError,
-        ValueError,
-    ):
+    except _DESCRIPTOR_ERRORS:
         return False
 
 
@@ -530,7 +541,9 @@ def publish(
             changed = _evict_undeclared_deps(dest_dir, row=target.row)
             if _drop_assets(dest_dir, asset_map):
                 changed = True
-            if not changed and not _catalogue_descriptor_complete(dest_dir):
+            if not changed and not _catalogue_descriptor_complete(
+                dest_dir, root=site_root
+            ):
                 changed = True
             if (
                 not changed

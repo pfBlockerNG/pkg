@@ -49,6 +49,7 @@ Describe 'publish-pkg-repo.sh'
     cat >"${base}/fake-src/scripts/publish_release.py" <<'PY'
 import json
 import os
+import subprocess
 import sys
 
 
@@ -149,6 +150,25 @@ def main():
         print("updated index.html")
         print("updated edge/ce-2.8")
         return 0
+
+    if mode == "real_race":
+        state = os.environ["FAKE_RACE_STATE"]
+        if not os.path.exists(state):
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    os.environ["FAKE_COMPETITOR_REPO"],
+                    "push",
+                    "origin",
+                    "main",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            with open(state, "w") as fh:
+                fh.write("advanced\n")
 
     for target in os.environ.get("FAKE_TOUCHED", "").split(","):
         target = target.strip()
@@ -575,7 +595,34 @@ HOOK
     The variable commit_count should equal 2
   End
 
+  It 'fetches and preserves a real competing origin/main commit before republishing'
+    git_fixture clone -q "${base}/remote.git" "${base}/competitor" 2>/dev/null
+    git_fixture -C "${base}/competitor" checkout -q main
+    git_fixture -C "${base}/competitor" config user.email competitor@example.com
+    git_fixture -C "${base}/competitor" config user.name competitor
+    printf '%s\n' competitor >"${base}/competitor/docs/competitor.txt"
+    git_fixture -C "${base}/competitor" add docs/competitor.txt
+    git_fixture -C "${base}/competitor" commit -q -m competitor
+    export FAKE_MODE=real_race
+    export FAKE_TOUCHED=edge/ce-2.8
+    export FAKE_RACE_STATE="${base}/race-state"
+    export FAKE_COMPETITOR_REPO="${base}/competitor"
+    When run script "$script"
+    The status should equal 0
+    The output should include 'sync attempt 2/5'
+    The output should include 'ADVANCE'
+    The stderr should include 'fetch first'
+    competitor_landed="$(git_fixture -C "${base}/remote.git" show refs/heads/main:docs/competitor.txt)"
+    The variable competitor_landed should equal 'competitor'
+    marker_landed="$(git_fixture -C "${base}/remote.git" show refs/heads/main:docs/edge/ce-2.8/marker.pkg)"
+    The variable marker_landed should equal 'edge/ce-2.8'
+    commit_count="$(git_fixture -C "${base}/remote.git" rev-list --count refs/heads/main)"
+    The variable commit_count should equal 3
+  End
+
   It 'cleans ignored residue from a rejected local commit before retrying from origin/main'
+    printf '%s\n' 'ignored-root.txt' >>"${base}/pkg-repo/.git/info/exclude"
+    printf '%s\n' 'must survive docs cleanup' >"${base}/pkg-repo/ignored-root.txt"
     reject_once="${base}/reject_once"
     : >"$reject_once"
     cat > "${base}/remote.git/hooks/pre-receive" <<HOOK
@@ -601,6 +648,9 @@ HOOK
     The result of function remote_head_now should not equal "$original_remote_head"
     landed="$(git_fixture -C "${base}/remote.git" ls-tree --name-only -r refs/heads/main -- docs/edge/ce-2.8/landed-after-retry.pkg)"
     The variable landed should equal 'docs/edge/ce-2.8/landed-after-retry.pkg'
+    The path "${base}/pkg-repo/ignored-root.txt" should be file
+    ignored_root="$(cat "${base}/pkg-repo/ignored-root.txt")"
+    The variable ignored_root should equal 'must survive docs cleanup'
   End
 
   It 'gives up after MAX_PUSH_ATTEMPTS rejections, exits 1, and leaves the remote unmoved'

@@ -510,39 +510,90 @@ class NoopTests(_TempDirTestCase):
         )
         self.assertEqual((catalogue_dir / canonical_name).read_bytes(), before_bytes)
 
-    def test_same_bytes_repair_malformed_packagesite(self) -> None:
+    def test_same_bytes_repair_stale_malformed_or_incomplete_descriptors(self) -> None:
         handoff, results_dir, snapshot = self.base_handoff()
         first = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertTrue(first.touched)
-        catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
-        _write_tar_pkg(
-            catalogue_dir / "packagesite.pkg",
-            [("packagesite.yaml", b"\xff\n", 0o644, 0)],
-        )
+        site_root = self.pkg_repo / "docs"
+        catalogue_dir = site_root / "nightly" / "ce-2.8"
+        pristine = {path.name: path.read_bytes() for path in catalogue_dir.iterdir()}
+        packagesite = pfb_pkg.zstd_decompress(pristine["packagesite.pkg"])
+        with tarfile.open(fileobj=io.BytesIO(packagesite)) as archive:
+            member = archive.extractfile("packagesite.yaml")
+            self.assertIsNotNone(member)
+            valid_rows = [json.loads(line) for line in member.read().splitlines()]
 
-        second = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        def restore() -> None:
+            for name, data in pristine.items():
+                path = catalogue_dir / name
+                if path.is_symlink():
+                    path.unlink()
+                path.write_bytes(data)
 
-        self.assertEqual(second.touched, (("nightly", "ce-2.8"),))
-        self.assertFalse(second.noop)
+        def missing_meta() -> None:
+            (catalogue_dir / "meta").unlink()
+
+        def malformed_packagesite() -> None:
+            _write_tar_pkg(
+                catalogue_dir / "packagesite.pkg",
+                [("packagesite.yaml", b"\xff\n", 0o644, 0)],
+            )
+
+        def stale_packagesite() -> None:
+            rows = [dict(row) for row in valid_rows]
+            rows[0]["version"] = "3.3.0"
+            rows[0]["path"] = "pfSense-pkg-pfBlockerNG-3.3.0.pkg"
+            rows[0]["repopath"] = "pfSense-pkg-pfBlockerNG-3.3.0.pkg"
+            payload = b"".join(
+                json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows
+            )
+            _write_tar_pkg(
+                catalogue_dir / "packagesite.pkg",
+                [("packagesite.yaml", payload, 0o644, 0)],
+            )
+
+        for label, corrupt in (
+            ("missing meta", missing_meta),
+            ("malformed packagesite", malformed_packagesite),
+            ("stale packagesite", stale_packagesite),
+        ):
+            with self.subTest(case=label):
+                restore()
+                corrupt()
+                report = _run(
+                    handoff=handoff,
+                    results_dir=results_dir,
+                    pkg_repo=self.pkg_repo,
+                )
+                self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
+                self.assertTrue(
+                    pr._catalogue_descriptor_complete(catalogue_dir, root=site_root)
+                )
+
         canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
-        payload = pfb_pkg.zstd_decompress(
+        repaired = pfb_pkg.zstd_decompress(
             (catalogue_dir / "packagesite.pkg").read_bytes()
         )
-        with tarfile.open(fileobj=io.BytesIO(payload)) as tf:
-            member = tf.extractfile("packagesite.yaml")
+        with tarfile.open(fileobj=io.BytesIO(repaired)) as archive:
+            member = archive.extractfile("packagesite.yaml")
             self.assertIsNotNone(member)
             rows = [json.loads(line) for line in member.read().splitlines()]
         self.assertEqual(
-            {(row["name"], row["version"], row["repopath"]) for row in rows},
+            {
+                (row["name"], row["version"], row["path"], row["repopath"])
+                for row in rows
+            },
             {
                 (
                     "pfSense-pkg-pfBlockerNG",
                     snapshot.pkg_version,
                     canonical_name,
+                    canonical_name,
                 ),
                 (
                     "py311-charset-normalizer",
                     "3.4.0",
+                    "py311-charset-normalizer-3.4.0.pkg",
                     "py311-charset-normalizer-3.4.0.pkg",
                 ),
             },

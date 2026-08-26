@@ -485,7 +485,9 @@ def publish(
         changed = pr._evict_undeclared_deps(dest_dir, row=target.row)
         if pr._drop_assets(dest_dir, asset_map):
             changed = True
-        if not changed and not pr._catalogue_descriptor_complete(dest_dir):
+        if not changed and not pr._catalogue_descriptor_complete(
+            dest_dir, root=site_root
+        ):
             changed = True
         if (
             not changed
