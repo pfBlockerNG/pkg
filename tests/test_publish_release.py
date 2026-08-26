@@ -19,16 +19,18 @@ test_publish_catalogues.py's private helpers).
 """
 
 from __future__ import annotations
+import copy
 
 import hashlib
 import io
 import itertools
 import json
+import re
 import sys
 import tarfile
 import tempfile
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 from unittest import mock
@@ -45,6 +47,25 @@ import publish_release as pr
 import tagged_release_handoff as trh
 
 _REPO = pc.EXPECTED_SOURCE_REPOSITORY
+_DEPENDENCY_BUILDER = {
+    "python": "3.11.15",
+    "pip": "26.2.1",
+    "setuptools": "75.6.0",
+    "wheel": "0.45.1",
+    "zstandard": "0.25.0",
+    "uv": "0.12.6",
+    "uv_lock_sha256": "2d9aa34742bd0a43e69c8cc1216e23130145369b7ac32a5603e5eb42094d00d9",
+}
+_LIVE_HANDOFF_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "tagged-release-handoff-v4.0.0.a1.json"
+)
+_LIVE_TAG = "v4.0.0.a1"
+_LIVE_SOURCE_SHA = "1b4de7de972947b2113584a7caab9f6d61e14ce1"
+_LIVE_PORTS_SHA = "dda1c42793ba8f6b78cf5472ca6db25f7a0a13c2"
+_LIVE_EPOCH = 1787775131
+_DEP_ORIGIN = "textproc/py-charset-normalizer"
 
 # --------------------------------------------------------------------------- #
 # The closed ROUTE matrix this ticket's coverage matrix names: ce-2.8 (FreeBSD 15,
@@ -155,6 +176,9 @@ def _record(
     canonical_package_version: str | None = None,
     release_line: str | None = None,
     source_tag: str | None = None,
+    freebsd_ports_sha: str = "b" * 40,
+    source_date_epoch: int = 0,
+    dependency_builder: Mapping[str, str] = _DEPENDENCY_BUILDER,
 ) -> dict:
     row = row or ROW_CE
     major_minor = ".".join(cast(str, row["pfsense_version"]).split(".")[:2])
@@ -176,9 +200,10 @@ def _record(
         "native_recipe_identity": native,
         "emitted_identity": pfb_pkg.CANONICAL_EMITTED_IDENTITY,
         "matrix_row": row,
-        "freebsd_ports_sha": "b" * 64,
+        "freebsd_ports_sha": freebsd_ports_sha,
         "route": f"{channel}/{cast(str, row['variant']).lower()}-{major_minor}",
-        "source_date_epoch": 0,
+        "source_date_epoch": source_date_epoch,
+        "dependency_builder": dict(dependency_builder),
         "build_input_digest": "",
     }
     record["build_input_digest"] = pfb_pkg.build_input_digest(record)
@@ -193,6 +218,10 @@ def _write_tar_pkg(path: Path, members: list[tuple[str, bytes, int, int]]) -> No
             info.size = len(data)
             info.mode = mode
             info.mtime = mtime
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "wheel"
             tf.addfile(info, io.BytesIO(data))
     path.write_bytes(
         pfb_pkg.zstd_compress(raw.getvalue(), pfb_pkg.PkgError, "zstd unavailable")
@@ -336,18 +365,94 @@ def _wrap_dependency_pkg(
     local_name: str,
     origin: str | None = None,
     payload: dict[str, bytes] | None = None,
+    source_date_epoch: int = 0,
+    freebsd_ports_sha: str = "b" * 40,
+    toolchain: Mapping[str, str] = _DEPENDENCY_BUILDER,
+    distfile: str | None = None,
+    distfile_sha256: str = "d" * 64,
+    distfile_size: int = 1,
 ) -> tuple[Path, str]:
-    manifest = {
-        "name": name,
-        "version": version,
+    match = re.fullmatch(r"py([0-9]+)-(.+)", name)
+    if match is None:
+        py_digits, portname = "311", name
+    else:
+        py_digits, portname = match.groups()
+    py_flavor = f"py{py_digits}"
+    major = abi.split(":")[1]
+    origin = origin or f"textproc/py-{portname}"
+    distfile = distfile or f"{portname}-{version}.tar.gz"
+    record = {
+        "schema": 1,
+        "freebsd_ports_sha": freebsd_ports_sha,
+        "port_origin": origin,
+        "port_version": version,
+        "distfile": distfile,
+        "distfile_sha256": distfile_sha256,
+        "distfile_size": distfile_size,
+        "py_flavor": py_flavor,
+        "freebsd_major": major,
         "abi": abi,
-        "origin": origin or f"textproc/{name}",
+        "source_date_epoch": source_date_epoch,
+        "toolchain": dict(toolchain),
     }
-    compact = json.dumps(manifest, separators=(",", ":")).encode()
-    members = [("+COMPACT_MANIFEST", compact, 0o644, 0)]
-    # Extra members vary the archive BYTES under an identical manifest identity —
-    # how two builds of the same name-version end up byte-distinct.
-    members.extend((member, data, 0o644, 0) for member, data in (payload or {}).items())
+    annotation = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    raw_payload = payload or {
+        f"/usr/local/lib/python{py_digits[0]}.{py_digits[1:]}/site-packages/{portname}/__init__.py": b""
+    }
+    package_payload = {
+        path if path.startswith("/") else f"/usr/local/share/{portname}/{path}": data
+        for path, data in raw_payload.items()
+    }
+    files = {
+        path: {
+            "sum": "1$" + hashlib.sha256(data).hexdigest(),
+            "uname": "root",
+            "gname": "wheel",
+            "perm": "0644",
+            "fflags": 0,
+            "mtime": source_date_epoch,
+            "size": len(data),
+        }
+        for path, data in package_payload.items()
+    }
+    common = {
+        "name": name,
+        "origin": origin,
+        "version": version,
+        "comment": f"{portname} test fixture",
+        "maintainer": "tests@example.invalid",
+        "www": "https://example.invalid/",
+        "abi": abi,
+        "arch": f"freebsd:{major}:*",
+        "prefix": "/usr/local",
+        "flatsize": sum(map(len, package_payload.values())),
+        "licenselogic": "single",
+        "licenses": ["MIT"],
+        "desc": f"{portname} dependency fixture",
+        "categories": ["textproc", "python"],
+        "deps": {
+            f"python{py_digits}": {
+                "origin": f"lang/python{py_digits}",
+                "version": "1.0",
+            }
+        },
+        "annotations": {"pfb_dep_build_record": annotation},
+    }
+    compact = common
+    full = {**common, "files": files}
+    members = [
+        (
+            "+COMPACT_MANIFEST",
+            json.dumps(compact, separators=(",", ":")).encode(),
+            0o644,
+            0,
+        ),
+        ("+MANIFEST", json.dumps(full, separators=(",", ":")).encode(), 0o644, 0),
+    ]
+    members.extend(
+        (member, data, 0o644, source_date_epoch)
+        for member, data in package_payload.items()
+    )
     path = directory / local_name
     _write_tar_pkg(path, members)
     return path, hashlib.sha256(path.read_bytes()).hexdigest()
@@ -420,6 +525,7 @@ def _populate_assets_dir(
     source_tag: str | None = None,
     canonical_package_version: str | None = None,
     include_dependency: bool = True,
+    preserve_declared_extras: bool = False,
     dep_version: str = "3.4.0",
     dep_row: dict | None = None,
 ) -> dict[str, str]:
@@ -429,9 +535,14 @@ def _populate_assets_dir(
     assets_dir.mkdir(parents=True, exist_ok=True)
     digests: dict[str, str] = {}
     for row in rows:
+        record_row = (
+            row
+            if include_dependency or preserve_declared_extras
+            else {**row, "extra_pkgs": []}
+        )
         record = _record(
             channel=channel,
-            row=row,
+            row=record_row,
             source_tag=source_tag,
             canonical_package_version=canonical_package_version,
         )
@@ -462,18 +573,75 @@ def _write_handoff(
     rows: Sequence[dict[str, object]],
     tag: str,
     source_sha: str = "a" * 40,
-    ports_sha: str = "b" * 64,
+    ports_sha: str = "b" * 40,
 ) -> Path:
-    payload = trh._validate_handoff_fields(
-        release_tag=tag,
-        source_sha=source_sha,
-        ci_metadata_sha="c" * 40,
-        ports_sha=ports_sha,
-        route_matrix=list(rows),
-    )
+    dependency_packages: dict[str, dict[str, dict[str, object]]] = {}
+    for row in rows:
+        origins = cast(list[str], row["extra_pkgs"])
+        if not origins:
+            continue
+        suffix = f"-{row['variant']}-{row['pfsense_version']}.pkg"
+        dependency_packages[suffix] = {}
+        for origin in origins:
+            portname = origin.split("/", 1)[1]
+            if portname.startswith("py-"):
+                portname = portname[3:]
+            package_name = f"{row['py_flavor']}-{portname}"
+            version = "1.0.0" if portname == "twin" else "3.4.0"
+            for package in path.parent.glob(f"*{suffix}"):
+                compact = pfb_pkg.read_compact_manifest(package)
+                if compact.get("name") == package_name and compact.get("origin") == origin:
+                    version = cast(str, compact["version"])
+                    break
+            distfile = f"{portname}-{version}.tar.gz"
+            dependency_packages[suffix][origin] = {
+                "portname": portname,
+                "port_version": version,
+                "distfile": distfile,
+                "distfile_sha256": "d" * 64,
+                "distfile_size": 1,
+                "package_name": package_name,
+                "package_version": version,
+                "filename": f"{package_name}-{version}{suffix}",
+                "freebsd_ports_sha": ports_sha,
+                "source_date_epoch": 0,
+                "toolchain": dict(_DEPENDENCY_BUILDER),
+                "abi": f"FreeBSD:{row['freebsd_major']}:*",
+                "freebsd_major": row["freebsd_major"],
+                "py_flavor": row["py_flavor"],
+            }
+    payload = {
+        "schema": 1,
+        "kind": "tagged-release-handoff",
+        "release_tag": tag,
+        "source_sha": source_sha,
+        "ci_metadata_sha": "c" * 40,
+        "ports_sha": ports_sha,
+        "source_date_epoch": 0,
+        "dependency_builder": dict(_DEPENDENCY_BUILDER),
+        "route_matrix": list(rows),
+        "dependency_packages": dependency_packages,
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _honest_dependency_free_rows(
+    rows: Sequence[dict[str, object]], assets_dir: Path
+) -> list[dict[str, object]]:
+    package_names = {path.name for path in assets_dir.glob("*.pkg")}
+    adjusted_rows: list[dict[str, object]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        suffix = f"-{row['variant']}-{row['pfsense_version']}.pkg"
+        if row.get("extra_pkgs") and not any(
+            name.endswith(suffix) and not name.startswith("pfSense-pkg-")
+            for name in package_names
+        ):
+            row["extra_pkgs"] = []
+        adjusted_rows.append(row)
+    return adjusted_rows
 
 
 def _run(
@@ -489,6 +657,7 @@ def _run(
     source_sha: str = "a" * 40,
     sign_key: Path | None = None,
 ) -> pr.PublishReport:
+    rows = _honest_dependency_free_rows(rows, assets_dir)
     handoff = _write_handoff(
         assets_dir / "pfblockerng-release-handoff.json",
         rows=rows,
@@ -509,6 +678,170 @@ def _run(
     )
 
 
+def _refresh_digests(assets_dir: Path) -> None:
+    digests = {
+        package.name: hashlib.sha256(package.read_bytes()).hexdigest()
+        for package in sorted(assets_dir.glob("*.pkg"))
+    }
+    (assets_dir / pr._DIGESTS_FILENAME).write_text(json.dumps(digests), encoding="utf-8")
+
+
+def _dependency_bound_assets(assets_dir: Path) -> tuple[Path, tuple[Path, ...]]:
+    handoff = json.loads(_LIVE_HANDOFF_FIXTURE.read_text(encoding="utf-8"))
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    packages: list[Path] = []
+    for handoff_row in handoff["route_matrix"]:
+        row = dict(handoff_row)
+        row.pop("ci", None)
+        record = _record(
+            channel="edge",
+            row=row,
+            source_sha=_LIVE_SOURCE_SHA,
+            source_tag=_LIVE_TAG,
+            freebsd_ports_sha=_LIVE_PORTS_SHA,
+            source_date_epoch=_LIVE_EPOCH,
+            dependency_builder=_DEPENDENCY_BUILDER,
+        )
+        declared = _canonical_declared_name(record)
+        package, _digest = _wrap_canonical_pkg(
+            assets_dir, record, local_name=declared
+        )
+        packages.append(package)
+    for suffix, origins in handoff["dependency_packages"].items():
+        for origin, identity in origins.items():
+            package, _digest = _wrap_dependency_pkg(
+                assets_dir,
+                name=identity["package_name"],
+                version=identity["package_version"],
+                abi=identity["abi"],
+                local_name=identity["filename"],
+                origin=origin,
+                source_date_epoch=identity["source_date_epoch"],
+                freebsd_ports_sha=identity["freebsd_ports_sha"],
+                toolchain=identity["toolchain"],
+                distfile=identity["distfile"],
+                distfile_sha256=identity["distfile_sha256"],
+                distfile_size=identity["distfile_size"],
+            )
+            if not package.name.endswith(suffix):
+                raise AssertionError(f"{package.name} does not end in {suffix}")
+            packages.append(package)
+    _refresh_digests(assets_dir)
+    handoff_path = assets_dir / "pfblockerng-release-handoff.json"
+    handoff_path.write_bytes(_LIVE_HANDOFF_FIXTURE.read_bytes())
+    return handoff_path, tuple(packages)
+
+
+def _rewrite_pkg(
+    path: Path,
+    mutate: Callable[
+        [
+            dict[str, object],
+            dict[str, object],
+            dict[str, bytes],
+            dict[str, tarfile.TarInfo],
+        ],
+        None,
+    ],
+) -> None:
+    raw = pfb_pkg.zstd_decompress(path.read_bytes())
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tf:
+        members = [copy.copy(member) for member in tf.getmembers()]
+        data = {}
+        for member in tf.getmembers():
+            extracted = tf.extractfile(member)
+            if extracted is None:
+                raise AssertionError(f"cannot read {member.name}")
+            data[member.name] = extracted.read()
+    compact = cast(dict[str, object], json.loads(data["+COMPACT_MANIFEST"]))
+    full = cast(dict[str, object], json.loads(data["+MANIFEST"]))
+    payload = {name: value for name, value in data.items() if not name.startswith("+")}
+    member_info = {member.name: member for member in members}
+    before = (
+        copy.deepcopy(compact),
+        copy.deepcopy(full),
+        dict(payload),
+        {name: (member.name, member.mode, member.mtime) for name, member in member_info.items()},
+    )
+    mutate(compact, full, payload, member_info)
+    after = (
+        compact,
+        full,
+        payload,
+        {name: (member.name, member.mode, member.mtime) for name, member in member_info.items()},
+    )
+    if after == before:
+        raise AssertionError("hostile package mutation was vacuous")
+    data["+COMPACT_MANIFEST"] = json.dumps(compact, separators=(",", ":")).encode()
+    data["+MANIFEST"] = json.dumps(full, separators=(",", ":")).encode()
+    for name in tuple(data):
+        if not name.startswith("+") and name not in payload:
+            del data[name]
+    data.update(payload)
+    raw_out = io.BytesIO()
+    with tarfile.open(fileobj=raw_out, mode="w") as tf:
+        for original in members:
+            member = member_info[original.name]
+            if member.name not in data:
+                continue
+            body = data[member.name]
+            member.size = len(body)
+            tf.addfile(member, io.BytesIO(body))
+        for name in payload:
+            if name in member_info:
+                continue
+            info = tarfile.TarInfo(name)
+            info.size = len(payload[name])
+            info.mode = 0o644
+            info.mtime = _LIVE_EPOCH
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "wheel"
+            tf.addfile(info, io.BytesIO(payload[name]))
+    path.write_bytes(
+        pfb_pkg.zstd_compress(raw_out.getvalue(), pfb_pkg.PkgError, "zstd unavailable")
+    )
+
+
+def _rewrite_canonical_record(
+    path: Path, mutate: Callable[[dict[str, object]], None]
+) -> None:
+    def rewrite(
+        compact: dict[str, object],
+        full: dict[str, object],
+        _payload: dict[str, bytes],
+        _member_info: dict[str, tarfile.TarInfo],
+    ) -> None:
+        annotations = cast(dict[str, str], compact["annotations"])
+        record = cast(dict[str, object], json.loads(annotations[pfb_pkg.PFB_BUILD_RECORD_KEY]))
+        mutate(record)
+        record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+        annotation = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        cast(dict[str, str], compact["annotations"])[pfb_pkg.PFB_BUILD_RECORD_KEY] = annotation
+        cast(dict[str, str], full["annotations"])[pfb_pkg.PFB_BUILD_RECORD_KEY] = annotation
+
+    _rewrite_pkg(path, rewrite)
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[object, ...], ...]:
+    if not root.exists():
+        return ()
+    result: list[tuple[object, ...]] = []
+    for path in sorted((root, *root.rglob("*"))):
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        stat = path.lstat()
+        if path.is_symlink():
+            result.append((relative, "symlink", path.readlink().as_posix(), stat.st_mode))
+        elif path.is_dir():
+            result.append((relative, "dir", stat.st_mode, stat.st_mtime_ns))
+        else:
+            result.append(
+                (relative, "file", path.read_bytes(), stat.st_mode, stat.st_mtime_ns)
+            )
+    return tuple(result)
+
+
 class _TempDirTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="pub-release-test-")
@@ -520,6 +853,719 @@ class _TempDirTestCase(unittest.TestCase):
     def new_assets_dir(self) -> Path:
         return self.tmp / f"assets-{next(self._assets_counter)}"
 
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2733 — exact live dependency-bound tagged handoff and hostile matrix.
+# --------------------------------------------------------------------------- #
+
+
+class DependencyBoundHandoffTests(_TempDirTestCase):
+    def _run_exact(
+        self, assets_dir: Path, handoff: Path, pkg_repo: Path
+    ) -> pr.PublishReport:
+        return pr.run(
+            source_repository=_REPO,
+            release_id="2335",
+            release_tag=_LIVE_TAG,
+            source_sha=_LIVE_SOURCE_SHA,
+            destinations='["edge"]',
+            source_run_id="2335:1",
+            assets_dir=assets_dir,
+            pkg_repo=pkg_repo,
+            handoff_file=handoff,
+        )
+
+    def _hostile(
+        self,
+        label: str,
+        mutate: Callable[[Path, dict[str, Path]], None],
+        axis: str,
+    ) -> str:
+        assets_dir = self.new_assets_dir()
+        handoff, package_paths = _dependency_bound_assets(assets_dir)
+        packages = {package.name: package for package in package_paths}
+        pkg_repo = self.tmp / f"{assets_dir.name}-pkg-repo"
+        sentinel = pkg_repo / "sentinel" / "keep.bin"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_bytes(b"do not mutate")
+        input_before = _tree_snapshot(assets_dir)
+        mutate(handoff, packages)
+        _refresh_digests(assets_dir)
+        self.assertNotEqual(
+            _tree_snapshot(assets_dir), input_before, f"{label}: mutation was vacuous"
+        )
+        fixture_before = _tree_snapshot(pkg_repo)
+        with self.assertRaises(
+            (trh.HandoffError, pfb_pkg.PkgError, pc.PublishError, pr.PublishReleaseError),
+            msg=label,
+        ) as ctx:
+            self._run_exact(assets_dir, handoff, pkg_repo)
+        self.assertIn(axis.lower(), str(ctx.exception).lower(), label)
+        self.assertEqual(_tree_snapshot(pkg_repo), fixture_before, label)
+        return str(ctx.exception)
+
+    @staticmethod
+    def _edit_handoff(
+        handoff: Path, mutate: Callable[[dict[str, object]], None]
+    ) -> None:
+        payload = cast(dict[str, object], json.loads(handoff.read_text(encoding="utf-8")))
+        mutate(payload)
+        handoff.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _dependency(packages: Mapping[str, Path], suffix: str = "-CE-2.8.pkg") -> Path:
+        matches = [path for name, path in packages.items() if name.endswith(suffix) and not name.startswith("pfSense-pkg-")]
+        if len(matches) != 1:
+            raise AssertionError(f"expected one dependency for {suffix}: {matches}")
+        return matches[0]
+
+    @staticmethod
+    def _canonical(packages: Mapping[str, Path], suffix: str = "-CE-2.8.pkg") -> Path:
+        matches = [path for name, path in packages.items() if name.endswith(suffix) and name.startswith("pfSense-pkg-")]
+        if len(matches) != 1:
+            raise AssertionError(f"expected one canonical for {suffix}: {matches}")
+        return matches[0]
+
+    @staticmethod
+    def _edit_annotation(
+        package: Path,
+        mutate: Callable[[str], str],
+    ) -> None:
+        def rewrite(
+            compact: dict[str, object],
+            full: dict[str, object],
+            _payload: dict[str, bytes],
+            _member_info: dict[str, tarfile.TarInfo],
+        ) -> None:
+            annotations = cast(dict[str, str], compact["annotations"])
+            changed = mutate(annotations["pfb_dep_build_record"])
+            cast(dict[str, str], compact["annotations"])[
+                "pfb_dep_build_record"
+            ] = changed
+            cast(dict[str, str], full["annotations"])[
+                "pfb_dep_build_record"
+            ] = changed
+
+        _rewrite_pkg(package, rewrite)
+
+    def test_live_four_row_stage_then_exact_replay_is_noop(self) -> None:
+        fixture = _LIVE_HANDOFF_FIXTURE.read_bytes()
+        self.assertEqual(len(fixture), 3046)
+        self.assertEqual(
+            hashlib.sha256(fixture).hexdigest(),
+            "bb8f0d3e82abe64a8a063cfa16c4eefd8983731afa7b99bfbc147211cbed0c6c",
+        )
+        assets_dir = self.new_assets_dir()
+        handoff, packages = _dependency_bound_assets(assets_dir)
+        self.assertEqual(len(packages), 6)
+
+        first = self._run_exact(assets_dir, handoff, self.pkg_repo)
+        self.assertFalse(first.noop)
+        self.assertEqual(
+            first.touched,
+            (
+                ("edge", "ce-2.8"),
+                ("edge", "ce-2.9"),
+                ("edge", "plus-26.03"),
+                ("edge", "plus-26.07"),
+            ),
+        )
+        self.assertFalse(any((self.pkg_repo / "docs" / channel).exists() for channel in ("stable", "testing", "nightly")))
+        before = _tree_snapshot(self.pkg_repo)
+
+        second = self._run_exact(assets_dir, handoff, self.pkg_repo)
+        self.assertTrue(second.noop)
+        self.assertEqual(second.touched, ())
+        self.assertEqual(
+            second.describe(),
+            ["NOOP: every destination already matches this run's verified assets"],
+        )
+        self.assertEqual(_tree_snapshot(self.pkg_repo), before)
+
+    def test_hostile_01_top_level_exact_fields_and_types(self) -> None:
+        json_cases: list[
+            tuple[str, Callable[[dict[str, object]], None], str]
+        ] = [
+            ("added-field", lambda value: value.__setitem__("extra", 1), "unexpected fields"),
+            ("missing-epoch", lambda value: value.pop("source_date_epoch"), "unexpected fields"),
+            ("missing-builder", lambda value: value.pop("dependency_builder"), "unexpected fields"),
+            ("missing-packages", lambda value: value.pop("dependency_packages"), "unexpected fields"),
+            ("bool-epoch", lambda value: value.__setitem__("source_date_epoch", True), "source_date_epoch"),
+            ("array-builder", lambda value: value.__setitem__("dependency_builder", []), "dependency_builder"),
+            ("array-packages", lambda value: value.__setitem__("dependency_packages", []), "dependency_packages"),
+        ]
+        for label, change, axis in json_cases:
+            with self.subTest(label=label):
+                self._hostile(
+                    label,
+                    lambda handoff, _packages, change=change: self._edit_handoff(handoff, change),
+                    axis,
+                )
+
+        def duplicate_key(handoff: Path, _packages: dict[str, Path]) -> None:
+            raw = handoff.read_text(encoding="utf-8")
+            handoff.write_text('{"schema":1,' + raw[1:], encoding="utf-8")
+
+        self._hostile("duplicate-top-level-key", duplicate_key, "duplicate")
+
+    def test_hostile_02_epoch_binding_and_member_time(self) -> None:
+        self._hostile(
+            "negative-epoch",
+            lambda handoff, _packages: self._edit_handoff(
+                handoff, lambda value: value.__setitem__("source_date_epoch", -1)
+            ),
+            "source_date_epoch",
+        )
+
+        def canonical_epoch(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._canonical(packages)
+
+            def rewrite(
+                compact: dict[str, object],
+                full: dict[str, object],
+                _payload: dict[str, bytes],
+                members: dict[str, tarfile.TarInfo],
+            ) -> None:
+                annotations = cast(dict[str, str], compact["annotations"])
+                record = cast(dict[str, object], json.loads(annotations[pfb_pkg.PFB_BUILD_RECORD_KEY]))
+                record["source_date_epoch"] = _LIVE_EPOCH + 1
+                record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+                annotation = json.dumps(record, sort_keys=True, separators=(",", ":"))
+                cast(dict[str, str], compact["annotations"])[pfb_pkg.PFB_BUILD_RECORD_KEY] = annotation
+                cast(dict[str, str], full["annotations"])[pfb_pkg.PFB_BUILD_RECORD_KEY] = annotation
+                for path, entry in cast(dict[str, dict[str, object]], full["files"]).items():
+                    entry["mtime"] = _LIVE_EPOCH + 1
+                    members[path].mtime = _LIVE_EPOCH + 1
+
+            _rewrite_pkg(package, rewrite)
+
+        self._hostile("canonical-record-epoch", canonical_epoch, "source_date_epoch")
+
+        def dependency_record_epoch(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._dependency(packages)
+
+            def change(raw: str) -> str:
+                record = cast(dict[str, object], json.loads(raw))
+                record["source_date_epoch"] = _LIVE_EPOCH + 1
+                return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+            self._edit_annotation(package, change)
+
+        self._hostile(
+            "dependency-record-epoch", dependency_record_epoch, "source_date_epoch"
+        )
+
+        def dependency_member_epoch(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._dependency(packages)
+
+            def rewrite(
+                _compact: dict[str, object],
+                full: dict[str, object],
+                _payload: dict[str, bytes],
+                members: dict[str, tarfile.TarInfo],
+            ) -> None:
+                path = next(iter(cast(dict[str, object], full["files"])))
+                members[path].mtime = _LIVE_EPOCH + 1
+
+            _rewrite_pkg(package, rewrite)
+
+        self._hostile(
+            "dependency-member-epoch", dependency_member_epoch, "metadata"
+        )
+
+    def test_hostile_03_toolchain_shape_and_binding(self) -> None:
+        def builder_change(change: Callable[[dict[str, object]], None]) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(handoff: Path, _packages: dict[str, Path]) -> None:
+                self._edit_handoff(
+                    handoff,
+                    lambda value: change(cast(dict[str, object], value["dependency_builder"])),
+                )
+
+            return mutate
+
+        cases = [
+            ("missing-key", builder_change(lambda value: value.pop("pip")), "dependency_builder"),
+            ("extra-key", builder_change(lambda value: value.__setitem__("extra", "1.0")), "dependency_builder"),
+            ("bad-version", builder_change(lambda value: value.__setitem__("pip", "latest")), "pip"),
+            ("bad-lock", builder_change(lambda value: value.__setitem__("uv_lock_sha256", "A" * 64)), "uv_lock_sha256"),
+        ]
+        for label, mutate, axis in cases:
+            with self.subTest(label=label):
+                self._hostile(label, mutate, axis)
+
+        self._hostile(
+            "canonical-builder-binding",
+            lambda _handoff, packages: _rewrite_canonical_record(
+                self._canonical(packages),
+                lambda record: cast(dict[str, str], record["dependency_builder"]).__setitem__("pip", "26.2.2"),
+            ),
+            "dependency_builder",
+        )
+
+        def dependency_toolchain(_handoff: Path, packages: dict[str, Path]) -> None:
+            def change(raw: str) -> str:
+                record = cast(dict[str, object], json.loads(raw))
+                cast(dict[str, str], record["toolchain"])["pip"] = "26.2.2"
+                return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+            self._edit_annotation(self._dependency(packages), change)
+
+        self._hostile(
+            "dependency-toolchain-binding", dependency_toolchain, "toolchain"
+        )
+
+    def test_hostile_04_dependency_identity_exactness(self) -> None:
+        def identity_change(change: Callable[[dict[str, object]], None]) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(handoff: Path, _packages: dict[str, Path]) -> None:
+                def apply(value: dict[str, object]) -> None:
+                    identities = cast(dict[str, object], value["dependency_packages"])
+                    origins = cast(dict[str, object], identities["-CE-2.8.pkg"])
+                    change(cast(dict[str, object], origins[_DEP_ORIGIN]))
+
+                self._edit_handoff(handoff, apply)
+
+            return mutate
+
+        cases = [
+            ("missing-identity-field", identity_change(lambda value: value.pop("portname")), "exact fields"),
+            ("extra-identity-field", identity_change(lambda value: value.__setitem__("extra", 1)), "exact fields"),
+            ("package-name", identity_change(lambda value: value.__setitem__("package_name", "py311-other")), "package_name"),
+            ("filename", identity_change(lambda value: value.__setitem__("filename", "other.pkg")), "filename"),
+            ("freebsd-major", identity_change(lambda value: value.__setitem__("freebsd_major", "16")), "freebsd_major"),
+            ("py-flavor", identity_change(lambda value: value.__setitem__("py_flavor", "py312")), "py_flavor"),
+            ("ports", identity_change(lambda value: value.__setitem__("freebsd_ports_sha", "e" * 40)), "freebsd_ports_sha"),
+            ("epoch", identity_change(lambda value: value.__setitem__("source_date_epoch", _LIVE_EPOCH + 1)), "source_date_epoch"),
+        ]
+        for label, mutate, axis in cases:
+            with self.subTest(label=label):
+                self._hostile(label, mutate, axis)
+
+        def packages_change(change: Callable[[dict[str, object]], None]) -> Callable[[Path, dict[str, Path]], None]:
+            return lambda handoff, _packages: self._edit_handoff(
+                handoff,
+                lambda value: change(cast(dict[str, object], value["dependency_packages"])),
+            )
+
+        set_cases = [
+            ("missing-suffix", packages_change(lambda value: value.pop("-CE-2.8.pkg")), "suffixes"),
+            ("extra-suffix", packages_change(lambda value: value.__setitem__("-CE-99.pkg", {})), "suffixes"),
+            (
+                "missing-origin",
+                packages_change(
+                    lambda value: cast(dict[str, object], value["-CE-2.8.pkg"]).pop(_DEP_ORIGIN)
+                ),
+                "origins",
+            ),
+            (
+                "extra-origin",
+                packages_change(
+                    lambda value: cast(dict[str, object], value["-CE-2.8.pkg"]).__setitem__("textproc/py-other", {})
+                ),
+                "origins",
+            ),
+        ]
+        for label, mutate, axis in set_cases:
+            with self.subTest(label=label):
+                self._hostile(label, mutate, axis)
+
+    def test_hostile_05_dependency_annotation_and_provenance(self) -> None:
+        def annotations_change(
+            change: Callable[[dict[str, object]], None]
+        ) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(_handoff: Path, packages: dict[str, Path]) -> None:
+                def rewrite(
+                    compact: dict[str, object],
+                    full: dict[str, object],
+                    _payload: dict[str, bytes],
+                    _members: dict[str, tarfile.TarInfo],
+                ) -> None:
+                    change(cast(dict[str, object], compact["annotations"]))
+                    change(cast(dict[str, object], full["annotations"]))
+
+                _rewrite_pkg(self._dependency(packages), rewrite)
+
+            return mutate
+
+        for label, mutate in (
+            (
+                "missing-annotation",
+                annotations_change(lambda value: value.pop("pfb_dep_build_record")),
+            ),
+            (
+                "extra-annotation",
+                annotations_change(lambda value: value.__setitem__("extra", "value")),
+            ),
+        ):
+            with self.subTest(label=label):
+                self._hostile(label, mutate, "annotation")
+
+        self._hostile(
+            "duplicate-annotation-json-key",
+            lambda _handoff, packages: self._edit_annotation(
+                self._dependency(packages),
+                lambda raw: '{"schema":1,' + raw[1:],
+            ),
+            "duplicate",
+        )
+        self._hostile(
+            "noncanonical-annotation-json",
+            lambda _handoff, packages: self._edit_annotation(
+                self._dependency(packages),
+                lambda raw: json.dumps(json.loads(raw), sort_keys=True, indent=1),
+            ),
+            "canonical",
+        )
+
+        def record_change(
+            change: Callable[[dict[str, object]], None]
+        ) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(_handoff: Path, packages: dict[str, Path]) -> None:
+                def update(raw: str) -> str:
+                    record = cast(dict[str, object], json.loads(raw))
+                    change(record)
+                    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+                self._edit_annotation(self._dependency(packages), update)
+
+            return mutate
+
+        record_cases = [
+            ("missing-record-field", record_change(lambda value: value.pop("distfile")), "exact fields"),
+            ("extra-record-field", record_change(lambda value: value.__setitem__("extra", 1)), "exact fields"),
+            ("wrong-schema-type", record_change(lambda value: value.__setitem__("schema", True)), "schema"),
+            ("distfile-drift", record_change(lambda value: value.__setitem__("distfile", "other-3.4.4.tar.gz")), "distfile"),
+            ("dist-sha-drift", record_change(lambda value: value.__setitem__("distfile_sha256", "e" * 64)), "distfile_sha256"),
+            ("dist-size-drift", record_change(lambda value: value.__setitem__("distfile_size", 129419)), "distfile_size"),
+            ("port-version-drift", record_change(lambda value: value.__setitem__("port_version", "3.4.5")), "port_version"),
+        ]
+        for label, mutate, axis in record_cases:
+            with self.subTest(label=label):
+                self._hostile(label, mutate, axis)
+
+    def test_hostile_06_manifest_shapes_and_inventory(self) -> None:
+        def manifest_change(
+            change: Callable[
+                [
+                    dict[str, object],
+                    dict[str, object],
+                    dict[str, bytes],
+                    dict[str, tarfile.TarInfo],
+                ],
+                None,
+            ]
+        ) -> Callable[[Path, dict[str, Path]], None]:
+            return lambda _handoff, packages: _rewrite_pkg(
+                self._dependency(packages), change
+            )
+
+        cases = [
+            (
+                "compact-extra",
+                manifest_change(lambda compact, _full, _payload, _members: compact.__setitem__("extra", 1)),
+                "compact",
+            ),
+            (
+                "compact-missing",
+                manifest_change(lambda compact, _full, _payload, _members: compact.pop("comment")),
+                "compact",
+            ),
+            (
+                "full-extra",
+                manifest_change(lambda _compact, full, _payload, _members: full.__setitem__("extra", 1)),
+                "full",
+            ),
+            (
+                "full-missing",
+                manifest_change(lambda _compact, full, _payload, _members: full.pop("comment")),
+                "full",
+            ),
+            (
+                "compact-full-mismatch",
+                manifest_change(lambda compact, _full, _payload, _members: compact.__setitem__("comment", "changed")),
+                "mismatch",
+            ),
+            (
+                "payload-inventory-mismatch",
+                manifest_change(
+                    lambda _compact, full, _payload, _members: cast(
+                        dict[str, object], full["files"]
+                    ).pop(next(iter(cast(dict[str, object], full["files"]))))
+                ),
+                "inventory",
+            ),
+        ]
+        for label, mutate, axis in cases:
+            with self.subTest(label=label):
+                self._hostile(label, mutate, axis)
+
+    def test_hostile_07_payload_checksums(self) -> None:
+        def checksum_change(value: str) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(_handoff: Path, packages: dict[str, Path]) -> None:
+                def rewrite(
+                    _compact: dict[str, object],
+                    full: dict[str, object],
+                    _payload: dict[str, bytes],
+                    _members: dict[str, tarfile.TarInfo],
+                ) -> None:
+                    files = cast(dict[str, dict[str, object]], full["files"])
+                    files[next(iter(files))]["sum"] = value
+
+                _rewrite_pkg(self._dependency(packages), rewrite)
+
+            return mutate
+
+        self._hostile("malformed-payload-sum", checksum_change("bad"), "checksum")
+        self._hostile(
+            "valid-shaped-wrong-payload-sum",
+            checksum_change("1$" + "e" * 64),
+            "checksum mismatch",
+        )
+
+        def data_mismatch(_handoff: Path, packages: dict[str, Path]) -> None:
+            def rewrite(
+                _compact: dict[str, object],
+                _full: dict[str, object],
+                payload: dict[str, bytes],
+                _members: dict[str, tarfile.TarInfo],
+            ) -> None:
+                path = next(iter(payload))
+                payload[path] += b"changed"
+
+            _rewrite_pkg(self._dependency(packages), rewrite)
+
+        self._hostile("payload-data-mismatch", data_mismatch, "checksum mismatch")
+
+    def test_hostile_08_abi_and_arch_binding(self) -> None:
+        def manifest_field(field: str, value: object) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(_handoff: Path, packages: dict[str, Path]) -> None:
+                def rewrite(
+                    compact: dict[str, object],
+                    full: dict[str, object],
+                    _payload: dict[str, bytes],
+                    _members: dict[str, tarfile.TarInfo],
+                ) -> None:
+                    compact[field] = value
+                    full[field] = value
+
+                _rewrite_pkg(self._dependency(packages), rewrite)
+
+            return mutate
+
+        for label, mutate in (
+            ("manifest-abi", manifest_field("abi", "FreeBSD:16:*")),
+            ("manifest-arch", manifest_field("arch", "freebsd:16:*")),
+        ):
+            with self.subTest(label=label):
+                self._hostile(label, mutate, "ABI/arch")
+
+        def record_abi(_handoff: Path, packages: dict[str, Path]) -> None:
+            def change(raw: str) -> str:
+                record = cast(dict[str, object], json.loads(raw))
+                record["abi"] = "FreeBSD:16:*"
+                return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+            self._edit_annotation(self._dependency(packages), change)
+
+        self._hostile("record-abi", record_abi, "abi")
+
+    def test_hostile_09_origin_binding(self) -> None:
+        def manifest_origin(_handoff: Path, packages: dict[str, Path]) -> None:
+            def rewrite(
+                compact: dict[str, object],
+                full: dict[str, object],
+                _payload: dict[str, bytes],
+                _members: dict[str, tarfile.TarInfo],
+            ) -> None:
+                compact["origin"] = "textproc/py-other"
+                full["origin"] = "textproc/py-other"
+
+            _rewrite_pkg(self._dependency(packages), rewrite)
+
+        self._hostile("manifest-origin", manifest_origin, "origin")
+
+        def record_origin(_handoff: Path, packages: dict[str, Path]) -> None:
+            def change(raw: str) -> str:
+                record = cast(dict[str, object], json.loads(raw))
+                record["port_origin"] = "textproc/py-other"
+                return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+            self._edit_annotation(self._dependency(packages), change)
+
+        self._hostile("record-origin", record_origin, "unrequested")
+
+    def test_hostile_10_name_and_version_binding(self) -> None:
+        def manifest_field(field: str, value: str) -> Callable[[Path, dict[str, Path]], None]:
+            def mutate(_handoff: Path, packages: dict[str, Path]) -> None:
+                def rewrite(
+                    compact: dict[str, object],
+                    full: dict[str, object],
+                    _payload: dict[str, bytes],
+                    _members: dict[str, tarfile.TarInfo],
+                ) -> None:
+                    compact[field] = value
+                    full[field] = value
+
+                _rewrite_pkg(self._dependency(packages), rewrite)
+
+            return mutate
+
+        self._hostile(
+            "manifest-name",
+            manifest_field("name", "py311-other"),
+            "name",
+        )
+        self._hostile(
+            "manifest-version",
+            manifest_field("version", "3.4.5"),
+            "version",
+        )
+
+        def record_version(_handoff: Path, packages: dict[str, Path]) -> None:
+            def change(raw: str) -> str:
+                record = cast(dict[str, object], json.loads(raw))
+                record["port_version"] = "3.4.5"
+                return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+            self._edit_annotation(self._dependency(packages), change)
+
+        self._hostile("record-version", record_version, "port_version")
+
+    def test_hostile_11_filename_suffix_and_duplicate_route_assets(self) -> None:
+        def rename_dependency(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._dependency(packages)
+            package.rename(package.with_name(package.name.replace("-CE-2.8.pkg", "-CE-99.pkg")))
+
+        self._hostile("renamed-dependency-suffix", rename_dependency, "route row")
+
+        def rename_canonical(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._canonical(packages)
+            package.rename(package.with_name(package.name.replace("-CE-2.8.pkg", "-CE-99.pkg")))
+
+        self._hostile("canonical-suffix-mismatch", rename_canonical, "route")
+
+        def duplicate_dependency(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._dependency(packages)
+            duplicate = package.with_name(package.name.replace("-CE-2.8.pkg", "-copy-CE-2.8.pkg"))
+            duplicate.write_bytes(package.read_bytes())
+
+        self._hostile("duplicate-dependency-route-asset", duplicate_dependency, "filename")
+
+        def duplicate_canonical(_handoff: Path, packages: dict[str, Path]) -> None:
+            package = self._canonical(packages)
+            duplicate = package.with_name(package.name.replace("-CE-2.8.pkg", "-copy-CE-2.8.pkg"))
+            duplicate.write_bytes(package.read_bytes())
+
+        self._hostile("duplicate-canonical-route-asset", duplicate_canonical, "filename")
+
+    def test_hostile_12_route_assignment_and_coverage(self) -> None:
+        def assign_other_route(_handoff: Path, packages: dict[str, Path]) -> None:
+            source = self._dependency(packages, "-CE-2.8.pkg")
+            destination = self._dependency(packages, "-CE-2.9.pkg")
+            destination.unlink()
+            source.rename(source.with_name(source.name.replace("-CE-2.8.pkg", "-CE-2.9.pkg")))
+
+        self._hostile("dependency-other-route", assign_other_route, "route")
+
+        self._hostile(
+            "missing-dependency",
+            lambda _handoff, packages: self._dependency(packages).unlink(),
+            "missing dependency",
+        )
+
+        def unrequested_dependency(_handoff: Path, packages: dict[str, Path]) -> None:
+            directory = next(iter(packages.values())).parent
+            _wrap_dependency_pkg(
+                directory,
+                name="py311-unrequested",
+                version="1.0.0",
+                abi="FreeBSD:16:*",
+                local_name="py311-unrequested-1.0.0-Plus-26.03.pkg",
+                origin="textproc/py-unrequested",
+                source_date_epoch=_LIVE_EPOCH,
+                freebsd_ports_sha=_LIVE_PORTS_SHA,
+            )
+
+        self._hostile("unrequested-dependency", unrequested_dependency, "matches no varver")
+
+        def row_identity(handoff: Path, _packages: dict[str, Path]) -> None:
+            def change(value: dict[str, object]) -> None:
+                rows = cast(list[dict[str, object]], value["route_matrix"])
+                rows[0]["php_version"] = "8.4"
+
+            self._edit_handoff(handoff, change)
+
+        self._hostile("route-row-identity-drift", row_identity, "matrix_row")
+
+        def extra_pkgs(handoff: Path, _packages: dict[str, Path]) -> None:
+            def change(value: dict[str, object]) -> None:
+                rows = cast(list[dict[str, object]], value["route_matrix"])
+                cast(list[str], rows[0]["extra_pkgs"]).append("textproc/py-other")
+
+            self._edit_handoff(handoff, change)
+
+        self._hostile("route-extra-pkgs-drift", extra_pkgs, "origins")
+
+        self._hostile(
+            "four-row-missing-canonical",
+            lambda _handoff, packages: self._canonical(packages, "-Plus-26.03.pkg").unlink(),
+            "with no asset",
+        )
+
+        def extra_route_row(handoff: Path, _packages: dict[str, Path]) -> None:
+            def change(value: dict[str, object]) -> None:
+                rows = cast(list[dict[str, object]], value["route_matrix"])
+                row = copy.deepcopy(rows[1])
+                row["pfsense_version"] = "26.09"
+                rows.append(row)
+
+            self._edit_handoff(handoff, change)
+
+        self._hostile("four-row-extra-route-coverage", extra_route_row, "with no asset")
+
+        def missing_route_row(handoff: Path, _packages: dict[str, Path]) -> None:
+            def change(value: dict[str, object]) -> None:
+                rows = cast(list[dict[str, object]], value["route_matrix"])
+                rows.pop(2)
+
+            self._edit_handoff(handoff, change)
+
+        self._hostile(
+            "four-row-extra-canonical-coverage",
+            missing_route_row,
+            "not a build-role",
+        )
+
+    def test_hostile_13_json_encoding_size_and_unicode_origin(self) -> None:
+        self._hostile(
+            "invalid-utf8",
+            lambda handoff, _packages: handoff.write_bytes(b"\xff"),
+            "UTF-8",
+        )
+        self._hostile(
+            "malformed-json",
+            lambda handoff, _packages: handoff.write_text("{", encoding="utf-8"),
+            "valid JSON",
+        )
+
+        def oversized(handoff: Path, _packages: dict[str, Path]) -> None:
+            self._edit_handoff(
+                handoff, lambda value: value.__setitem__("oversized", "x" * 1_100_000)
+            )
+
+        self._hostile("oversized-json", oversized, "unexpected fields")
+
+        def unicode_origin(handoff: Path, _packages: dict[str, Path]) -> None:
+            def change(value: dict[str, object]) -> None:
+                rows = cast(list[dict[str, object]], value["route_matrix"])
+                cast(list[str], rows[0]["extra_pkgs"])[0] = "textproc/py-café"
+
+            self._edit_handoff(handoff, change)
+
+        self._hostile("unicode-origin", unicode_origin, "safe origins")
 
 # --------------------------------------------------------------------------- #
 # Digest sidecar + asset discovery.
@@ -761,10 +1807,13 @@ class IntakeAndHandoffTests(_TempDirTestCase):
     ) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         compatibility = self.tmp / "compatibility-route-matrix.json"
-        compatibility.write_text(json.dumps([ROW_CE]), encoding="utf-8")
+        compatibility.write_text(json.dumps([ROW_CE_NO_EXTRA]), encoding="utf-8")
 
         report = pr.run(
             source_repository=_REPO,
@@ -784,10 +1833,13 @@ class IntakeAndHandoffTests(_TempDirTestCase):
     def test_published_release_without_handoff_enforces_cli_source_sha(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         compatibility = self.tmp / "compatibility-route-matrix.json"
-        compatibility.write_text(json.dumps([ROW_CE]), encoding="utf-8")
+        compatibility.write_text(json.dumps([ROW_CE_NO_EXTRA]), encoding="utf-8")
 
         with self.assertRaises(pr.DestinationConflictError) as ctx:
             pr.run(
@@ -840,7 +1892,7 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             _record(row=ROW_CE, source_tag="v4.0.0.b1"),
             _record(row=ROW_PLUS_03, source_tag="v4.0.0.b1"),
         ]
-        records[1]["freebsd_ports_sha"] = "d" * 64
+        records[1]["freebsd_ports_sha"] = "d" * 40
         records[1]["build_input_digest"] = pfb_pkg.build_input_digest(records[1])
         digests: dict[str, str] = {}
         for record in records:
@@ -927,11 +1979,14 @@ class RejectionPropagationTests(_TempDirTestCase):
     ) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
-            rows=(ROW_CE,),
+            rows=(ROW_CE_NO_EXTRA,),
             tag="v4.0.0.b1",
             ports_sha="d" * 40,
         )
@@ -1002,7 +2057,7 @@ class TargetResolutionTests(_TempDirTestCase):
         assets_dir = self.new_assets_dir()
         assets_dir.mkdir()
         digests: dict[str, str] = {}
-        for row in (ROW_CE, ROW_CE_PATCH):
+        for row in (ROW_CE_NO_EXTRA, ROW_CE_PATCH):
             record = _record(channel="edge", row=row, source_tag="v4.0.0.b1")
             declared = _canonical_declared_name(record)
             _path, digest = _wrap_canonical_pkg(assets_dir, record, local_name=declared)
@@ -1015,7 +2070,7 @@ class TargetResolutionTests(_TempDirTestCase):
             _run(
                 pkg_repo=self.pkg_repo,
                 assets_dir=assets_dir,
-                rows=(ROW_CE, ROW_CE_PATCH),
+                rows=(ROW_CE_NO_EXTRA, ROW_CE_PATCH),
                 tag="v4.0.0.b1",
             )
         self.assertIn("same varver", str(ctx.exception))
@@ -1034,6 +2089,7 @@ class TargetResolutionTests(_TempDirTestCase):
             rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN),
             source_tag="v4.0.0.b1",
             include_dependency=False,
+            preserve_declared_extras=True,
         )
         for row in (ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN):
             declared = _dependency_declared_name(
@@ -1118,7 +2174,10 @@ class DestinationConflictTests(_TempDirTestCase):
         assets_dir_2 = self.new_assets_dir()
         assets_dir_2.mkdir(parents=True)
         divergent_record = _record(
-            channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="c" * 40
+            channel="edge",
+            row=ROW_CE_NO_EXTRA,
+            source_tag="v4.0.0.b1",
+            source_sha="c" * 40,
         )
         declared = _canonical_declared_name(divergent_record)
         _path, digest = _wrap_canonical_pkg(
@@ -1132,7 +2191,7 @@ class DestinationConflictTests(_TempDirTestCase):
             _run(
                 pkg_repo=self.pkg_repo,
                 assets_dir=assets_dir_2,
-                rows=(ROW_CE,),
+                rows=(ROW_CE_NO_EXTRA,),
                 tag="v4.0.0.b1",
             )
         message = str(ctx.exception)
@@ -1158,7 +2217,11 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         package still publishes normally alongside the untouched stale dependency."""
         assets_dir = self.new_assets_dir()
         digests = _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+            preserve_declared_extras=True,
         )
         declared = _dependency_declared_name(
             name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
@@ -1220,6 +2283,7 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             rows=(ROW_PLUS_03_TWIN, ROW_PLUS_07_TWIN),
             source_tag="v4.0.0.b1",
             include_dependency=False,
+            preserve_declared_extras=True,
         )
         twin_bytes: dict[str, bytes] = {}
         for row, filler in (
@@ -1273,7 +2337,11 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         row" check) so this test isolates publish_release's own suffix-row check."""
         assets_dir = self.new_assets_dir()
         digests = _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
+            preserve_declared_extras=True,
         )
         declared = _dependency_declared_name(
             name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
@@ -1393,6 +2461,7 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
             rows=(ROW_CE,),
             source_tag="v4.0.1.b1",
             include_dependency=False,
+            preserve_declared_extras=True,
         )
         declared = _dependency_declared_name(
             name="py311-charset-normalizer", version="3.4.0", row=ROW_CE
@@ -1488,7 +2557,7 @@ class DependencyPlaceIfMissingTests(_TempDirTestCase):
         )
         self.assertEqual(
             pfb_pkg.read_compact_manifest(published)["origin"],
-            "textproc/py311-charset-normalizer",
+            _DEP_ORIGIN,
         )
         self.assertIn(_CHARSET_NAME, _packagesite_names(dest))
 
@@ -2186,7 +3255,10 @@ class OutcomeTests(_TempDirTestCase):
         divergent_assets_dir = self.new_assets_dir()
         divergent_assets_dir.mkdir(parents=True)
         divergent_record = _record(
-            channel="edge", row=ROW_CE, source_tag="v4.0.0.b1", source_sha="d" * 40
+            channel="edge",
+            row=ROW_CE_NO_EXTRA,
+            source_tag="v4.0.0.b1",
+            source_sha="d" * 40,
         )
         declared = _canonical_declared_name(divergent_record)
         _path, digest = _wrap_canonical_pkg(
@@ -2200,7 +3272,7 @@ class OutcomeTests(_TempDirTestCase):
             _run(
                 pkg_repo=self.pkg_repo,
                 assets_dir=divergent_assets_dir,
-                rows=(ROW_CE,),
+                rows=(ROW_CE_NO_EXTRA,),
                 tag="v4.0.0.b1",
             )
 
@@ -2498,11 +3570,14 @@ class SignKeyThreadingTests(_TempDirTestCase):
     def test_main_sign_key_flag_reaches_regenerate_catalogue(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
-            rows=(ROW_CE,),
+            rows=(ROW_CE_NO_EXTRA,),
             tag="v4.0.0.b1",
         )
         # A REAL key: publish() derives its public half up front, so a placeholder
@@ -2539,11 +3614,14 @@ class SignKeyThreadingTests(_TempDirTestCase):
     def test_main_without_sign_key_flag_passes_none(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
-            rows=(ROW_CE,),
+            rows=(ROW_CE_NO_EXTRA,),
             tag="v4.0.0.b1",
         )
         argv = [
@@ -2582,11 +3660,14 @@ class MainCliTests(_TempDirTestCase):
     def test_main_success_prints_touched_and_returns_zero(self) -> None:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
-            assets_dir, rows=(ROW_CE,), source_tag="v4.0.0.b1", include_dependency=False
+            assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag="v4.0.0.b1",
+            include_dependency=False,
         )
         handoff = _write_handoff(
             assets_dir / "pfblockerng-release-handoff.json",
-            rows=(ROW_CE,),
+            rows=(ROW_CE_NO_EXTRA,),
             tag="v4.0.0.b1",
         )
         argv = [
@@ -2762,7 +3843,7 @@ class ExtraPkgsEvictionTests(_TempDirTestCase):
 
         assets_2 = self.new_assets_dir()
         _populate_assets_dir(
-            assets_2, rows=(ROW_CE,), source_tag="v4.0.0.b2", include_dependency=False
+            assets_2, rows=(ROW_CE,), source_tag="v4.0.0.b2"
         )
         _run(
             pkg_repo=self.pkg_repo, assets_dir=assets_2, rows=(ROW_CE,), tag="v4.0.0.b2"
