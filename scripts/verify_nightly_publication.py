@@ -32,7 +32,7 @@ def verify_publication(
             "artifact_ref is not an exact Nightly digest reference"
         )
     proc = subprocess.run(
-        ["git", "-C", str(repo), "log", "--max-count=1000", "--format=%B%x00"],
+        ["git", "-C", str(repo), "log", "--format=%B%x00"],
         check=False,
         capture_output=True,
         text=True,
@@ -60,6 +60,27 @@ def verify_publication(
     )
 
 
+def cleanup(
+    repo: str | Path, *, source_run_id: str, nightly_version: str, artifact_ref: str
+) -> None:
+    verify_publication(
+        repo,
+        source_run_id=source_run_id,
+        nightly_version=nightly_version,
+        artifact_ref=artifact_ref,
+    )
+    proc = subprocess.run(
+        ["oras", "manifest", "delete", artifact_ref],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise PublicationReceiptError(
+            f"cannot delete exact Nightly OCI manifest: {proc.stderr.strip()}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, type=Path)
@@ -68,7 +89,7 @@ def main() -> int:
     parser.add_argument("--artifact-ref", required=True)
     args = parser.parse_args()
     try:
-        verify_publication(
+        cleanup(
             args.repo,
             source_run_id=args.source_run_id,
             nightly_version=args.nightly_version,

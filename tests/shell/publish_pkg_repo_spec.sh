@@ -1,15 +1,9 @@
 #shellcheck shell=sh
 # publish_pkg_repo_spec.sh — scripts/publish-pkg-repo.sh.
 #
-# publish_release.py and publish_nightly.py are stubbed (a fake PFB_SRC checkout,
-# see setup()): git mutation is the ONLY thing this script owns, and it is exactly
-# what this spec exercises — network/engine verification is each publisher's own,
-# already-covered PFB_SRC=... python3 -m unittest suite (pkg repo). Site rendering
-# is NOT this script's job (issue #2450 step 2) — render-pkg-site.sh's own spec
-# (render_pkg_site_spec.sh) covers that. Fixture: a bare "remote" origin plus a
-# working PKG_REPO clone already carrying one committed catalogue directory
-# (docs/edge/ce-2.8), mirroring what the release job's checkout looks like before
-# this script runs.
+# Publisher and renderer internals are stubbed so this spec exercises the git
+# transaction, retry, path guards, stage/promote/discard, and atomic render
+# boundary around them. Real validation/render bytes are covered by Python suites.
 #
 # CONTAINMENT: two independent guards are exercised here. The publisher
 # fault-injection case (a mid-regeneration write-back fault: wipe the catalog

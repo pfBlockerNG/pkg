@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Initialize result
@@ -256,17 +256,11 @@ jobs:
           ARTIFACT_REF: ${{ inputs.artifact_ref }}
         run: |
           set -eu
-          PREFIX=ghcr.io/pfblockerng/pfblockerng-nightly@sha256:
-          case "$ARTIFACT_REF" in "${PREFIX}"*) ;; *) echo "::error::cleanup requires an exact digest reference"; exit 1 ;; esac
-          DIGEST=${ARTIFACT_REF#"$PREFIX"}
           python3 scripts/verify_nightly_publication.py \
             --repo "$GITHUB_WORKSPACE" \
             --source-run-id "${{ inputs.source_run_id }}" \
             --nightly-version "${{ inputs.nightly_version }}" \
             --artifact-ref "$ARTIFACT_REF"
-          case "$DIGEST" in ''|*[!0-9a-f]*) echo "::error::cleanup digest is malformed"; exit 1 ;; esac
-          [ "${#DIGEST}" -eq 64 ] || { echo "::error::cleanup digest must have 64 hex characters"; exit 1; }
-          oras manifest delete "$ARTIFACT_REF"
 
       - name: Record ingestion result
         if: always()
