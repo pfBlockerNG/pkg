@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -12,12 +11,8 @@ import pytest
 import verify_nightly_publication as verify
 
 _REF_PREFIX = "ghcr.io/pfblockerng/pfblockerng-nightly@"
-_LIST_ENDPOINT = (
-    "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
-    "?per_page=100&state=active"
-)
 _DELETE_ENDPOINT = "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
-_VERSION_SCOPED = re.compile(rf"^{re.escape(_DELETE_ENDPOINT)}/[1-9][0-9]*$")
+_LIST_ENDPOINT = f"{_DELETE_ENDPOINT}?per_page=100&state=active"
 
 _PRIOR_VERSION = "20260826010101.abcdef1"
 _PRIOR_RUN_ID = "123:2"
@@ -27,37 +22,58 @@ _CURRENT_RUN_ID = "124:1"
 _CURRENT_REF = _REF_PREFIX + "sha256:" + "c" * 64
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, date: str | None = None) -> str:
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
+    if date is not None:
+        env["GIT_AUTHOR_DATE"] = date
+        env["GIT_COMMITTER_DATE"] = date
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True,
         capture_output=True,
         text=True,
-        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+        env=env,
     ).stdout.strip()
 
 
-def _publish(repo: Path, version: str, run_id: str, artifact_ref: str) -> None:
-    message = (
-        f'publish: nightly {version} -> ["nightly"]\n\n'
+def _receipt_block(version: str, run_id: str, artifact_ref: str) -> str:
+    return (
         f"pfBlockerNG-Nightly-Version: {version}\n"
         f"pfBlockerNG-Source-Run-Id: {run_id}\n"
         f"pfBlockerNG-Nightly-Artifact-Ref: {artifact_ref}\n"
     )
-    _git(repo, "commit", "-q", "--allow-empty", "-m", message)
+
+
+def _publish(
+    repo: Path,
+    version: str,
+    run_id: str,
+    artifact_ref: str,
+    *,
+    date: str | None = None,
+) -> None:
+    message = f'publish: nightly {version} -> ["nightly"]\n\n' + _receipt_block(
+        version, run_id, artifact_ref
+    )
+    _git(repo, "commit", "-q", "--allow-empty", "-m", message, date=date)
     _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
-def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+def _seed_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "pkg"
     repo.mkdir()
-    _git(repo, "init", "-q")
+    _git(repo, "init", "-q", "-b", "main")
     _git(repo, "config", "user.name", "test")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "commit.gpgsign", "false")
     (repo / "seed").write_text("seed\n", encoding="utf-8")
     _git(repo, "add", "seed")
     _git(repo, "commit", "-q", "-m", "seed")
+    return repo
+
+
+def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    repo = _seed_repo(tmp_path)
     _publish(repo, _PRIOR_VERSION, _PRIOR_RUN_ID, _PRIOR_REF)
     return repo, _PRIOR_RUN_ID, _PRIOR_VERSION, _PRIOR_REF
 
@@ -198,11 +214,6 @@ def _assert_no_delete(calls: list[str]) -> None:
     assert _delete_calls(calls) == [], calls
 
 
-def _assert_version_scoped(deletes: list[str]) -> None:
-    for target in deletes:
-        assert _VERSION_SCOPED.fullmatch(target), deletes
-
-
 def test_only_successful_version_is_retained_with_no_delete(tmp_path: Path) -> None:
     repo, run_id, version, artifact_ref = _published_repo(tmp_path)
     proc, calls = _run_cleanup(
@@ -215,7 +226,6 @@ def test_only_successful_version_is_retained_with_no_delete(tmp_path: Path) -> N
     )
     assert proc.returncode == 0, proc.stderr
     assert calls == [f"gh api --paginate --slurp {_LIST_ENDPOINT}"]
-    _assert_no_delete(calls)
 
 
 def test_prior_successful_version_deleted_and_consumed_version_retained(
@@ -238,9 +248,7 @@ def test_prior_successful_version_deleted_and_consumed_version_retained(
         f"gh api --paginate --slurp {_LIST_ENDPOINT}",
         f"gh api --method DELETE {_DELETE_ENDPOINT}/1170000000",
     ]
-    deletes = _delete_calls(calls)
-    _assert_version_scoped(deletes)
-    assert f"{_DELETE_ENDPOINT}/1176645017" not in deletes
+    assert f"{_DELETE_ENDPOINT}/1176645017" not in _delete_calls(calls)
 
 
 def test_every_prior_successful_version_deleted_by_exact_id(tmp_path: Path) -> None:
@@ -267,7 +275,176 @@ def test_every_prior_successful_version_deleted_by_exact_id(tmp_path: Path) -> N
         f"{_DELETE_ENDPOINT}/1173000000",
         f"{_DELETE_ENDPOINT}/1170000000",
     ]
-    _assert_version_scoped(_delete_calls(calls))
+
+
+def test_repeated_consumed_receipt_never_deletes_the_retained_anchor(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+
+
+def test_consumed_identity_republished_under_another_run_id_is_not_a_prior(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, "900:7", _CURRENT_REF)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+
+
+def test_repeated_prior_receipt_deletes_that_version_exactly_once(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _PRIOR_VERSION, _PRIOR_RUN_ID, _PRIOR_REF)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+
+
+def test_publication_outside_the_consumed_ancestry_is_not_a_prior(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    side_version = "20260828030200.eeeeeee"
+    side_ref = _REF_PREFIX + "sha256:" + "e" * 64
+    _git(repo, "checkout", "-q", "-b", "side")
+    _publish(repo, side_version, "999:1", side_ref, date="2026-08-28T08:00:00")
+    _git(repo, "checkout", "-q", "main")
+    _publish(
+        repo,
+        _CURRENT_VERSION,
+        _CURRENT_RUN_ID,
+        _CURRENT_REF,
+        date="2026-08-28T10:00:00",
+    )
+    _git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        "side",
+        "-m",
+        "merge side",
+        date="2026-08-28T11:00:00",
+    )
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    rows = [
+        _version_row(side_version, side_ref, version_id=1188888888),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_receipt_quoted_outside_the_trailer_block_is_not_a_prior(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    quoted_version = "20260824170736.468a267"
+    quoted_ref = _REF_PREFIX + "sha256:" + "7" * 64
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "docs: describe the Nightly receipt format\n\n"
+        + _receipt_block(quoted_version, "32754672803:1", quoted_ref)
+        + "\nThe three lines above are the receipt trailer block.\n",
+    )
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(quoted_version, quoted_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_cleanup_rejects_an_identity_quoted_outside_the_trailer_block(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "docs: quote the cleanup identity\n\n"
+        + _receipt_block(_CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+        + "\nQuoted for illustration only.\n",
+    )
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([[_version_row(_CURRENT_VERSION, _CURRENT_REF)]]),
+    )
+    assert proc.returncode == 1
+    assert "no committed Nightly publication" in proc.stderr
+    assert calls == []
 
 
 def test_newer_successful_version_is_never_deleted_by_a_late_cleanup(
@@ -485,21 +662,15 @@ def test_cleanup_rejects_duplicate_prior_version_rows_without_delete(
     _assert_no_delete(calls)
 
 
-@pytest.mark.parametrize("broken", ["version", "artifact_ref"])
+@pytest.mark.parametrize("broken", ["version", "run_id", "artifact_ref"])
 def test_cleanup_rejects_malformed_prior_receipt_without_delete(
     tmp_path: Path, broken: str
 ) -> None:
-    repo = tmp_path / "pkg"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.name", "test")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "commit.gpgsign", "false")
-    (repo / "seed").write_text("seed\n", encoding="utf-8")
-    _git(repo, "add", "seed")
-    _git(repo, "commit", "-q", "-m", "seed")
+    repo = _seed_repo(tmp_path)
     if broken == "version":
         _publish(repo, "not-a-version", _PRIOR_RUN_ID, _PRIOR_REF)
+    elif broken == "run_id":
+        _publish(repo, _PRIOR_VERSION, "not-a-run-id", _PRIOR_REF)
     else:
         _publish(repo, _PRIOR_VERSION, _PRIOR_RUN_ID, "ghcr.io/other/thing:latest")
     _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
@@ -573,19 +744,17 @@ def test_cleanup_rejects_malformed_version_json_without_delete(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    ("call", "target"),
+    "call",
     [
-        ("gh api -X DELETE endpoint", "endpoint"),
-        ("gh api -XDELETE endpoint", "endpoint"),
-        ("gh api -X=DELETE endpoint", "endpoint"),
-        ("gh api --method=DELETE endpoint", "endpoint"),
-        ("gh api --method DELETE endpoint", "endpoint"),
+        "gh api -X DELETE endpoint",
+        "gh api -XDELETE endpoint",
+        "gh api -X=DELETE endpoint",
+        "gh api --method=DELETE endpoint",
+        "gh api --method DELETE endpoint",
     ],
 )
-def test_delete_detection_reads_every_gh_method_spelling(
-    call: str, target: str
-) -> None:
-    assert _delete_calls([call]) == [target]
+def test_delete_detection_reads_every_gh_method_spelling(call: str) -> None:
+    assert _delete_calls([call]) == ["endpoint"]
     with pytest.raises(AssertionError):
         _assert_no_delete([call])
 
@@ -595,11 +764,8 @@ def test_delete_detection_rejects_oras_manifest_delete() -> None:
         _assert_no_delete(["oras manifest delete --force exact-ref"])
 
 
-def test_delete_detection_ignores_reads_and_flags_whole_package_targets() -> None:
+def test_delete_detection_ignores_reads() -> None:
     assert _delete_calls([f"gh api --paginate --slurp {_LIST_ENDPOINT}"]) == []
-    package = _DELETE_ENDPOINT.removesuffix("/versions")
-    with pytest.raises(AssertionError):
-        _assert_version_scoped(_delete_calls([f"gh api --method DELETE {package}"]))
 
 
 @pytest.mark.parametrize(

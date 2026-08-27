@@ -4,8 +4,9 @@
 GitHub Packages refuses to delete a package's last tagged version, so the
 consumed Nightly version is kept as the package's anchor and rollback receipt
 (pfBlockerNG/pfBlockerNG#2752, owner ruling: bounded one-success retention).
-Cleanup deletes only the successful versions that pkg `main` proves came
-before it, leaving exactly one successful version behind.
+Cleanup deletes only the successful versions whose publication receipts are
+committed ancestors of the consumed one, leaving exactly one successful
+version behind.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ _VERSION_TRAILER = "pfBlockerNG-Nightly-Version"
 _RUN_ID_TRAILER = "pfBlockerNG-Source-Run-Id"
 _ARTIFACT_REF_TRAILER = "pfBlockerNG-Nightly-Artifact-Ref"
 _RECEIPT_TRAILERS = (_VERSION_TRAILER, _RUN_ID_TRAILER, _ARTIFACT_REF_TRAILER)
+# Let git decide what a trailer is: a receipt quoted mid-body is not one.
+_RECEIPT_LOG_FORMAT = "--format=%H%x1f%(trailers:only=true,unfold=true)%x00"
 _PACKAGE_VERSIONS_ENDPOINT = (
     "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
 )
@@ -46,22 +49,60 @@ class PublicationReceiptError(ValueError):
 def _receipt_identity(receipt: dict[str, str]) -> Identity:
     version = receipt[_VERSION_TRAILER]
     artifact_ref = receipt[_ARTIFACT_REF_TRAILER]
-    if not _VERSION.fullmatch(version) or not _ARTIFACT_REF.fullmatch(artifact_ref):
+    if (
+        not _VERSION.fullmatch(version)
+        or not _RUN_ID.fullmatch(receipt[_RUN_ID_TRAILER])
+        or not _ARTIFACT_REF.fullmatch(artifact_ref)
+    ):
         raise PublicationReceiptError(
             "malformed prior Nightly publication receipt in pkg history"
         )
     return artifact_ref.rsplit("@", 1)[1], version
 
 
+def _publication_receipts(
+    repo: str | Path, revision: str
+) -> list[tuple[str, dict[str, str]]]:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "log", _RECEIPT_LOG_FORMAT, revision],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    if proc.returncode != 0:
+        raise PublicationReceiptError(
+            f"cannot read pkg publication history at {revision}: {proc.stderr.strip()}"
+        )
+    receipts: list[tuple[str, dict[str, str]]] = []
+    for record in proc.stdout.split("\0"):
+        commit, separator, block = record.partition("\x1f")
+        if not separator:
+            continue
+        trailers: dict[str, str] = {}
+        for line in block.splitlines():
+            key, found, value = line.partition(": ")
+            if found and key in _RECEIPT_TRAILERS:
+                if key in trailers:
+                    raise PublicationReceiptError(
+                        f"duplicate Nightly publication trailer: {key}"
+                    )
+                trailers[key] = value
+        if len(trailers) == len(_RECEIPT_TRAILERS):
+            receipts.append((commit.strip(), trailers))
+    return receipts
+
+
 def verify_publication(
     repo: str | Path, *, source_run_id: str, nightly_version: str, artifact_ref: str
-) -> list[Identity]:
-    """Return the successful publications committed before the consumed one.
+) -> tuple[Identity, list[Identity]]:
+    """Return the consumed identity and the successful publications before it.
 
-    Raises unless pkg `main` records the exact cleanup identity. The returned
-    predecessors are ordered newest first and come only from committed
-    receipts, never from registry timestamps, so a publication that never
-    reached pkg `main` is never treated as successful.
+    Raises unless pkg `main` records the exact cleanup identity as a real git
+    trailer block. Predecessors are the distinct receipts committed among the
+    consumed commit's own ancestors, so they are proven by history rather than
+    by registry timestamps or by position in a log listing, and the consumed
+    identity itself can never appear among them.
     """
     if not _RUN_ID.fullmatch(source_run_id):
         raise PublicationReceiptError("source_run_id is malformed")
@@ -71,42 +112,32 @@ def verify_publication(
         raise PublicationReceiptError(
             "artifact_ref is not an exact Nightly digest reference"
         )
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "log", "--format=%B%x00", _PUBLICATION_REF],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
-    )
-    if proc.returncode != 0:
-        raise PublicationReceiptError(
-            f"cannot read pkg publication history at {_PUBLICATION_REF}: "
-            f"{proc.stderr.strip()}"
-        )
     consumed = {
         _VERSION_TRAILER: nightly_version,
         _RUN_ID_TRAILER: source_run_id,
         _ARTIFACT_REF_TRAILER: artifact_ref,
     }
-    receipts: list[dict[str, str]] = []
-    for message in proc.stdout.split("\0"):
-        trailers: dict[str, str] = {}
-        for line in message.splitlines():
-            key, separator, value = line.partition(": ")
-            if separator and key in _RECEIPT_TRAILERS:
-                if key in trailers:
-                    raise PublicationReceiptError(
-                        f"duplicate Nightly publication trailer: {key}"
-                    )
-                trailers[key] = value
-        if len(trailers) == len(_RECEIPT_TRAILERS):
-            receipts.append(trailers)
-    for index, receipt in enumerate(receipts):
-        if receipt == consumed:
-            return [_receipt_identity(prior) for prior in receipts[index + 1 :]]
-    raise PublicationReceiptError(
-        "no committed Nightly publication matches the cleanup identity"
+    consumed_commit = next(
+        (
+            commit
+            for commit, receipt in _publication_receipts(repo, _PUBLICATION_REF)
+            if receipt == consumed
+        ),
+        None,
     )
+    if consumed_commit is None:
+        raise PublicationReceiptError(
+            "no committed Nightly publication matches the cleanup identity"
+        )
+    consumed_identity = _receipt_identity(consumed)
+    seen = {consumed_identity}
+    priors: list[Identity] = []
+    for _, ancestor in _publication_receipts(repo, consumed_commit):
+        identity = _receipt_identity(ancestor)
+        if identity not in seen:
+            seen.add(identity)
+            priors.append(identity)
+    return consumed_identity, priors
 
 
 def _reject_duplicate_json_keys(
@@ -240,13 +271,12 @@ def _prior_version_ids(
 def cleanup(
     repo: str | Path, *, source_run_id: str, nightly_version: str, artifact_ref: str
 ) -> None:
-    priors = verify_publication(
+    consumed, priors = verify_publication(
         repo,
         source_run_id=source_run_id,
         nightly_version=nightly_version,
         artifact_ref=artifact_ref,
     )
-    consumed = (artifact_ref.rsplit("@", 1)[1], nightly_version)
     for version_id in _prior_version_ids(
         _active_package_versions(), consumed=consumed, priors=priors
     ):
