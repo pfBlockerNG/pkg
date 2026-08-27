@@ -277,11 +277,12 @@ def test_every_prior_successful_version_deleted_by_exact_id(tmp_path: Path) -> N
     ]
 
 
+@pytest.mark.parametrize("second_run_id", [_CURRENT_RUN_ID, "900:7"])
 def test_repeated_consumed_receipt_never_deletes_the_retained_anchor(
-    tmp_path: Path,
+    tmp_path: Path, second_run_id: str
 ) -> None:
     repo, _, _, _ = _published_repo(tmp_path)
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    _publish(repo, _CURRENT_VERSION, second_run_id, _CURRENT_REF)
     _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
     rows = [
         _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
@@ -299,26 +300,26 @@ def test_repeated_consumed_receipt_never_deletes_the_retained_anchor(
     assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
 
 
-def test_consumed_identity_republished_under_another_run_id_is_not_a_prior(
+def test_receipt_repeated_after_a_later_publication_keeps_the_newer_version(
     tmp_path: Path,
 ) -> None:
-    repo, _, _, _ = _published_repo(tmp_path)
-    _publish(repo, _CURRENT_VERSION, "900:7", _CURRENT_REF)
+    repo, prior_run_id, prior_version, prior_ref = _published_repo(tmp_path)
     _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    _publish(repo, prior_version, prior_run_id, prior_ref)
     rows = [
-        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(prior_version, prior_ref, version_id=1170000000),
         _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
     ]
     proc, calls = _run_cleanup(
         tmp_path,
         repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
+        source_run_id=prior_run_id,
+        nightly_version=prior_version,
+        artifact_ref=prior_ref,
         response=json.dumps([rows]),
     )
     assert proc.returncode == 0, proc.stderr
-    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+    _assert_no_delete(calls)
 
 
 def test_repeated_prior_receipt_deletes_that_version_exactly_once(
@@ -445,6 +446,137 @@ def test_cleanup_rejects_an_identity_quoted_outside_the_trailer_block(
     assert proc.returncode == 1
     assert "no committed Nightly publication" in proc.stderr
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "smuggled", ["\x1e", "\x1c", "\x1d", "\x85", "\u2028", "\v", "\f"]
+)
+def test_control_characters_in_a_trailer_cannot_forge_a_receipt(
+    tmp_path: Path, smuggled: str
+) -> None:
+    repo = _seed_repo(tmp_path)
+    forged_version = "20260824170736.468a267"
+    forged_ref = _REF_PREFIX + "sha256:" + "7" * 64
+    block = _receipt_block(forged_version, "32754672803:1", forged_ref)
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "chore: sign off\n\nSigned-off-by: n <n@example.com>"
+        + smuggled
+        + smuggled.join(block.rstrip("\n").split("\n"))
+        + "\n",
+    )
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(forged_version, forged_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_repository_local_trailer_config_cannot_forge_a_receipt(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    _git(repo, "config", "trailer.separators", ":=")
+    forged_version = "20260824170736.468a267"
+    forged_ref = _REF_PREFIX + "sha256:" + "7" * 64
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "chore: unrelated\n\n"
+        f"pfBlockerNG-Nightly-Version={forged_version}\n"
+        "pfBlockerNG-Source-Run-Id=32754672803:1\n"
+        f"pfBlockerNG-Nightly-Artifact-Ref={forged_ref}\n",
+    )
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(forged_version, forged_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_worktree_path_named_like_the_publication_ref_still_cleans_up(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    collision = repo / "refs" / "remotes" / "origin"
+    collision.mkdir(parents=True)
+    (collision / "main").write_text("ambiguous\n", encoding="utf-8")
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+
+
+@pytest.mark.parametrize("present", [1, 2])
+def test_partial_receipt_trailers_are_not_a_publication(
+    tmp_path: Path, present: int
+) -> None:
+    repo = _seed_repo(tmp_path)
+    legacy_version = "20260825133122.fd978e0"
+    legacy_ref = _REF_PREFIX + "sha256:" + "7" * 64
+    block = _receipt_block(legacy_version, "32853794776:1", legacy_ref)
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        f'publish: nightly {legacy_version} -> ["nightly"]\n\n'
+        + "".join(block.splitlines(keepends=True)[:present]),
+    )
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(legacy_version, legacy_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
 
 
 def test_newer_successful_version_is_never_deleted_by_a_late_cleanup(
