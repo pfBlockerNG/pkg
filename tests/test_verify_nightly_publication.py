@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -153,7 +154,21 @@ exit 1
 
 
 def _assert_no_delete(calls: list[str]) -> None:
-    assert not [call for call in calls if " --method DELETE " in f" {call} "]
+    for call in calls:
+        words = shlex.split(call)
+        assert words[:3] != ["oras", "manifest", "delete"], calls
+        if words[:2] != ["gh", "api"]:
+            continue
+        args = words[2:]
+        method = "GET"
+        for index, arg in enumerate(args):
+            if arg in ("-X", "--method") and index + 1 < len(args):
+                method = args[index + 1]
+            elif arg.startswith("--method="):
+                method = arg.removeprefix("--method=")
+            elif arg.startswith("-X") and len(arg) > 2:
+                method = arg[2:].removeprefix("=")
+        assert method.upper() != "DELETE", calls
 
 
 def test_exact_publication_receipt_deletes_one_exact_rest_version(
@@ -314,6 +329,109 @@ def test_cleanup_rejects_malformed_version_json_without_delete(tmp_path: Path) -
         nightly_version=version,
         artifact_ref=artifact_ref,
         response="{not-json",
+    )
+    assert proc.returncode == 1
+    _assert_no_delete(calls)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "gh api -X DELETE endpoint",
+        "gh api -XDELETE endpoint",
+        "gh api -X=DELETE endpoint",
+        "gh api --method=DELETE endpoint",
+        "oras manifest delete --force exact-ref",
+    ],
+)
+def test_no_delete_assertion_rejects_every_delete_transport(call: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_no_delete([call])
+
+
+@pytest.mark.parametrize(
+    "duplicate_key",
+    [
+        "pfBlockerNG-Nightly-Version",
+        "pfBlockerNG-Source-Run-Id",
+        "pfBlockerNG-Nightly-Artifact-Ref",
+    ],
+)
+def test_cleanup_rejects_duplicate_receipt_identity_before_version_lookup(
+    tmp_path: Path, duplicate_key: str
+) -> None:
+    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    expected = {
+        "pfBlockerNG-Nightly-Version": version,
+        "pfBlockerNG-Source-Run-Id": run_id,
+        "pfBlockerNG-Nightly-Artifact-Ref": artifact_ref,
+    }
+    wrong = {
+        "pfBlockerNG-Nightly-Version": "20260826010102.abcdef1",
+        "pfBlockerNG-Source-Run-Id": "124:2",
+        "pfBlockerNG-Nightly-Artifact-Ref": (
+            "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64
+        ),
+    }
+    trailers = []
+    for key, value in expected.items():
+        if key == duplicate_key:
+            trailers.append(f"{key}: {wrong[key]}")
+        trailers.append(f"{key}: {value}")
+    message = (
+        f'publish: nightly {version} -> ["nightly"]\n\n'
+        + "\n".join(trailers)
+        + "\n"
+    )
+    commit = _git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD^", "-m", message)
+    _git(repo, "update-ref", "refs/remotes/origin/main", commit)
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=run_id,
+        nightly_version=version,
+        artifact_ref=artifact_ref,
+        response=json.dumps([[_version_row(version, artifact_ref)]]),
+    )
+    assert proc.returncode == 1
+    assert "duplicate" in proc.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["duplicate JSON key", "invalid digest name", "duplicate version id"],
+)
+def test_cleanup_rejects_malformed_inventory_even_with_one_exact_row(
+    tmp_path: Path, malformation: str
+) -> None:
+    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    exact = _version_row(version, artifact_ref)
+    if malformation == "duplicate JSON key":
+        exact_json = json.dumps(exact).replace(
+            '"id": 1176645017', '"id": 9, "id": 1176645017', 1
+        )
+        response = f"[[{exact_json}]]"
+    else:
+        unrelated = _version_row(
+            "20260825010101.abcdef0",
+            "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64,
+            version_id=(
+                1176645017
+                if malformation == "duplicate version id"
+                else 1170000000
+            ),
+        )
+        if malformation == "invalid digest name":
+            unrelated["name"] = "not-a-digest"
+        response = json.dumps([[unrelated, exact]])
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=run_id,
+        nightly_version=version,
+        artifact_ref=artifact_ref,
+        response=response,
     )
     assert proc.returncode == 1
     _assert_no_delete(calls)
