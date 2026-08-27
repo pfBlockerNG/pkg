@@ -31,8 +31,7 @@ _ARTIFACT_REF_TRAILER = "pfBlockerNG-Nightly-Artifact-Ref"
 _RECEIPT_TRAILERS = (_VERSION_TRAILER, _RUN_ID_TRAILER, _ARTIFACT_REF_TRAILER)
 # Let git decide what a trailer is: a receipt quoted mid-body is not one. The
 # separator and the comment character are pinned here so the tree being read
-# cannot redefine what counts as a receipt, and topological order makes ancestry,
-# not commit date, decide which commit came first.
+# cannot redefine what counts as a receipt.
 _RECEIPT_LOG = (
     "-c",
     "trailer.separators=:",
@@ -41,7 +40,6 @@ _RECEIPT_LOG = (
     "-c",
     "core.commentString=#",
     "log",
-    "--topo-order",
     "--format=%H%x1f%(trailers:only=true,unfold=true)%x00",
 )
 _PACKAGE_VERSIONS_ENDPOINT = (
@@ -115,11 +113,11 @@ def verify_publication(
     """Return the consumed identity and the successful publications before it.
 
     Raises unless pkg `main` records the exact cleanup identity as a real git
-    trailer block. Predecessors are the distinct receipts committed among the
-    ancestors of the *earliest* commit carrying that receipt, so they are
-    proven by history rather than by registry timestamps or by position in a
-    log listing, and neither the consumed identity nor a publication made
-    after it can appear among them.
+    trailer block. A predecessor is a receipt committed among the ancestors of
+    *every* commit carrying that identity, so it is proven by history alone —
+    never by a registry timestamp, a position in a log listing, or which side
+    of a merge git happened to walk first — and neither the consumed identity
+    nor a publication made after it can appear among them.
     """
     if not _RUN_ID.fullmatch(source_run_id):
         raise PublicationReceiptError("source_run_id is malformed")
@@ -134,22 +132,28 @@ def verify_publication(
         _RUN_ID_TRAILER: source_run_id,
         _ARTIFACT_REF_TRAILER: artifact_ref,
     }
-    receipts = _publication_receipts(repo, _PUBLICATION_REF)
-    consumed_commit = next(
-        (commit for commit, receipt in reversed(receipts) if receipt == consumed),
-        None,
-    )
-    if consumed_commit is None:
+    anchors = [
+        commit
+        for commit, receipt in _publication_receipts(repo, _PUBLICATION_REF)
+        if receipt == consumed
+    ]
+    if not anchors:
         raise PublicationReceiptError(
             "no committed Nightly publication matches the cleanup identity"
         )
     consumed_identity = _receipt_identity(consumed)
-    priors = dict.fromkeys(
-        _receipt_identity(receipt)
-        for _, receipt in _publication_receipts(repo, consumed_commit)
-    )
-    priors.pop(consumed_identity, None)
-    return consumed_identity, list(priors)
+    ancestries = []
+    for anchor in anchors:
+        identities = dict.fromkeys(
+            _receipt_identity(receipt)
+            for _, receipt in _publication_receipts(repo, anchor)
+        )
+        identities.pop(consumed_identity, None)
+        ancestries.append(identities)
+    first, rest = ancestries[0], ancestries[1:]
+    return consumed_identity, [
+        identity for identity in first if all(identity in other for other in rest)
+    ]
 
 
 def _reject_duplicate_json_keys(

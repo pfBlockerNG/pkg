@@ -447,6 +447,36 @@ def _assert_receipt_ignored(
     _assert_no_delete(calls)
 
 
+def test_divergent_duplicate_receipts_never_delete_a_newer_publication(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    newer_version = "20260828040404.dadfeed"
+    newer_ref = _REF_PREFIX + "sha256:" + "d" * 64
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    _publish(repo, newer_version, "126:1", newer_ref)
+    main_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "side", "main~2")
+    _publish(repo, newer_version, "126:1", newer_ref)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    _git(repo, "merge", "-q", "--no-ff", main_tip, "-m", "merge main")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    rows = [
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+        _version_row(newer_version, newer_ref, version_id=1199999999),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
 def test_receipt_quoted_outside_the_trailer_block_is_not_a_prior(
     tmp_path: Path,
 ) -> None:
