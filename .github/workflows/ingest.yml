@@ -250,12 +250,13 @@ jobs:
           esac
           sh scripts/publish-pkg-repo.sh
 
-      - name: Delete consumed Nightly OCI manifest
+      - name: Delete consumed Nightly package version
         if: inputs.operation == 'nightly-cleanup' && success()
         env:
           ARTIFACT_REF: ${{ inputs.artifact_ref }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           NIGHTLY_VERSION: ${{ inputs.nightly_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"

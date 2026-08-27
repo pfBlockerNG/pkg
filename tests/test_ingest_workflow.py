@@ -127,12 +127,13 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             text, r"(?m)^          python3 scripts/verify_nightly_publication\.py \\$"
         )
         cleanup_step = text[
-            text.index("- name: Delete consumed Nightly OCI manifest") : text.index(
+            text.index("- name: Delete consumed Nightly package version") : text.index(
                 "- name: Record ingestion result"
             )
         ]
         for contract in (
             "SOURCE_RUN_ID: ${{ inputs.source_run_id }}",
+            "GH_TOKEN: ${{ github.token }}",
             "NIGHTLY_VERSION: ${{ inputs.nightly_version }}",
             'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"',
             '--source-run-id "$SOURCE_RUN_ID"',
