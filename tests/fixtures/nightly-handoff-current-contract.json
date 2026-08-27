@@ -1,0 +1,272 @@
+{
+  "build_matrix": [
+    {
+      "channel": "CE",
+      "extra_pkgs": [
+        "textproc/py-charset-normalizer"
+      ],
+      "freebsd_major": "15",
+      "freebsd_version": "15.0-RELEASE",
+      "pfsense_version": "2.8",
+      "php_version": "8.3",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "CE"
+    },
+    {
+      "channel": "CE",
+      "extra_pkgs": [
+        "textproc/py-charset-normalizer"
+      ],
+      "freebsd_major": "16",
+      "freebsd_version": "16.0-RELEASE",
+      "image_name": "pfsense-plus",
+      "pfsense_version": "2.9",
+      "php_version": "8.5",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "CE"
+    }
+  ],
+  "builds": [
+    {
+      "artifact": {
+        "abi": "FreeBSD:15:*",
+        "name": "pfSense-pkg-pfBlockerNG-20260827030157.f3c7e31.pkg",
+        "sha256": "99e8a872804733a4ba2ef66bed072ac2d105d83f7123eaddd1db15fa174dd072"
+      },
+      "dep_artifacts": [
+        {
+          "abi": "FreeBSD:15:*",
+          "name": "py311-charset-normalizer-3.4.4.pkg",
+          "sha256": "3a22c9ae4974518269f2d798290106129d7ebab70aeb520aab256a3b3b14b438"
+        }
+      ],
+      "matrix_row": {
+        "channel": "CE",
+        "extra_pkgs": [
+          "textproc/py-charset-normalizer"
+        ],
+        "freebsd_major": "15",
+        "freebsd_version": "15.0-RELEASE",
+        "pfsense_version": "2.8",
+        "php_version": "8.3",
+        "py_flavor": "py311",
+        "status": "active",
+        "upgrade": {
+          "available": false
+        },
+        "variant": "CE"
+      },
+      "record": {
+        "build_input_digest": "fce3154173de753ae219e35c50666497d8487ace6fa33e1a7db8255918ac05d5",
+        "canonical_package_version": "20260827030157.f3c7e31",
+        "channel": "nightly",
+        "classification": "nightly",
+        "dependency_builder": {
+          "pip": "26.2.1",
+          "python": "3.11.15",
+          "setuptools": "75.6.0",
+          "uv": "0.12.6",
+          "uv_lock_sha256": "2d9aa34742bd0a43e69c8cc1216e23130145369b7ac32a5603e5eb42094d00d9",
+          "wheel": "0.45.1",
+          "zstandard": "0.25.0"
+        },
+        "emitted_identity": "pfSense-pkg-pfBlockerNG",
+        "freebsd_ports_sha": "dda1c42793ba8f6b78cf5472ca6db25f7a0a13c2",
+        "matrix_row": {
+          "channel": "CE",
+          "extra_pkgs": [
+            "textproc/py-charset-normalizer"
+          ],
+          "freebsd_major": "15",
+          "freebsd_version": "15.0-RELEASE",
+          "pfsense_version": "2.8",
+          "php_version": "8.3",
+          "py_flavor": "py311",
+          "status": "active",
+          "upgrade": {
+            "available": false
+          },
+          "variant": "CE"
+        },
+        "native_recipe_identity": "pfSense-pkg-pfBlockerNG-nightly",
+        "release_line": "nightly",
+        "route": "nightly/ce-2.8",
+        "schema": 1,
+        "source_date_epoch": 1787797418,
+        "source_sha": "f3c7e3178eff885d1c681b638c8c0044f17cfda2",
+        "source_tag": null
+      }
+    },
+    {
+      "artifact": {
+        "abi": "FreeBSD:16:*",
+        "name": "pfSense-pkg-pfBlockerNG-20260827030157.f3c7e31.pkg",
+        "sha256": "3fcca1272342aee85f89711a9721e5ede5988d1380c7f3c62fa325f913e63cd9"
+      },
+      "dep_artifacts": [
+        {
+          "abi": "FreeBSD:16:*",
+          "name": "py311-charset-normalizer-3.4.4.pkg",
+          "sha256": "b9337912254888c5a47424ca7b58632c9902a5dac5b6e0eb3ef9595e352a9d9f"
+        }
+      ],
+      "matrix_row": {
+        "channel": "CE",
+        "extra_pkgs": [
+          "textproc/py-charset-normalizer"
+        ],
+        "freebsd_major": "16",
+        "freebsd_version": "16.0-RELEASE",
+        "image_name": "pfsense-plus",
+        "pfsense_version": "2.9",
+        "php_version": "8.5",
+        "py_flavor": "py311",
+        "status": "active",
+        "upgrade": {
+          "available": false
+        },
+        "variant": "CE"
+      },
+      "record": {
+        "build_input_digest": "cb333ea0f98d0c1c5c56069d1c719539db48d5f0d1528a26f787c775d72e2361",
+        "canonical_package_version": "20260827030157.f3c7e31",
+        "channel": "nightly",
+        "classification": "nightly",
+        "dependency_builder": {
+          "pip": "26.2.1",
+          "python": "3.11.15",
+          "setuptools": "75.6.0",
+          "uv": "0.12.6",
+          "uv_lock_sha256": "2d9aa34742bd0a43e69c8cc1216e23130145369b7ac32a5603e5eb42094d00d9",
+          "wheel": "0.45.1",
+          "zstandard": "0.25.0"
+        },
+        "emitted_identity": "pfSense-pkg-pfBlockerNG",
+        "freebsd_ports_sha": "dda1c42793ba8f6b78cf5472ca6db25f7a0a13c2",
+        "matrix_row": {
+          "channel": "CE",
+          "extra_pkgs": [
+            "textproc/py-charset-normalizer"
+          ],
+          "freebsd_major": "16",
+          "freebsd_version": "16.0-RELEASE",
+          "image_name": "pfsense-plus",
+          "pfsense_version": "2.9",
+          "php_version": "8.5",
+          "py_flavor": "py311",
+          "status": "active",
+          "upgrade": {
+            "available": false
+          },
+          "variant": "CE"
+        },
+        "native_recipe_identity": "pfSense-pkg-pfBlockerNG-nightly",
+        "release_line": "nightly",
+        "route": "nightly/ce-2.9",
+        "schema": 1,
+        "source_date_epoch": 1787797418,
+        "source_sha": "f3c7e3178eff885d1c681b638c8c0044f17cfda2",
+        "source_tag": null
+      }
+    }
+  ],
+  "dependency_builder": {
+    "pip": "26.2.1",
+    "python": "3.11.15",
+    "setuptools": "75.6.0",
+    "uv": "0.12.6",
+    "uv_lock_sha256": "2d9aa34742bd0a43e69c8cc1216e23130145369b7ac32a5603e5eb42094d00d9",
+    "wheel": "0.45.1",
+    "zstandard": "0.25.0"
+  },
+  "input_digest": "13184e7f7587d17f82a11ff622e965fa05b480b28c1b80c96548111bd7e129a5",
+  "kind": "nightly-handoff",
+  "matrix_digest": "a7b2d53068643b7cb91a1ecc3d6119426d0c9d6ed311bee4395e99be23b09f19",
+  "matrix_sha": "ca95cbd551883706a8142a7e8e6e2462c1fd1a4c",
+  "pkg_version": "20260827030157.f3c7e31",
+  "ports_ref": "pfblockerng/use-github",
+  "ports_repo": "pfBlockerNG/FreeBSD-ports",
+  "ports_sha": "dda1c42793ba8f6b78cf5472ca6db25f7a0a13c2",
+  "route_matrix": [
+    {
+      "channel": "CE",
+      "ci": true,
+      "extra_pkgs": [
+        "textproc/py-charset-normalizer"
+      ],
+      "freebsd_major": "15",
+      "freebsd_version": "15.0-RELEASE",
+      "pfsense_version": "2.8",
+      "php_version": "8.3",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "CE"
+    },
+    {
+      "channel": "Plus",
+      "ci": true,
+      "extra_pkgs": [],
+      "freebsd_major": "16",
+      "freebsd_version": "16.0-RELEASE",
+      "image_name": "pfsense-plus",
+      "pfsense_version": "26.03",
+      "php_version": "8.5",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "Plus"
+    },
+    {
+      "channel": "Plus",
+      "ci": true,
+      "extra_pkgs": [],
+      "freebsd_major": "16",
+      "freebsd_version": "16.0-RELEASE",
+      "image_name": "pfsense-plus",
+      "pfsense_version": "26.07",
+      "php_version": "8.5",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "Plus"
+    },
+    {
+      "channel": "CE",
+      "ci": true,
+      "extra_pkgs": [
+        "textproc/py-charset-normalizer"
+      ],
+      "freebsd_major": "16",
+      "freebsd_version": "16.0-RELEASE",
+      "pfsense_version": "2.9",
+      "php_version": "8.5",
+      "py_flavor": "py311",
+      "status": "active",
+      "upgrade": {
+        "available": false
+      },
+      "variant": "CE"
+    }
+  ],
+  "run_id": "33035100506:1",
+  "schema": 1,
+  "source_date_epoch": 1787797418,
+  "source_ref": "f3c7e3178eff885d1c681b638c8c0044f17cfda2",
+  "source_sha": "f3c7e3178eff885d1c681b638c8c0044f17cfda2",
+  "tools_sha": "f3c7e3178eff885d1c681b638c8c0044f17cfda2"
+}

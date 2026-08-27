@@ -20,9 +20,9 @@ class ContractError(ValueError):
 
 
 def combined_nightly_input_digest(
-    source_sha: str, ports_sha: str, matrix_digest: str
+    source_sha: str, ports_sha: str, input_digest: str
 ) -> str:
-    return _combined_digest(source_sha, ports_sha, matrix_digest)
+    return _combined_digest(source_sha, ports_sha, input_digest)
 
 
 def validate_nightly_version(version: object, *, source_sha: str | None = None) -> str:

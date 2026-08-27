@@ -63,6 +63,8 @@ _HANDOFF_FIELDS = frozenset(
         "tools_sha",
         "matrix_sha",
         "matrix_digest",
+        "source_date_epoch",
+        "dependency_builder",
         "build_matrix",
         "route_matrix",
         "builds",
@@ -129,6 +131,20 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
     except ValueError as exc:
         raise PublishNightlyError(str(exc)) from exc
 
+    source_date_epoch = handoff["source_date_epoch"]
+    if type(source_date_epoch) is not int or source_date_epoch < 0:
+        raise PublishNightlyError(
+            "handoff source_date_epoch must be a non-negative integer"
+        )
+    try:
+        dependency_builder = pfb_pkg.validate_dependency_builder(
+            handoff["dependency_builder"]
+        )
+    except pfb_pkg.PkgError as exc:
+        raise PublishNightlyError(
+            f"handoff dependency_builder is invalid: {exc}"
+        ) from exc
+
     build_matrix_raw = handoff["build_matrix"]
     route_matrix = handoff["route_matrix"]
     if not isinstance(build_matrix_raw, list) or not build_matrix_raw:
@@ -167,12 +183,24 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
         raise PublishNightlyError(
             "handoff matrix_digest does not match tools/matrix/build/route inputs"
         )
+    dependency_payload = json.dumps(
+        {
+            "matrix_digest": matrix_digest,
+            "source_date_epoch": source_date_epoch,
+            "dependency_builder": dependency_builder,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    dependency_digest = hashlib.sha256(dependency_payload).hexdigest()
     expected_input_digest = nc.combined_nightly_input_digest(
-        source_sha, ports_sha, matrix_digest
+        source_sha, ports_sha, dependency_digest
     )
     if handoff["input_digest"] != expected_input_digest:
         raise PublishNightlyError(
-            "handoff input_digest does not match source_sha/ports_sha/matrix_digest (tampered or corrupt handoff)"
+            "handoff input_digest does not match source_sha/ports_sha/dependency provenance "
+            "(tampered or corrupt handoff)"
         )
 
     builds_raw = handoff["builds"]
@@ -201,9 +229,18 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             raise PublishNightlyError(
                 f"handoff build entry for FreeBSD {major} does not match build_matrix"
             )
+        record_raw = entry["record"]
+        if (
+            isinstance(record_raw, Mapping)
+            and record_raw.get("dependency_builder") is None
+        ):
+            raise PublishNightlyError(
+                f"handoff build record for FreeBSD {major} dependency_builder "
+                "is required at the Nightly boundary"
+            )
         try:
             record = pfb_pkg.validate_build_record(
-                entry["record"], abi=f"FreeBSD:{major}:amd64"
+                record_raw, abi=f"FreeBSD:{major}:amd64"
             )
         except pfb_pkg.PkgError as exc:
             raise PublishNightlyError(
@@ -217,6 +254,16 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
         ):
             raise PublishNightlyError(
                 f"handoff build record for FreeBSD {major} disagrees with handoff provenance"
+            )
+        if record["source_date_epoch"] != source_date_epoch:
+            raise PublishNightlyError(
+                f"handoff build record for FreeBSD {major} source_date_epoch "
+                "disagrees with handoff provenance"
+            )
+        if record.get("dependency_builder") != dependency_builder:
+            raise PublishNightlyError(
+                f"handoff build record for FreeBSD {major} dependency_builder "
+                "disagrees with handoff provenance"
             )
         artifact = nc.validate_artifacts([entry["artifact"]])[0]
         if (
