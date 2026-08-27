@@ -29,8 +29,16 @@ _VERSION_TRAILER = "pfBlockerNG-Nightly-Version"
 _RUN_ID_TRAILER = "pfBlockerNG-Source-Run-Id"
 _ARTIFACT_REF_TRAILER = "pfBlockerNG-Nightly-Artifact-Ref"
 _RECEIPT_TRAILERS = (_VERSION_TRAILER, _RUN_ID_TRAILER, _ARTIFACT_REF_TRAILER)
-# Let git decide what a trailer is: a receipt quoted mid-body is not one.
-_RECEIPT_LOG_FORMAT = "--format=%H%x1f%(trailers:only=true,unfold=true)%x00"
+# Let git decide what a trailer is: a receipt quoted mid-body is not one, with the
+# separator pinned here so the tree being read cannot redefine it, and topological
+# order so ancestry, not commit date, decides which commit came first.
+_RECEIPT_LOG = (
+    "-c",
+    "trailer.separators=:",
+    "log",
+    "--topo-order",
+    "--format=%H%x1f%(trailers:only=true,unfold=true)%x00",
+)
 _PACKAGE_VERSIONS_ENDPOINT = (
     "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
 )
@@ -64,20 +72,8 @@ def _publication_receipts(
     repo: str | Path, revision: str
 ) -> list[tuple[str, dict[str, str]]]:
     proc = subprocess.run(
-        # Pin the trailer separator so the tree being read cannot redefine what
-        # counts as a receipt, and terminate the revision so a like-named path
-        # cannot make it ambiguous.
-        [
-            "git",
-            "-C",
-            str(repo),
-            "-c",
-            "trailer.separators=:",
-            "log",
-            _RECEIPT_LOG_FORMAT,
-            revision,
-            "--",
-        ],
+        # -- terminates the revision so a like-named path cannot make it ambiguous.
+        ["git", "-C", str(repo), *_RECEIPT_LOG, revision, "--"],
         check=False,
         capture_output=True,
         text=True,

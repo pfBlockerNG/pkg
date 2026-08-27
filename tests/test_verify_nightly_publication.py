@@ -387,6 +387,46 @@ def test_publication_outside_the_consumed_ancestry_is_not_a_prior(
     _assert_no_delete(calls)
 
 
+def test_repeated_receipt_anchors_on_ancestry_not_on_commit_date(
+    tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    middle_version = "20260826220000.bbbbbbb"
+    middle_ref = _REF_PREFIX + "sha256:" + "b" * 64
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF, date="@5000 +0000")
+    _git(repo, "checkout", "-q", "-b", "side")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "chore: side", date="@9000 +0000")
+    side = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    _publish(repo, middle_version, "125:9", middle_ref, date="@2000 +0000")
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF, date="@1000 +0000")
+    _git(
+        repo,
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "chore: merge side",
+        side,
+        date="@9500 +0000",
+    )
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    rows = [
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+        _version_row(middle_version, middle_ref, version_id=1188888888),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
 def test_receipt_quoted_outside_the_trailer_block_is_not_a_prior(
     tmp_path: Path,
 ) -> None:
@@ -449,7 +489,7 @@ def test_cleanup_rejects_an_identity_quoted_outside_the_trailer_block(
 
 
 @pytest.mark.parametrize(
-    "smuggled", ["\x1e", "\x1c", "\x1d", "\x85", "\u2028", "\v", "\f"]
+    "smuggled", ["\x1e", "\x1c", "\x1d", "\x85", "\u2028", "\u2029", "\v", "\f"]
 )
 def test_control_characters_in_a_trailer_cannot_forge_a_receipt(
     tmp_path: Path, smuggled: str
@@ -526,9 +566,7 @@ def test_worktree_path_named_like_the_publication_ref_still_cleans_up(
 ) -> None:
     repo, _, _, _ = _published_repo(tmp_path)
     _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    collision = repo / "refs" / "remotes" / "origin"
-    collision.mkdir(parents=True)
-    (collision / "main").write_text("ambiguous\n", encoding="utf-8")
+    (repo / "refs" / "remotes" / "origin" / "main").mkdir(parents=True)
     rows = [
         _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
         _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
