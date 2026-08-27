@@ -39,8 +39,16 @@ _SOURCE_SHA = "a" * 40
 _PORTS_SHA = "b" * 40
 _TOOLS_SHA = "e" * 40
 _MATRIX_SHA = "d" * 40
-_MATRIX_DIGEST = "c" * 64
 _EPOCH = 1_800_000_000
+_DEPENDENCY_BUILDER = {
+    "python": "3.11.15",
+    "pip": "26.2.1",
+    "setuptools": "75.6.0",
+    "wheel": "0.45.1",
+    "zstandard": "0.25.0",
+    "uv": "0.12.6",
+    "uv_lock_sha256": "2d9aa34742bd0a43e69c8cc1216e23130145369b7ac32a5603e5eb42094d00d9",
+}
 
 _pkg_counter = itertools.count()
 
@@ -107,7 +115,6 @@ class _Snapshot:
     pkg_version: str
     source_sha: str
     ports_sha: str
-    input_digest: str
 
 
 def _snapshot(
@@ -115,15 +122,34 @@ def _snapshot(
     build_date: date = date(2026, 8, 4),
     source_sha: str = _SOURCE_SHA,
     ports_sha: str = _PORTS_SHA,
-    matrix_digest: str = _MATRIX_DIGEST,
 ) -> _Snapshot:
     return _Snapshot(
         pkg_version=f"{build_date:%Y%m%d}120000.{source_sha[:7]}",
         source_sha=source_sha,
         ports_sha=ports_sha,
-        input_digest=nc.combined_nightly_input_digest(
-            source_sha, ports_sha, matrix_digest
-        ),
+    )
+
+
+def _handoff_input_digest(
+    *,
+    source_sha: str,
+    ports_sha: str,
+    matrix_digest: str,
+    source_date_epoch: int,
+    dependency_builder: dict[str, str],
+) -> str:
+    payload = json.dumps(
+        {
+            "matrix_digest": matrix_digest,
+            "source_date_epoch": source_date_epoch,
+            "dependency_builder": dependency_builder,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return nc.combined_nightly_input_digest(
+        source_sha, ports_sha, hashlib.sha256(payload).hexdigest()
     )
 
 
@@ -289,6 +315,7 @@ def _make_record(
         "freebsd_ports_sha": snapshot.ports_sha,
         "route": f"nightly/{str(normalized['variant']).lower()}-{major_minor}",
         "source_date_epoch": epoch,
+        "dependency_builder": dict(_DEPENDENCY_BUILDER),
         "build_input_digest": "",
     }
     record["build_input_digest"] = pfb_pkg.build_input_digest(record)
@@ -356,6 +383,15 @@ def _build_handoff(
         separators=(",", ":"),
     ).encode()
     matrix_digest = hashlib.sha256(matrix_payload).hexdigest()
+    source_date_epoch = legs[0].source_date_epoch
+    dependency_builder = dict(_DEPENDENCY_BUILDER)
+    input_digest = _handoff_input_digest(
+        source_sha=source_sha,
+        ports_sha=ports_sha,
+        matrix_digest=matrix_digest,
+        source_date_epoch=source_date_epoch,
+        dependency_builder=dependency_builder,
+    )
     return {
         "schema": 1,
         "kind": "nightly-handoff",
@@ -364,14 +400,14 @@ def _build_handoff(
         "ports_repo": "",
         "ports_ref": "",
         "pkg_version": snapshot.pkg_version,
-        "input_digest": nc.combined_nightly_input_digest(
-            source_sha, ports_sha, matrix_digest
-        ),
+        "input_digest": input_digest,
         "source_sha": source_sha,
         "ports_sha": ports_sha,
         "tools_sha": _TOOLS_SHA,
         "matrix_sha": _MATRIX_SHA,
         "matrix_digest": matrix_digest,
+        "source_date_epoch": source_date_epoch,
+        "dependency_builder": dependency_builder,
         "build_matrix": build_rows,
         "route_matrix": list(route_rows),
         "builds": sorted(
@@ -1095,6 +1131,85 @@ class HandoffIntegrityTests(_TempDirTestCase):
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("exact fields", str(ctx.exception))
 
+    def test_dependency_contract_drift_rejected_without_pkg_tree_mutation(
+        self,
+    ) -> None:
+        handoff, results_dir, _alloc = self.base_handoff()
+        sentinel = self.pkg_repo / "docs" / "sentinel.bin"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_bytes(b"unchanged")
+
+        epoch_drift = _mutate(handoff)
+        epoch_drift["source_date_epoch"] += 1
+        epoch_drift["input_digest"] = _handoff_input_digest(
+            source_sha=epoch_drift["source_sha"],
+            ports_sha=epoch_drift["ports_sha"],
+            matrix_digest=epoch_drift["matrix_digest"],
+            source_date_epoch=epoch_drift["source_date_epoch"],
+            dependency_builder=epoch_drift["dependency_builder"],
+        )
+        builder_drift = _mutate(handoff)
+        builder_drift["dependency_builder"]["uv"] = "0.12.7"
+        builder_drift["input_digest"] = _handoff_input_digest(
+            source_sha=builder_drift["source_sha"],
+            ports_sha=builder_drift["ports_sha"],
+            matrix_digest=builder_drift["matrix_digest"],
+            source_date_epoch=builder_drift["source_date_epoch"],
+            dependency_builder=builder_drift["dependency_builder"],
+        )
+        legacy_record = _mutate(handoff)
+        del legacy_record["builds"][0]["record"]["dependency_builder"]
+        old_digest = _mutate(handoff)
+        old_payload = "\0".join(
+            (
+                old_digest["source_sha"],
+                old_digest["ports_sha"],
+                old_digest["matrix_digest"],
+            )
+        ).encode("ascii")
+        old_digest["input_digest"] = hashlib.sha256(old_payload).hexdigest()
+        hostile = (
+            ("top-epoch", epoch_drift, "source_date_epoch"),
+            ("top-builder", builder_drift, "dependency_builder"),
+            ("legacy-record", legacy_record, "dependency_builder"),
+            ("old-input-digest", old_digest, "input_digest"),
+        )
+        before_paths = tuple(
+            sorted(path.relative_to(self.pkg_repo) for path in self.pkg_repo.rglob("*"))
+        )
+        before_bytes = {
+            path.relative_to(self.pkg_repo): path.read_bytes()
+            for path in self.pkg_repo.rglob("*")
+            if path.is_file()
+        }
+
+        for label, mutated, responsible_field in hostile:
+            with self.subTest(label=label):
+                with self.assertRaises(pn.PublishNightlyError) as ctx:
+                    _run(
+                        handoff=mutated,
+                        results_dir=results_dir,
+                        pkg_repo=self.pkg_repo,
+                    )
+                self.assertIn(responsible_field, str(ctx.exception))
+                self.assertEqual(
+                    tuple(
+                        sorted(
+                            path.relative_to(self.pkg_repo)
+                            for path in self.pkg_repo.rglob("*")
+                        )
+                    ),
+                    before_paths,
+                )
+                self.assertEqual(
+                    {
+                        path.relative_to(self.pkg_repo): path.read_bytes()
+                        for path in self.pkg_repo.rglob("*")
+                        if path.is_file()
+                    },
+                    before_bytes,
+                )
+
     def test_build_entry_field_missing_rejected(self) -> None:
         handoff, results_dir, _alloc = self.base_handoff()
         mutated = _mutate(handoff)
@@ -1159,7 +1274,7 @@ class HandoffIntegrityTests(_TempDirTestCase):
 
     def test_matrix_digest_malformed_shape_rejected(self) -> None:
         """N2: matrix_digest shape (lowercase 64-character hex) is validated
-        BEFORE it is ever fed to combined_nightly_input_digest."""
+        before dependency-bound input_digest reconstruction."""
         handoff, results_dir, _alloc = self.base_handoff()
         mutated = _mutate(handoff)
         mutated["matrix_digest"] = "not-hex"
