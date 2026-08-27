@@ -250,7 +250,7 @@ jobs:
           esac
           sh scripts/publish-pkg-repo.sh
 
-      - name: Delete consumed Nightly package version
+      - name: Retain consumed Nightly version and delete its predecessors
         if: inputs.operation == 'nightly-cleanup' && success()
         env:
           ARTIFACT_REF: ${{ inputs.artifact_ref }}

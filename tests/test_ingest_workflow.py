@@ -117,7 +117,7 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             pull_step,
         )
         self.assertIn('oras pull "$ARTIFACT_REF"', text)
-        self.assertNotIn('oras manifest delete "$ARTIFACT_REF"', text)
+        self.assertNotIn("oras manifest delete", text)
         self.assertNotRegex(text, r'oras pull "?[^\n]*:(?:latest|nightly)')
         self.assertLess(
             text.index("source_run_id does not match OCI handoff"),
@@ -127,9 +127,9 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             text, r"(?m)^          python3 scripts/verify_nightly_publication\.py \\$"
         )
         cleanup_step = text[
-            text.index("- name: Delete consumed Nightly package version") : text.index(
-                "- name: Record ingestion result"
-            )
+            text.index(
+                "- name: Retain consumed Nightly version and delete its predecessors"
+            ) : text.index("- name: Record ingestion result")
         ]
         for contract in (
             "SOURCE_RUN_ID: ${{ inputs.source_run_id }}",
@@ -141,6 +141,7 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             '--artifact-ref "$ARTIFACT_REF"',
         ):
             self.assertIn(contract, cleanup_step)
+        self.assertNotIn("DELETE", cleanup_step)
         self.assertIn("application/vnd.pfblockerng.nightly.handoff.v1+json", text)
 
     def test_tagged_stage_promote_discard_and_nightly_are_explicit(self) -> None:
