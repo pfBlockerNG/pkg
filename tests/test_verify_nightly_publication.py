@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -9,6 +10,21 @@ from pathlib import Path
 
 import pytest
 import verify_nightly_publication as verify
+
+_REF_PREFIX = "ghcr.io/pfblockerng/pfblockerng-nightly@"
+_LIST_ENDPOINT = (
+    "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
+    "?per_page=100&state=active"
+)
+_DELETE_ENDPOINT = "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
+_VERSION_SCOPED = re.compile(rf"^{re.escape(_DELETE_ENDPOINT)}/[1-9][0-9]*$")
+
+_PRIOR_VERSION = "20260826010101.abcdef1"
+_PRIOR_RUN_ID = "123:2"
+_PRIOR_REF = _REF_PREFIX + "sha256:" + "a" * 64
+_CURRENT_VERSION = "20260827030157.f3c7e31"
+_CURRENT_RUN_ID = "124:1"
+_CURRENT_REF = _REF_PREFIX + "sha256:" + "c" * 64
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -21,6 +37,17 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _publish(repo: Path, version: str, run_id: str, artifact_ref: str) -> None:
+    message = (
+        f'publish: nightly {version} -> ["nightly"]\n\n'
+        f"pfBlockerNG-Nightly-Version: {version}\n"
+        f"pfBlockerNG-Source-Run-Id: {run_id}\n"
+        f"pfBlockerNG-Nightly-Artifact-Ref: {artifact_ref}\n"
+    )
+    _git(repo, "commit", "-q", "--allow-empty", "-m", message)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
 def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     repo = tmp_path / "pkg"
     repo.mkdir()
@@ -31,27 +58,8 @@ def _published_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     (repo / "seed").write_text("seed\n", encoding="utf-8")
     _git(repo, "add", "seed")
     _git(repo, "commit", "-q", "-m", "seed")
-    run_id = "123:2"
-    version = "20260826010101.abcdef1"
-    artifact_ref = "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "a" * 64
-    message = (
-        f'publish: nightly {version} -> ["nightly"]\n\n'
-        f"pfBlockerNG-Nightly-Version: {version}\n"
-        f"pfBlockerNG-Source-Run-Id: {run_id}\n"
-        f"pfBlockerNG-Nightly-Artifact-Ref: {artifact_ref}\n"
-    )
-    _git(repo, "commit", "-q", "--allow-empty", "-m", message)
-    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    return repo, run_id, version, artifact_ref
-
-
-_LIST_ENDPOINT = (
-    "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
-    "?per_page=100&state=active"
-)
-_DELETE_ENDPOINT = (
-    "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
-)
+    _publish(repo, _PRIOR_VERSION, _PRIOR_RUN_ID, _PRIOR_REF)
+    return repo, _PRIOR_RUN_ID, _PRIOR_VERSION, _PRIOR_REF
 
 
 def _version_row(
@@ -62,9 +70,7 @@ def _version_row(
     package_type: object = "container",
     tags: object | None = None,
 ) -> dict[str, object]:
-    digest = artifact_ref.removeprefix(
-        "ghcr.io/pfblockerng/pfblockerng-nightly@"
-    )
+    digest = artifact_ref.removeprefix(_REF_PREFIX)
     return {
         "id": version_id,
         "name": digest,
@@ -153,7 +159,14 @@ exit 1
     return proc, log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
 
-def _assert_no_delete(calls: list[str]) -> None:
+def _delete_calls(calls: list[str]) -> list[str]:
+    """Return the endpoint of every DELETE the cleanup transport actually issued.
+
+    Recognises each spelling ``gh`` accepts for the method flag, so a rewritten
+    call site cannot hide a deletion from these assertions, and treats any
+    ``oras manifest delete`` as an outright contract breach.
+    """
+    deletes: list[str] = []
     for call in calls:
         words = shlex.split(call)
         assert words[:3] != ["oras", "manifest", "delete"], calls
@@ -161,46 +174,37 @@ def _assert_no_delete(calls: list[str]) -> None:
             continue
         args = words[2:]
         method = "GET"
+        target = ""
+        skip_next = False
         for index, arg in enumerate(args):
-            if arg in ("-X", "--method") and index + 1 < len(args):
-                method = args[index + 1]
+            if skip_next:
+                skip_next = False
+            elif arg in ("-X", "--method"):
+                if index + 1 < len(args):
+                    method = args[index + 1]
+                    skip_next = True
             elif arg.startswith("--method="):
                 method = arg.removeprefix("--method=")
             elif arg.startswith("-X") and len(arg) > 2:
                 method = arg[2:].removeprefix("=")
-        assert method.upper() != "DELETE", calls
+            elif not arg.startswith("-"):
+                target = arg
+        if method.upper() == "DELETE":
+            deletes.append(target)
+    return deletes
 
 
-def test_exact_publication_receipt_deletes_one_exact_rest_version(
-    tmp_path: Path,
-) -> None:
+def _assert_no_delete(calls: list[str]) -> None:
+    assert _delete_calls(calls) == [], calls
+
+
+def _assert_version_scoped(deletes: list[str]) -> None:
+    for target in deletes:
+        assert _VERSION_SCOPED.fullmatch(target), deletes
+
+
+def test_only_successful_version_is_retained_with_no_delete(tmp_path: Path) -> None:
     repo, run_id, version, artifact_ref = _published_repo(tmp_path)
-    unrelated = _version_row(
-        "20260825010101.abcdef0",
-        "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64,
-        version_id=1170000000,
-    )
-    exact = _version_row(version, artifact_ref, tags=["older-tag", version])
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=run_id,
-        nightly_version=version,
-        artifact_ref=artifact_ref,
-        response=json.dumps([[unrelated], [exact]]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert calls == [
-        f"gh api --paginate --slurp {_LIST_ENDPOINT}",
-        f"gh api --method DELETE {_DELETE_ENDPOINT}/1176645017",
-    ]
-
-
-def test_cleanup_finds_receipt_behind_later_commit(tmp_path: Path) -> None:
-    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
-    (repo / "later").write_text("later\n", encoding="utf-8")
-    _git(repo, "add", "later")
-    _git(repo, "commit", "-q", "-m", "render: later site change")
     proc, calls = _run_cleanup(
         tmp_path,
         repo,
@@ -210,7 +214,145 @@ def test_cleanup_finds_receipt_behind_later_commit(tmp_path: Path) -> None:
         response=json.dumps([[_version_row(version, artifact_ref)]]),
     )
     assert proc.returncode == 0, proc.stderr
-    assert calls[-1] == f"gh api --method DELETE {_DELETE_ENDPOINT}/1176645017"
+    assert calls == [f"gh api --paginate --slurp {_LIST_ENDPOINT}"]
+    _assert_no_delete(calls)
+
+
+def test_prior_successful_version_deleted_and_consumed_version_retained(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    prior = _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000)
+    consumed = _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017)
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([[prior], [consumed]]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert calls == [
+        f"gh api --paginate --slurp {_LIST_ENDPOINT}",
+        f"gh api --method DELETE {_DELETE_ENDPOINT}/1170000000",
+    ]
+    deletes = _delete_calls(calls)
+    _assert_version_scoped(deletes)
+    assert f"{_DELETE_ENDPOINT}/1176645017" not in deletes
+
+
+def test_every_prior_successful_version_deleted_by_exact_id(tmp_path: Path) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    middle_version = "20260826230000.bbbbbb2"
+    middle_ref = _REF_PREFIX + "sha256:" + "b" * 64
+    _publish(repo, middle_version, "123:9", middle_ref)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(middle_version, middle_ref, version_id=1173000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [
+        f"{_DELETE_ENDPOINT}/1173000000",
+        f"{_DELETE_ENDPOINT}/1170000000",
+    ]
+    _assert_version_scoped(_delete_calls(calls))
+
+
+def test_newer_successful_version_is_never_deleted_by_a_late_cleanup(
+    tmp_path: Path,
+) -> None:
+    repo, prior_run_id, prior_version, prior_ref = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(prior_version, prior_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=prior_run_id,
+        nightly_version=prior_version,
+        artifact_ref=prior_ref,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_versions_without_a_publication_receipt_are_retained(tmp_path: Path) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    unconsumed = _version_row(
+        "20260827020000.dddddd3",
+        _REF_PREFIX + "sha256:" + "d" * 64,
+        version_id=1174000000,
+    )
+    foreign = _version_row(
+        "not-a-nightly-tag",
+        _REF_PREFIX + "sha256:" + "e" * 64,
+        version_id=1175000000,
+    )
+    rows = [
+        unconsumed,
+        foreign,
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _delete_calls(calls) == [f"{_DELETE_ENDPOINT}/1170000000"]
+
+
+def test_already_deleted_prior_version_is_not_an_error(tmp_path: Path) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([[_version_row(_CURRENT_VERSION, _CURRENT_REF)]]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_cleanup_finds_receipt_behind_later_commit(tmp_path: Path) -> None:
+    repo, run_id, version, artifact_ref = _published_repo(tmp_path)
+    (repo / "later").write_text("later\n", encoding="utf-8")
+    _git(repo, "add", "later")
+    _git(repo, "commit", "-q", "-m", "render: later site change")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=run_id,
+        nightly_version=version,
+        artifact_ref=artifact_ref,
+        response=json.dumps([[_version_row(version, artifact_ref)]]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
 
 
 def test_cleanup_rejects_receipt_forged_only_on_dispatch_branch(
@@ -244,7 +386,7 @@ def test_cleanup_rejects_receipt_identity_mismatch_before_version_lookup(
     values[field] = {
         "source_run_id": "124:2",
         "nightly_version": "20260826010102.abcdef1",
-        "artifact_ref": "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64,
+        "artifact_ref": _REF_PREFIX + "sha256:" + "b" * 64,
     }[field]
     proc, calls = _run_cleanup(
         tmp_path,
@@ -258,32 +400,27 @@ def test_cleanup_rejects_receipt_identity_mismatch_before_version_lookup(
 
 
 @pytest.mark.parametrize(
-    ("name", "rows"),
-    [
-        ("missing", [[]]),
-        ("wrong digest", None),
-        ("wrong tag", None),
-        ("duplicate", None),
-    ],
+    "name",
+    ["missing", "wrong digest", "wrong tag", "duplicate"],
 )
 def test_cleanup_rejects_non_exact_or_ambiguous_versions_without_delete(
-    tmp_path: Path, name: str, rows: object
+    tmp_path: Path, name: str
 ) -> None:
     repo, run_id, version, artifact_ref = _published_repo(tmp_path)
-    if name == "wrong digest":
-        rows = [[
-            _version_row(
-                version,
-                "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64,
-            )
-        ]]
+    rows: list[list[dict[str, object]]]
+    if name == "missing":
+        rows = [[]]
+    elif name == "wrong digest":
+        rows = [[_version_row(version, _REF_PREFIX + "sha256:" + "b" * 64)]]
     elif name == "wrong tag":
         rows = [[_version_row(version, artifact_ref, tags=["wrong-tag"])]]
-    elif name == "duplicate":
-        rows = [[
-            _version_row(version, artifact_ref),
-            _version_row(version, artifact_ref, version_id=1176645018),
-        ]]
+    else:
+        rows = [
+            [
+                _version_row(version, artifact_ref),
+                _version_row(version, artifact_ref, version_id=1176645018),
+            ]
+        ]
     proc, calls = _run_cleanup(
         tmp_path,
         repo,
@@ -293,6 +430,107 @@ def test_cleanup_rejects_non_exact_or_ambiguous_versions_without_delete(
         response=json.dumps(rows),
     )
     assert proc.returncode == 1
+    _assert_no_delete(calls)
+
+
+@pytest.mark.parametrize("contradiction", ["digest without tag", "tag without digest"])
+def test_cleanup_rejects_contradictory_prior_version_rows_without_delete(
+    tmp_path: Path, contradiction: str
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    if contradiction == "digest without tag":
+        prior = _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000)
+        prior["metadata"]["container"]["tags"] = ["unrelated"]  # type: ignore[index]
+    else:
+        prior = _version_row(
+            _PRIOR_VERSION,
+            _REF_PREFIX + "sha256:" + "f" * 64,
+            version_id=1170000000,
+        )
+    rows = [prior, _version_row(_CURRENT_VERSION, _CURRENT_REF)]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 1
+    assert "contradictory" in proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_cleanup_rejects_duplicate_prior_version_rows_without_delete(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
+        _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000001),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 1
+    assert "contradictory" in proc.stderr
+    _assert_no_delete(calls)
+
+
+@pytest.mark.parametrize("broken", ["version", "artifact_ref"])
+def test_cleanup_rejects_malformed_prior_receipt_without_delete(
+    tmp_path: Path, broken: str
+) -> None:
+    repo = tmp_path / "pkg"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "commit.gpgsign", "false")
+    (repo / "seed").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "seed")
+    _git(repo, "commit", "-q", "-m", "seed")
+    if broken == "version":
+        _publish(repo, "not-a-version", _PRIOR_RUN_ID, _PRIOR_REF)
+    else:
+        _publish(repo, _PRIOR_VERSION, _PRIOR_RUN_ID, "ghcr.io/other/thing:latest")
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([[_version_row(_CURRENT_VERSION, _CURRENT_REF)]]),
+    )
+    assert proc.returncode == 1
+    assert "malformed prior Nightly publication receipt" in proc.stderr
+    _assert_no_delete(calls)
+
+
+def test_cleanup_rejects_receipts_sharing_one_digest_without_delete(
+    tmp_path: Path,
+) -> None:
+    repo, _, _, _ = _published_repo(tmp_path)
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _PRIOR_REF)
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_PRIOR_REF,
+        response=json.dumps([[_version_row(_CURRENT_VERSION, _PRIOR_REF)]]),
+    )
+    assert proc.returncode == 1
+    assert "contradictory" in proc.stderr
     _assert_no_delete(calls)
 
 
@@ -335,18 +573,33 @@ def test_cleanup_rejects_malformed_version_json_without_delete(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    "call",
+    ("call", "target"),
     [
-        "gh api -X DELETE endpoint",
-        "gh api -XDELETE endpoint",
-        "gh api -X=DELETE endpoint",
-        "gh api --method=DELETE endpoint",
-        "oras manifest delete --force exact-ref",
+        ("gh api -X DELETE endpoint", "endpoint"),
+        ("gh api -XDELETE endpoint", "endpoint"),
+        ("gh api -X=DELETE endpoint", "endpoint"),
+        ("gh api --method=DELETE endpoint", "endpoint"),
+        ("gh api --method DELETE endpoint", "endpoint"),
     ],
 )
-def test_no_delete_assertion_rejects_every_delete_transport(call: str) -> None:
+def test_delete_detection_reads_every_gh_method_spelling(
+    call: str, target: str
+) -> None:
+    assert _delete_calls([call]) == [target]
     with pytest.raises(AssertionError):
         _assert_no_delete([call])
+
+
+def test_delete_detection_rejects_oras_manifest_delete() -> None:
+    with pytest.raises(AssertionError):
+        _assert_no_delete(["oras manifest delete --force exact-ref"])
+
+
+def test_delete_detection_ignores_reads_and_flags_whole_package_targets() -> None:
+    assert _delete_calls([f"gh api --paginate --slurp {_LIST_ENDPOINT}"]) == []
+    package = _DELETE_ENDPOINT.removesuffix("/versions")
+    with pytest.raises(AssertionError):
+        _assert_version_scoped(_delete_calls([f"gh api --method DELETE {package}"]))
 
 
 @pytest.mark.parametrize(
@@ -369,9 +622,7 @@ def test_cleanup_rejects_duplicate_receipt_identity_before_version_lookup(
     wrong = {
         "pfBlockerNG-Nightly-Version": "20260826010102.abcdef1",
         "pfBlockerNG-Source-Run-Id": "124:2",
-        "pfBlockerNG-Nightly-Artifact-Ref": (
-            "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64
-        ),
+        "pfBlockerNG-Nightly-Artifact-Ref": _REF_PREFIX + "sha256:" + "b" * 64,
     }
     trailers = []
     for key, value in expected.items():
@@ -379,9 +630,7 @@ def test_cleanup_rejects_duplicate_receipt_identity_before_version_lookup(
             trailers.append(f"{key}: {wrong[key]}")
         trailers.append(f"{key}: {value}")
     message = (
-        f'publish: nightly {version} -> ["nightly"]\n\n'
-        + "\n".join(trailers)
-        + "\n"
+        f'publish: nightly {version} -> ["nightly"]\n\n' + "\n".join(trailers) + "\n"
     )
     commit = _git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD^", "-m", message)
     _git(repo, "update-ref", "refs/remotes/origin/main", commit)
@@ -415,11 +664,9 @@ def test_cleanup_rejects_malformed_inventory_even_with_one_exact_row(
     else:
         unrelated = _version_row(
             "20260825010101.abcdef0",
-            "ghcr.io/pfblockerng/pfblockerng-nightly@sha256:" + "b" * 64,
+            _REF_PREFIX + "sha256:" + "b" * 64,
             version_id=(
-                1176645017
-                if malformation == "duplicate version id"
-                else 1170000000
+                1176645017 if malformation == "duplicate version id" else 1170000000
             ),
         )
         if malformation == "invalid digest name":
