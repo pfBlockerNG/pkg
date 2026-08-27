@@ -15,6 +15,7 @@ _VERSION = re.compile(r"^[0-9]{14}\.[0-9a-f]{7}$")
 _ARTIFACT_REF = re.compile(
     r"^ghcr\.io/pfblockerng/pfblockerng-nightly@sha256:[0-9a-f]{64}$"
 )
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PUBLICATION_REF = "refs/remotes/origin/main"
 _PACKAGE_VERSIONS_ENDPOINT = (
     "orgs/pfBlockerNG/packages/container/pfblockerng-nightly/versions"
@@ -61,12 +62,27 @@ def verify_publication(
         for line in message.splitlines():
             key, separator, value = line.partition(": ")
             if separator and key in expected:
+                if key in trailers:
+                    raise PublicationReceiptError(
+                        f"duplicate Nightly publication trailer: {key}"
+                    )
                 trailers[key] = value
         if trailers == expected:
             return
     raise PublicationReceiptError(
         "no committed Nightly publication matches the cleanup identity"
     )
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
 
 
 def _resolve_package_version_id(
@@ -89,10 +105,12 @@ def _resolve_package_version_id(
             f"cannot list Nightly package versions: {proc.stderr.strip()}"
         )
     try:
-        pages = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
+        pages = json.loads(
+            proc.stdout, object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except ValueError as exc:
         raise PublicationReceiptError(
-            f"malformed GitHub Packages version response: {exc.msg}"
+            f"malformed GitHub Packages version response: {exc}"
         ) from exc
     if not isinstance(pages, list) or any(
         not isinstance(page, list) for page in pages
@@ -103,6 +121,7 @@ def _resolve_package_version_id(
 
     digest = artifact_ref.rsplit("@", 1)[1]
     matches: list[int] = []
+    seen_ids: set[int] = set()
     for row in (row for page in pages for row in page):
         if not isinstance(row, dict):
             raise PublicationReceiptError(
@@ -116,12 +135,18 @@ def _resolve_package_version_id(
             or isinstance(version_id, bool)
             or version_id < 1
             or not isinstance(name, str)
+            or not _DIGEST.fullmatch(name)
             or not isinstance(metadata, dict)
             or metadata.get("package_type") != "container"
         ):
             raise PublicationReceiptError(
                 "malformed GitHub Packages version metadata"
             )
+        if version_id in seen_ids:
+            raise PublicationReceiptError(
+                "contradictory Nightly package version metadata: duplicate id"
+            )
+        seen_ids.add(version_id)
         container = metadata.get("container")
         tags = container.get("tags") if isinstance(container, dict) else None
         if not isinstance(tags, list) or any(
