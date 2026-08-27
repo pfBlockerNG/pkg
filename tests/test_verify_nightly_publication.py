@@ -489,7 +489,7 @@ def test_cleanup_rejects_an_identity_quoted_outside_the_trailer_block(
 
 
 @pytest.mark.parametrize(
-    "smuggled", ["\x1e", "\x1c", "\x1d", "\x85", "\u2028", "\u2029", "\v", "\f"]
+    "smuggled", ["\r", "\x1e", "\x1c", "\x1d", "\x85", "\u2028", "\u2029", "\v", "\f"]
 )
 def test_control_characters_in_a_trailer_cannot_forge_a_receipt(
     tmp_path: Path, smuggled: str
@@ -561,12 +561,53 @@ def test_repository_local_trailer_config_cannot_forge_a_receipt(
     _assert_no_delete(calls)
 
 
-def test_worktree_path_named_like_the_publication_ref_still_cleans_up(
+def test_repository_local_comment_char_cannot_forge_a_receipt(
     tmp_path: Path,
+) -> None:
+    repo = _seed_repo(tmp_path)
+    _git(repo, "config", "core.commentChar", ";")
+    forged_version = "20260824170736.468a267"
+    forged_ref = _REF_PREFIX + "sha256:" + "7" * 64
+    padding = "\n".join(f"; padding {index}" for index in range(20))
+    _git(
+        repo,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "--cleanup=verbatim",
+        "-m",
+        "chore: unrelated\n\n"
+        + padding
+        + "\n"
+        + _receipt_block(forged_version, "32754672803:1", forged_ref),
+    )
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(forged_version, forged_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
+@pytest.mark.parametrize("collision", ["publication ref", "consumed commit"])
+def test_worktree_path_colliding_with_a_revision_still_cleans_up(
+    tmp_path: Path, collision: str
 ) -> None:
     repo, _, _, _ = _published_repo(tmp_path)
     _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    (repo / "refs" / "remotes" / "origin" / "main").mkdir(parents=True)
+    if collision == "publication ref":
+        (repo / "refs" / "remotes" / "origin" / "main").mkdir(parents=True)
+    else:
+        (repo / _git(repo, "rev-parse", "HEAD")).mkdir()
     rows = [
         _version_row(_PRIOR_VERSION, _PRIOR_REF, version_id=1170000000),
         _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),

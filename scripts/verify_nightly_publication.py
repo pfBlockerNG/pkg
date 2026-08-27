@@ -29,12 +29,17 @@ _VERSION_TRAILER = "pfBlockerNG-Nightly-Version"
 _RUN_ID_TRAILER = "pfBlockerNG-Source-Run-Id"
 _ARTIFACT_REF_TRAILER = "pfBlockerNG-Nightly-Artifact-Ref"
 _RECEIPT_TRAILERS = (_VERSION_TRAILER, _RUN_ID_TRAILER, _ARTIFACT_REF_TRAILER)
-# Let git decide what a trailer is: a receipt quoted mid-body is not one, with the
-# separator pinned here so the tree being read cannot redefine it, and topological
-# order so ancestry, not commit date, decides which commit came first.
+# Let git decide what a trailer is: a receipt quoted mid-body is not one. The
+# separator and the comment character are pinned here so the tree being read
+# cannot redefine what counts as a receipt, and topological order makes ancestry,
+# not commit date, decide which commit came first.
 _RECEIPT_LOG = (
     "-c",
     "trailer.separators=:",
+    "-c",
+    "core.commentChar=#",
+    "-c",
+    "core.commentString=#",
     "log",
     "--topo-order",
     "--format=%H%x1f%(trailers:only=true,unfold=true)%x00",
@@ -76,15 +81,17 @@ def _publication_receipts(
         ["git", "-C", str(repo), *_RECEIPT_LOG, revision, "--"],
         check=False,
         capture_output=True,
-        text=True,
         env={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
     )
     if proc.returncode != 0:
         raise PublicationReceiptError(
-            f"cannot read pkg publication history at {revision}: {proc.stderr.strip()}"
+            f"cannot read pkg publication history at {revision}: "
+            f"{proc.stderr.decode('utf-8', 'replace').strip()}"
         )
     receipts: list[tuple[str, dict[str, str]]] = []
-    for record in proc.stdout.split("\0"):
+    # Decoded here rather than through text=True: universal-newline decoding would
+    # turn a lone CR inside one genuine trailer into a line break git never made.
+    for record in proc.stdout.decode("utf-8", "surrogateescape").split("\0"):
         commit, separator, block = record.partition("\x1f")
         if not separator:
             continue
