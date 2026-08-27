@@ -427,6 +427,26 @@ def test_repeated_receipt_anchors_on_ancestry_not_on_commit_date(
     _assert_no_delete(calls)
 
 
+def _assert_receipt_ignored(
+    tmp_path: Path, repo: Path, version: str, artifact_ref: str
+) -> None:
+    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
+    rows = [
+        _version_row(version, artifact_ref, version_id=1170000000),
+        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
+    ]
+    proc, calls = _run_cleanup(
+        tmp_path,
+        repo,
+        source_run_id=_CURRENT_RUN_ID,
+        nightly_version=_CURRENT_VERSION,
+        artifact_ref=_CURRENT_REF,
+        response=json.dumps([rows]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    _assert_no_delete(calls)
+
+
 def test_receipt_quoted_outside_the_trailer_block_is_not_a_prior(
     tmp_path: Path,
 ) -> None:
@@ -443,21 +463,7 @@ def test_receipt_quoted_outside_the_trailer_block_is_not_a_prior(
         + _receipt_block(quoted_version, "32754672803:1", quoted_ref)
         + "\nThe three lines above are the receipt trailer block.\n",
     )
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    rows = [
-        _version_row(quoted_version, quoted_ref, version_id=1170000000),
-        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
-    ]
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
-        response=json.dumps([rows]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    _assert_no_delete(calls)
+    _assert_receipt_ignored(tmp_path, repo, quoted_version, quoted_ref)
 
 
 def test_cleanup_rejects_an_identity_quoted_outside_the_trailer_block(
@@ -509,21 +515,7 @@ def test_control_characters_in_a_trailer_cannot_forge_a_receipt(
         + smuggled.join(block.rstrip("\n").split("\n"))
         + "\n",
     )
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    rows = [
-        _version_row(forged_version, forged_ref, version_id=1170000000),
-        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
-    ]
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
-        response=json.dumps([rows]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    _assert_no_delete(calls)
+    _assert_receipt_ignored(tmp_path, repo, forged_version, forged_ref)
 
 
 def test_repository_local_trailer_config_cannot_forge_a_receipt(
@@ -544,21 +536,7 @@ def test_repository_local_trailer_config_cannot_forge_a_receipt(
         "pfBlockerNG-Source-Run-Id=32754672803:1\n"
         f"pfBlockerNG-Nightly-Artifact-Ref={forged_ref}\n",
     )
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    rows = [
-        _version_row(forged_version, forged_ref, version_id=1170000000),
-        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
-    ]
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
-        response=json.dumps([rows]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    _assert_no_delete(calls)
+    _assert_receipt_ignored(tmp_path, repo, forged_version, forged_ref)
 
 
 def test_repository_local_comment_char_cannot_forge_a_receipt(
@@ -581,21 +559,7 @@ def test_repository_local_comment_char_cannot_forge_a_receipt(
         + "\n"
         + _receipt_block(forged_version, "32754672803:1", forged_ref),
     )
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    rows = [
-        _version_row(forged_version, forged_ref, version_id=1170000000),
-        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
-    ]
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
-        response=json.dumps([rows]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    _assert_no_delete(calls)
+    _assert_receipt_ignored(tmp_path, repo, forged_version, forged_ref)
 
 
 @pytest.mark.parametrize("collision", ["publication ref", "consumed commit"])
@@ -641,21 +605,7 @@ def test_partial_receipt_trailers_are_not_a_publication(
         f'publish: nightly {legacy_version} -> ["nightly"]\n\n'
         + "".join(block.splitlines(keepends=True)[:present]),
     )
-    _publish(repo, _CURRENT_VERSION, _CURRENT_RUN_ID, _CURRENT_REF)
-    rows = [
-        _version_row(legacy_version, legacy_ref, version_id=1170000000),
-        _version_row(_CURRENT_VERSION, _CURRENT_REF, version_id=1176645017),
-    ]
-    proc, calls = _run_cleanup(
-        tmp_path,
-        repo,
-        source_run_id=_CURRENT_RUN_ID,
-        nightly_version=_CURRENT_VERSION,
-        artifact_ref=_CURRENT_REF,
-        response=json.dumps([rows]),
-    )
-    assert proc.returncode == 0, proc.stderr
-    _assert_no_delete(calls)
+    _assert_receipt_ignored(tmp_path, repo, legacy_version, legacy_ref)
 
 
 def test_newer_successful_version_is_never_deleted_by_a_late_cleanup(
