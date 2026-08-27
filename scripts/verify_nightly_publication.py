@@ -64,7 +64,20 @@ def _publication_receipts(
     repo: str | Path, revision: str
 ) -> list[tuple[str, dict[str, str]]]:
     proc = subprocess.run(
-        ["git", "-C", str(repo), "log", _RECEIPT_LOG_FORMAT, revision],
+        # Pin the trailer separator so the tree being read cannot redefine what
+        # counts as a receipt, and terminate the revision so a like-named path
+        # cannot make it ambiguous.
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "trailer.separators=:",
+            "log",
+            _RECEIPT_LOG_FORMAT,
+            revision,
+            "--",
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -80,7 +93,7 @@ def _publication_receipts(
         if not separator:
             continue
         trailers: dict[str, str] = {}
-        for line in block.splitlines():
+        for line in block.split("\n"):
             key, found, value = line.partition(": ")
             if found and key in _RECEIPT_TRAILERS:
                 if key in trailers:
@@ -100,9 +113,10 @@ def verify_publication(
 
     Raises unless pkg `main` records the exact cleanup identity as a real git
     trailer block. Predecessors are the distinct receipts committed among the
-    consumed commit's own ancestors, so they are proven by history rather than
-    by registry timestamps or by position in a log listing, and the consumed
-    identity itself can never appear among them.
+    ancestors of the *earliest* commit carrying that receipt, so they are
+    proven by history rather than by registry timestamps or by position in a
+    log listing, and neither the consumed identity nor a publication made
+    after it can appear among them.
     """
     if not _RUN_ID.fullmatch(source_run_id):
         raise PublicationReceiptError("source_run_id is malformed")
@@ -117,12 +131,9 @@ def verify_publication(
         _RUN_ID_TRAILER: source_run_id,
         _ARTIFACT_REF_TRAILER: artifact_ref,
     }
+    receipts = _publication_receipts(repo, _PUBLICATION_REF)
     consumed_commit = next(
-        (
-            commit
-            for commit, receipt in _publication_receipts(repo, _PUBLICATION_REF)
-            if receipt == consumed
-        ),
+        (commit for commit, receipt in reversed(receipts) if receipt == consumed),
         None,
     )
     if consumed_commit is None:
@@ -130,14 +141,12 @@ def verify_publication(
             "no committed Nightly publication matches the cleanup identity"
         )
     consumed_identity = _receipt_identity(consumed)
-    seen = {consumed_identity}
-    priors: list[Identity] = []
-    for _, ancestor in _publication_receipts(repo, consumed_commit):
-        identity = _receipt_identity(ancestor)
-        if identity not in seen:
-            seen.add(identity)
-            priors.append(identity)
-    return consumed_identity, priors
+    priors = dict.fromkeys(
+        _receipt_identity(receipt)
+        for _, receipt in _publication_receipts(repo, consumed_commit)
+    )
+    priors.pop(consumed_identity, None)
+    return consumed_identity, list(priors)
 
 
 def _reject_duplicate_json_keys(
