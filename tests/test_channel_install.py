@@ -14,7 +14,7 @@ logged line starting with ``install`` or ``delete``.
 
 A fake ``fetch`` binary (see ``_FETCH_STUB``) answers the catalogue probe
 (``<catalogue-url>/meta.conf``, issue #2926): it records every attempted URL and
-succeeds unless ``PFB_STUB_FETCH_FAIL=1``.
+the full argv of every call, and succeeds unless ``PFB_STUB_FETCH_FAIL=1``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import contextlib
 import os
 import re
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -229,6 +230,7 @@ exit 0
 _FETCH_STUB = r"""#!/bin/sh
 # fake fetch(1) stub for tests/test_channel_install.py — see module docstring.
 ROOT="${PFB_TEST_ROOT}"
+ARGV_LOG="${ROOT}/fetch-argv.log"
 LOG="${ROOT}/fetch-invocations.log"
 _pkg_log_bytes=0
 if [ -f "${ROOT}/pkg-invocations.log" ]; then
@@ -241,6 +243,7 @@ for _arg in "$@"; do
         *) _url="${_arg}" ;;
     esac
 done
+printf '%s\n' "$*" >> "${ARGV_LOG}"
 printf 'pkg-log-bytes=%s %s\n' "${_pkg_log_bytes}" "${_url}" >> "${LOG}"
 [ -n "${PFB_STUB_FETCH_FAIL:-}" ] && exit 1
 exit 0
@@ -302,6 +305,12 @@ def _fetch_log(root: str) -> Path:
     """One line per fetch call: ``pkg-log-bytes=<size> <url>`` — created ONLY by an
     actual fetch call, so a run that dies before the probe leaves nothing behind."""
     return Path(root) / "fetch-invocations.log"
+
+
+def _fetch_argv_log(root: str) -> Path:
+    """One line per fetch call: the complete argv, space-separated — so a test can
+    assert the EXACT flags the probe ran with (e.g. the no-redirect flag, -A)."""
+    return Path(root) / "fetch-argv.log"
 
 
 def _write_pkg_stub(root: str) -> str:
@@ -1879,6 +1888,9 @@ def test_failed_probe_keeps_a_pre_existing_conf_byte_identical() -> None:
         assert _pkg_log(root).read_text() == "", "a failed probe must invoke no pkg"
         leftovers = [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")]
         assert leftovers == [], f"the candidate conf leaked: {leftovers}"
+        assert _fetch_log(root).read_text() == (
+            f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf\n"
+        ), "the probe requested the candidate's meta.conf exactly once, with the pkg log empty"
 
 
 def test_probe_requests_the_exact_generated_catalog_url_before_any_pkg_call() -> None:
@@ -1892,6 +1904,64 @@ def test_probe_requests_the_exact_generated_catalog_url_before_any_pkg_call() ->
         assert _fetch_log(root).read_text().splitlines() == [
             f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf"
         ], "exactly one probe of the generated catalogue's meta.conf, before any pkg call"
+
+
+@pytest.mark.parametrize(
+    "hostile_id, hostile_tail",
+    [
+        ("ident-var", "/$ABI"),
+        ("brace-var", "/${ABI}"),
+        ("backslash", "/back\\slash"),
+    ],
+)
+def test_hostile_url_with_ucl_transforming_syntax_fails_before_probe(
+    hostile_id: str, hostile_tail: str
+) -> None:
+    """UCL — pkg(8)'s conf grammar — expands ``$IDENT``/``${...}`` references and a
+    backslash escapes the next character, so a url value carrying either is NOT
+    byte-identical to what pkg reads back out of the activated conf: the probe
+    would fetch one string while pkg resolves another. Rejected BEFORE the fetch:
+    exit 4, no fetch call, no conf activated, no pkg call, no candidate leak, peer
+    conf untouched."""
+    with tempfile.TemporaryDirectory() as root:
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+
+        proc = _run_install(
+            root, "stable", extra_env={"PFB_BASE_URL": _BASE_URL + hostile_tail}
+        )
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert not _fetch_log(root).exists(), "a UCL-hostile url must be rejected before any fetch"
+        assert not _fetch_argv_log(root).exists(), "a UCL-hostile url must be rejected before any fetch"
+        assert _pkg_log(root).read_text() == "", "a rejected candidate must invoke no pkg"
+        assert not _conf_path(root, "stable").exists(), "a rejected candidate must not activate a conf"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
+        assert [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")] == [], (
+            "the candidate conf leaked"
+        )
+
+
+def test_probe_argv_carries_the_no_redirect_flag_and_failed_pkg_keeps_inherited_conf() -> None:
+    """fetch must be invoked with ``-A``: a redirect must never establish that the
+    catalogue resource exists — a redirect-shaped false positive would pass the
+    probe and let the run proceed to pkg, which then fails on the dead catalog.
+    When that failure lands AFTER activation on a box whose conf predates the run,
+    the inherited conf survives (CONF_CREATED=0 — a conf this run did not create is
+    never removed); the stub's argv log pins the exact flags."""
+    with tempfile.TemporaryDirectory() as root:
+        conf = _seed_conf_file(root, _conf_name("stable"), "# inherited stable conf\n")
+
+        proc = _run_install(root, "stable", update_fails=True)
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert _fetch_argv_log(root).read_text().splitlines() == [
+            f"-q -A -o /dev/null -T 30 {_BASE_URL}/stable/ce-2.8/meta.conf"
+        ], "the probe must carry exactly the no-redirect flag (-A) with its bounded flags"
+        assert _fetch_log(root).read_text() == (
+            f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf\n"
+        ), "the probe still lands before any pkg call"
+        assert conf.exists(), "an inherited conf must not be removed on a post-activation failure"
+        assert _pkg_log(root).read_text() != "", "pkg ran (the update failed) after the probe passed"
 
 
 def test_hostile_base_url_with_embedded_quote_fails_before_probe() -> None:
@@ -1961,7 +2031,10 @@ def test_conf_path_not_a_regular_file_fails_closed(hostile_kind: str) -> None:
     """A directory (or a symlink to one) named like the conf must fail closed:
     `mv candidate CONF_PATH` into a directory SUCCEEDS by moving the candidate
     inside it — activation never established, cleanup disarmed, pkg still run.
-    Exit 1, no candidate leak, zero pkg calls, peer conf untouched."""
+    The destination's own identity is snapshotted BEFORE the run and verified
+    after (lstat kind/inode; for a symlink, the exact readlink target), and NO
+    non-.conf candidate may survive ANYWHERE under REPOS_DIR. Exit 1, zero pkg
+    calls, peer conf untouched."""
     with tempfile.TemporaryDirectory() as root:
         peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
         conf_path = _conf_path(root, "stable")
@@ -1971,17 +2044,36 @@ def test_conf_path_not_a_regular_file_fails_closed(hostile_kind: str) -> None:
             conf_path.mkdir()
         else:
             os.symlink(hostile_dir, conf_path)
+        pre_lstat = os.lstat(conf_path)
+        pre_target = os.readlink(conf_path) if hostile_kind == "symlink-to-directory" else None
 
         proc = _run_install(root, "stable")
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "not a regular file" in proc.stderr, proc.stderr
         assert _pkg_log(root).read_text() == "", "activation refusal must invoke no pkg"
+        post_lstat = os.lstat(conf_path)
+        assert (post_lstat.st_dev, post_lstat.st_ino, post_lstat.st_mtime_ns) == (
+            pre_lstat.st_dev,
+            pre_lstat.st_ino,
+            pre_lstat.st_mtime_ns,
+        ), "the hostile destination itself must be untouched by the run"
         if hostile_kind == "directory":
-            assert conf_path.is_dir() and os.listdir(conf_path) == [], (
+            assert stat.S_ISDIR(pre_lstat.st_mode) and stat.S_ISDIR(post_lstat.st_mode)
+            assert os.listdir(conf_path) == [], (
                 f"the candidate must not be moved inside the hostile directory: {os.listdir(conf_path)}"
             )
         else:
+            assert stat.S_ISLNK(pre_lstat.st_mode) and stat.S_ISLNK(post_lstat.st_mode)
+            assert os.readlink(conf_path) == pre_target, (
+                "the symlink conf must still point at the same target after the run"
+            )
             assert hostile_dir.is_symlink() or hostile_dir.is_dir()
             assert os.listdir(hostile_dir) == [], f"the candidate leaked: {os.listdir(hostile_dir)}"
+        leftovers = [
+            str(p.relative_to(_repos_dir(root)))
+            for p in _repos_dir(root).rglob("*")
+            if p.is_file() and not p.name.endswith(".conf")
+        ]
+        assert leftovers == [], f"the candidate conf leaked somewhere under REPOS_DIR: {leftovers}"
         assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
