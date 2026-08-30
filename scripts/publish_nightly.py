@@ -349,11 +349,21 @@ def _verify_builds(
     work_dir: Path,
 ) -> list[_Leg]:
     legs: list[_Leg] = []
+    # Transition compatibility (issue #2926): the producer's pre-tuple contract
+    # uploaded one nightly-result-<major>/ directory per major. The tuple-bearing
+    # directory is authoritative; the legacy directory is consulted only while a
+    # major carries exactly ONE build tuple — with multiple tuples sharing a major
+    # a legacy fallback would be ambiguous, so it is forbidden there.
+    major_counts: dict[str, int] = {}
+    for entry in validated.builds:
+        row = entry["matrix_row"]
+        assert isinstance(row, Mapping)
+        legacy_major = str(row["freebsd_major"])
+        major_counts[legacy_major] = major_counts.get(legacy_major, 0) + 1
     for index, entry in enumerate(validated.builds):
         matrix_row = entry["matrix_row"]
         assert isinstance(matrix_row, Mapping)
         key = _build_key(matrix_row)
-        legdir = results_dir / _leg_dirname(matrix_row)
         artifact = entry["artifact"]
         assert isinstance(artifact, Mapping)
 
@@ -362,6 +372,14 @@ def _verify_builds(
         # invoked here proactively rather than after a path has already been built
         # from untrusted input.
         pc._validate_asset_name(artifact["name"])
+        legdir = results_dir / _leg_dirname(matrix_row)
+        if (
+            not (legdir / artifact["name"]).is_file()
+            and major_counts[key[0]] == 1
+        ):
+            legacy_dir = results_dir / f"{_LEG_DIR_PREFIX}{key[0]}"
+            if (legacy_dir / artifact["name"]).is_file():
+                legdir = legacy_dir
         canonical_path = legdir / artifact["name"]
         if not canonical_path.is_file():
             raise PublishNightlyError(
@@ -450,7 +468,7 @@ def _route_targets(
         if not matches:
             raise PublishNightlyError(
                 f"ROUTE build row {row['variant']}/{row['pfsense_version']} "
-                f"(FreeBSD {major} php{php_version}) has no built asset"
+                f"(runtime tuple {key!r}) has no built asset"
             )
         if len(matches) > 1:
             raise PublishNightlyError(
@@ -643,7 +661,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--results-dir",
         required=True,
-        help="directory of downloaded nightly-result-<major>/ legs",
+        help=(
+            "directory of downloaded nightly-result-<major>-php<version>-<flavor>/ "
+            "legs (legacy nightly-result-<major>/ accepted while that major has "
+            "exactly one build tuple)"
+        ),
     )
     parser.add_argument(
         "--pkg-repo",
