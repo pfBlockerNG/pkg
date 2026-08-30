@@ -444,6 +444,7 @@ def _prepare_install(
     """
     pkg_bin = _write_pkg_stub(root)
     fetch_bin = _write_fetch_stub(root)
+    timeout_bin = _write_timeout_stub(root)
     _seed_box(root)
     _seed_catalog(root, _repo_name(channel), catalog)
 
@@ -461,6 +462,7 @@ def _prepare_install(
             "PFBLOCKERNG_ROOT": root,
             "PKG_BIN": pkg_bin,
             "FETCH_BIN": fetch_bin,
+            "TIMEOUT_BIN": timeout_bin,
             "PFB_BASE_URL": _BASE_URL,
             "PFB_TEST_ROOT": root,
             **(extra_env or {}),
@@ -1870,6 +1872,19 @@ def test_missing_fetch_binary_fails_at_step_1_with_exit_1() -> None:
         assert "/nonexistent/fetch" in proc.stderr, proc.stderr
         assert not _hook_path(root).exists(), "AFTER: no hook file must be written"
         assert not _conf_path(root, channel).exists(), "AFTER: no conf file must be written"
+
+
+
+def test_missing_timeout_binary_fails_at_step_1_with_exit_1() -> None:
+    """A missing timeout(1) is an environment error, not an unreachable catalogue."""
+    with tempfile.TemporaryDirectory() as root:
+        proc = _run_install(root, "stable", extra_env={"TIMEOUT_BIN": "/nonexistent/timeout"})
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "/nonexistent/timeout" in proc.stderr, proc.stderr
+        assert not _hook_path(root).exists(), "no hook file may be written"
+        assert not _conf_path(root, "stable").exists(), "no conf file may be written"
+        assert not _fetch_log(root).exists(), "no catalogue probe may run"
 
 
 def test_fresh_install_failed_probe_exits_4_without_conf_or_pkg_call() -> None:
