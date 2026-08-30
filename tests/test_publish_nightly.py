@@ -65,13 +65,14 @@ def _row(
     variant: str = "CE",
     extra_pkgs: Sequence[str] = (),
     role: str | None = None,
+    php_version: str = "8.3",
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "pfsense_version": pfsense_version,
         "channel": variant,
         "freebsd_version": f"{freebsd_major}.0-RELEASE",
         "freebsd_major": freebsd_major,
-        "php_version": "8.3",
+        "php_version": php_version,
         "py_flavor": "py311",
         "variant": variant,
         "status": "active",
@@ -89,8 +90,27 @@ ROW_CE15 = _row(
     extra_pkgs=["textproc/py-charset-normalizer"],
 )
 ROW_CE15_NO_EXTRA = _row(freebsd_major="15", pfsense_version="2.8", variant="CE")
-ROW_PLUS16_03 = _row(freebsd_major="16", pfsense_version="26.03", variant="Plus")
-ROW_PLUS16_07 = _row(freebsd_major="16", pfsense_version="26.07", variant="Plus")
+# Current Plus (26.03/26.07) and Plus 25.11 share FreeBSD major 16 with distinct
+# PHP runtimes (issue #2926): build identity is the exact runtime tuple
+# (freebsd_major, php_version, py_flavor), NOT the major alone.
+ROW_PLUS16_03 = _row(
+    freebsd_major="16",
+    pfsense_version="26.03",
+    variant="Plus",
+    php_version="8.5",
+)
+ROW_PLUS16_07 = _row(
+    freebsd_major="16",
+    pfsense_version="26.07",
+    variant="Plus",
+    php_version="8.5",
+)
+ROW_PLUS16_25_11 = _row(
+    freebsd_major="16",
+    pfsense_version="25.11",
+    variant="Plus",
+    php_version="8.4",
+)
 ROW_PLUS15_03 = _row(freebsd_major="15", pfsense_version="26.03", variant="Plus")
 ROW_ROUTE_ONLY_17 = _row(
     freebsd_major="17", pfsense_version="17.0", variant="CE", role="route-only"
@@ -322,12 +342,21 @@ def _make_record(
     return pfb_pkg.validate_build_record(record)
 
 
+def _leg_dir(assets_root: Path, row: dict[str, object]) -> Path:
+    """The exact tuple-bearing result-directory name the consumer must derive
+    (issue #2926): nightly-result-<major>-php<php_version>-<py_flavor>."""
+    return assets_root / (
+        f"{pn._LEG_DIR_PREFIX}{row['freebsd_major']}"
+        f"-php{row['php_version']}-{row['py_flavor']}"
+    )
+
+
 def _build_leg_result(
     snapshot: Any, spec: _LegSpec, *, assets_root: Path
 ) -> dict[str, Any]:
     """Mint one Nightly leg's record and package fixtures."""
     major = str(spec.row["freebsd_major"])
-    legdir = assets_root / f"{pn._LEG_DIR_PREFIX}{major}"
+    legdir = _leg_dir(assets_root, spec.row)
     legdir.mkdir(parents=True, exist_ok=True)
     record = _make_record(snapshot, spec.row, spec.source_date_epoch)
     canonical_name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{snapshot.pkg_version}.pkg"
@@ -515,6 +544,51 @@ class HappyFanOutTests(_TempDirTestCase):
             self.assertTrue((docs / varver / "meta.conf").is_file(), varver)
             self.assertTrue((docs / varver / "data.pkg").is_file(), varver)
             self.assertTrue((docs / varver / "packagesite.pkg").is_file(), varver)
+
+    def test_both_freebsd_16_runtime_tuples_route_their_own_artifacts(self) -> None:
+        """issue #2926: two build legs share FreeBSD major 16 but differ in the
+        PHP runtime (25.11 -> PHP 8.4, current Plus -> PHP 8.5). Each build-role
+        ROUTE row must resolve exactly its own tuple's artifact: plus-25.11 only
+        the PHP 8.4 artifact, every PHP 8.5 route only the PHP 8.5 artifact."""
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot()
+        legs = [
+            _LegSpec(row=ROW_PLUS16_25_11),
+            _LegSpec(row=ROW_PLUS16_03),
+        ]
+        route_rows = [ROW_PLUS16_25_11, ROW_PLUS16_03, ROW_PLUS16_07]
+        handoff = _build_handoff(
+            snapshot, legs=legs, route_rows=route_rows, assets_root=results_dir
+        )
+
+        report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+        self.assertEqual(
+            set(report.touched),
+            {
+                ("nightly", "plus-25.11"),
+                ("nightly", "plus-26.03"),
+                ("nightly", "plus-26.07"),
+            },
+        )
+        sha_by_php = {
+            str(entry["matrix_row"]["php_version"]): entry["artifact"]["sha256"]
+            for entry in handoff["builds"]
+        }
+        self.assertEqual(set(sha_by_php), {"8.4", "8.5"})
+        self.assertNotEqual(sha_by_php["8.4"], sha_by_php["8.5"])
+        docs = self.pkg_repo / "docs" / "nightly"
+        canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+
+        def published_sha(varver: str) -> str:
+            return hashlib.sha256(
+                (docs / varver / canonical_name).read_bytes()
+            ).hexdigest()
+
+        self.assertEqual(published_sha("plus-25.11"), sha_by_php["8.4"])
+        self.assertNotEqual(published_sha("plus-25.11"), sha_by_php["8.5"])
+        self.assertEqual(published_sha("plus-26.03"), sha_by_php["8.5"])
+        self.assertEqual(published_sha("plus-26.07"), sha_by_php["8.5"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1066,7 +1140,7 @@ class HandoffIntegrityTests(_TempDirTestCase):
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
-        legdir = results_dir / f"{pn._LEG_DIR_PREFIX}15"
+        legdir = _leg_dir(results_dir, ROW_CE15)
         forged_record = _make_record(forged_alloc, ROW_CE15)
         forged_name = f"pfSense-pkg-pfBlockerNG-{forged_alloc.pkg_version}.pkg"
         _path, forged_digest = _wrap_canonical_pkg(
@@ -1226,25 +1300,23 @@ class HandoffIntegrityTests(_TempDirTestCase):
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("build entry", str(ctx.exception))
 
-    def test_duplicate_build_majors_rejected(self) -> None:
+    def test_duplicate_exact_build_tuple_rejected_before_publication(self) -> None:
+        """Hostile: two build entries claiming the SAME exact runtime tuple
+        (15 / PHP 8.3 / py311 — ce-2.8 + ce-2.9) are a forged handoff. Rejected at
+        ingestion, reporting the tuple, before anything is published."""
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_PLUS16_03)],
-            route_rows=[ROW_CE15, ROW_PLUS16_03],
+            legs=[_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_CE15_29)],
+            route_rows=[ROW_CE15, ROW_CE15_29],
             assets_root=results_dir,
         )
-        mutated = _mutate(handoff)
-        mutated["builds"][1]["matrix_row"]["freebsd_major"] = mutated["builds"][0][
-            "matrix_row"
-        ]["freebsd_major"]
-        mutated["builds"][1]["matrix_row"]["freebsd_version"] = mutated["builds"][0][
-            "matrix_row"
-        ]["freebsd_version"]
         with self.assertRaises(pn.PublishNightlyError) as ctx:
-            _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
+            _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("duplicate", str(ctx.exception))
+        self.assertIn("('15', '8.3', 'py311')", str(ctx.exception))
+        self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
 
     def test_snapshot_source_sha_mismatch_top_level_rejected(self) -> None:
         handoff, results_dir, _alloc = self.base_handoff()
@@ -1362,10 +1434,11 @@ class RoutingTests(_TempDirTestCase):
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("serve no ROUTE build row", str(ctx.exception))
 
-    def test_two_legs_same_major_rejected_via_route_targets(self) -> None:
-        """The routing-level defensive duplicate-major guard, exercised directly
-        (bypassing handoff validation, which already has its OWN dup-major test
-        above) via two hand-built VerifiedAsset/_Leg objects sharing one major."""
+    def test_two_legs_same_tuple_rejected_via_route_targets(self) -> None:
+        """The routing-level defensive duplicate-tuple guard, exercised directly
+        (bypassing handoff validation, which already has its OWN dup-tuple test
+        above) via two hand-built VerifiedAsset/_Leg objects sharing one exact
+        runtime tuple."""
         snapshot = _snapshot()
         record_a = _make_record(snapshot, ROW_CE15)
         record_b = _make_record(snapshot, ROW_CE15, _EPOCH + 1)
@@ -1388,10 +1461,16 @@ class RoutingTests(_TempDirTestCase):
             record=record_b,
         )
         leg_a = pn._Leg(
-            major="15", matrix_row=ROW_CE15, canonical=asset_a, dependencies=()
+            key=pn._build_key(ROW_CE15),
+            matrix_row=ROW_CE15,
+            canonical=asset_a,
+            dependencies=(),
         )
         leg_b = pn._Leg(
-            major="15", matrix_row=ROW_CE15, canonical=asset_b, dependencies=()
+            key=pn._build_key(ROW_CE15),
+            matrix_row=ROW_CE15,
+            canonical=asset_b,
+            dependencies=(),
         )
 
         with self.assertRaises(pn.PublishNightlyError) as ctx:
@@ -1420,7 +1499,7 @@ class RoutingTests(_TempDirTestCase):
             manifest={"abi": "FreeBSD:16:*"},
         )
         leg = pn._Leg(
-            major="15",
+            key=pn._build_key(ROW_CE15),
             matrix_row=ROW_CE15,
             canonical=canonical,
             dependencies=(mismatched_dep,),
@@ -1450,11 +1529,7 @@ class DependencyTests(_TempDirTestCase):
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
-        (
-            results_dir
-            / f"{pn._LEG_DIR_PREFIX}15"
-            / "py311-charset-normalizer-3.4.0.pkg"
-        ).unlink()
+        (_leg_dir(results_dir, ROW_CE15) / "py311-charset-normalizer-3.4.0.pkg").unlink()
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("missing dependency asset", str(ctx.exception))
@@ -1490,7 +1565,7 @@ class DependencyTests(_TempDirTestCase):
             route_rows=[ROW_CE15],
             assets_root=results_dir,
         )
-        legdir = results_dir / f"{pn._LEG_DIR_PREFIX}15"
+        legdir = _leg_dir(results_dir, ROW_CE15)
         suffixed_name = "py311-charset-normalizer-3.4.0-CE-2.8.pkg"
         (legdir / "py311-charset-normalizer-3.4.0.pkg").rename(legdir / suffixed_name)
         mutated = _mutate(handoff)
@@ -1551,11 +1626,10 @@ class MissingFileTests(_TempDirTestCase):
             assets_root=results_dir,
         )
         canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
-        (results_dir / f"{pn._LEG_DIR_PREFIX}15" / canonical_name).unlink()
+        (_leg_dir(results_dir, ROW_CE15) / canonical_name).unlink()
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertIn("missing canonical asset", str(ctx.exception))
-
 
 # --------------------------------------------------------------------------- #
 # T12 — hostile artifact names, rejected BEFORE any path join.
