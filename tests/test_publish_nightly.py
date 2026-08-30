@@ -1413,12 +1413,25 @@ class HandoffIntegrityTests(_TempDirTestCase):
                     )
 
     def test_build_matrix_must_match_build_entries(self) -> None:
-        handoff, results_dir, _alloc = self.base_handoff()
+        """A build_matrix tuple whose build entry the handoff OMITS is a coverage
+        error naming the EXACT missing tuple — not a shape error from a malformed
+        fixture (the old php999 row died in row validation before the coverage
+        check was ever exercised) — and nothing may be published."""
+        results_dir = self.new_results_dir()
+        handoff = _build_handoff(
+            _snapshot(),
+            legs=[_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_CE15_PY312)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
+        )
         mutated = _mutate(handoff)
-        mutated["build_matrix"][0]["php_version"] = "php999"
+        del mutated["builds"][1]
+
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=mutated, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("build_matrix", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("missing build tuples [('15', '8.3', 'py312')]", message)
+        self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
 
     def test_literal_build_record_must_match_verified_payload(self) -> None:
         handoff, results_dir, _alloc = self.base_handoff()
@@ -1456,33 +1469,44 @@ class HandoffIntegrityTests(_TempDirTestCase):
 
 class RoutingTests(_TempDirTestCase):
     def test_route_row_major_has_no_asset_rejected(self) -> None:
+        """A ROUTE row for (16, 8.5, py311) while the SAME major ships only the
+        (16, 8.4, py311) build: a major-level match would hand the PHP 8.5 route
+        the PHP 8.4 artifact. The rejection must name the exact missing tuple and
+        publish nothing."""
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15)],
-            route_rows=[ROW_CE15, ROW_PLUS16_03],
+            legs=[_LegSpec(row=ROW_PLUS16_25_11)],
+            route_rows=[ROW_PLUS16_25_11, ROW_PLUS16_03],
             assets_root=results_dir,
         )
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         message = str(ctx.exception)
         self.assertIn("no built asset", message)
-        # The diagnostic must carry the COMPLETE runtime tuple, py flavor included.
         self.assertIn("runtime tuple ('16', '8.5', 'py311')", message)
+        self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
 
     def test_canonical_asset_serving_zero_route_rows_rejected(self) -> None:
+        """Both same-major PHP tuples are BUILT but only the PHP 8.4 tuple is
+        routed: the unrouted (16, 8.5, py311) canonical asset serves no ROUTE
+        build row. The rejection must carry the exact unused tuple and publish
+        nothing."""
         results_dir = self.new_results_dir()
         snapshot = _snapshot()
         handoff = _build_handoff(
             snapshot,
-            legs=[_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_PLUS16_03)],
-            route_rows=[ROW_CE15],
+            legs=[_LegSpec(row=ROW_PLUS16_25_11), _LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_25_11],
             assets_root=results_dir,
         )
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("serve no ROUTE build row", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("serve no ROUTE build row", message)
+        self.assertIn("('16', '8.5', 'py311')", message)
+        self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
 
     def test_two_legs_same_tuple_rejected_via_route_targets(self) -> None:
         """The routing-level defensive duplicate-tuple guard, exercised directly
@@ -1700,6 +1724,41 @@ class LegacyLayoutTests(_TempDirTestCase):
         self.assertIn("missing canonical asset", message)
         self.assertIn("('16', '8.4', 'py311')", message)
         self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
+
+    def test_single_tuple_major_prefers_tuple_dir_with_distinct_legacy_artifact(self) -> None:
+        """Both layouts exist for a single-tuple major, carrying DISTINCT valid
+        artifacts under the same canonical name: the tuple-bearing directory must
+        win — the published canonical artifact digest is the tuple dir's, never
+        the legacy dir's (a legacy-dir pick would fail verification outright,
+        since the legacy artifact was built from a different epoch)."""
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot()
+        handoff = _build_handoff(
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
+        )
+        legacy_dir = results_dir / f"{pn._LEG_DIR_PREFIX}15"
+        legacy_dir.mkdir()
+        canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+        _wrap_canonical_pkg(
+            legacy_dir,
+            _make_record(snapshot, ROW_CE15, epoch=_EPOCH + 3600),
+            local_name=canonical_name,
+        )
+
+        report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+        self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
+        tuple_digest = hashlib.sha256(
+            (_leg_dir(results_dir, ROW_CE15) / canonical_name).read_bytes()
+        ).hexdigest()
+        published = self.pkg_repo / "docs" / "nightly" / "ce-2.8" / canonical_name
+        self.assertTrue(published.is_file())
+        self.assertEqual(
+            hashlib.sha256(published.read_bytes()).hexdigest(), tuple_digest
+        )
 
 
 # --------------------------------------------------------------------------- #

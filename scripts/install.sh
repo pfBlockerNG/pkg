@@ -502,15 +502,25 @@ pfb_channel_install() {
             die 4 "the candidate conf's url value is not <base>/<channel>/<varver> ('${_catalog_url}') — refusing to probe or activate"
             ;;
     esac
+    # The URL must be byte-identical to what pkg(8) reads back out of the activated
+    # conf: UCL — pkg's conf grammar — expands `$IDENT`/`${...}` references and a
+    # backslash escapes the next character, so a url value carrying either would
+    # have this probe fetch one string while pkg resolves another. Rejected BEFORE
+    # the fetch (issue #2926).
+    if printf '%s' "${_catalog_url}" | grep -Eq '\\|\$[[:alnum:]_{]'; then
+        die 4 "the candidate conf's url value carries UCL-transforming syntax (a backslash or a \$IDENT/\${...} reference) — the probe would not fetch what pkg resolves; refusing to probe or activate"
+    fi
     # 3b. Probe the catalogue BEFORE activating anything (issue #2926): the URL the
     #    candidate names must actually serve a catalogue, so <url>/meta.conf has to
-    #    answer. The probe is bounded — hard timeout, body discarded to /dev/null —
-    #    and its stdin is /dev/null like every other child (piped-script safety).
+    #    answer. The probe is bounded — hard timeout, body discarded to /dev/null,
+    #    `-A` so a redirect can never establish resource existence (a redirect
+    #    landing page answering 200 for anything must not pass the probe) — and its
+    #    stdin is /dev/null like every other child (piped-script safety).
     #    On failure NOTHING is activated: no pkg call is made, a fresh box keeps no
     #    conf, and an existing conf — never touched by this run — survives
     #    byte-identical.
     printf '==> Probing %s/meta.conf\n' "${_catalog_url%/}"
-    if ! "${FETCH_BIN}" -q -o /dev/null -T 30 "${_catalog_url%/}/meta.conf" </dev/null; then
+    if ! "${FETCH_BIN}" -q -A -o /dev/null -T 30 "${_catalog_url%/}/meta.conf" </dev/null; then
         die 4 "$(printf '%s/meta.conf is unreachable — not activating the %s repository conf. Inspect the catalogue: %s' \
             "${_catalog_url%/}" "${REPO_NAME}" "${_catalog_url%/}/meta.conf")"
     fi
