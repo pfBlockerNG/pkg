@@ -468,19 +468,40 @@ pfb_channel_install() {
     if ! grep -q "${CONF_MARKER}" "${_candidate}" 2>/dev/null; then
         die 4 "the generator hook did not resolve a ${PFB_CHANNEL} conf (no marker line in the candidate) — variant detection may have failed; inspect: sh ${ON_BOX_HOOK} onestart"
     fi
-    # The marker alone is not enough: the hook leaves an EXISTING target UNCHANGED
-    # when detection fails, so a candidate carrying the marker but resolving to
-    # ANOTHER base/channel (a stale conf from a fork, a staged prefix, or a restored
-    # config backup) must be rejected too.
-    _expect_url_prefix="url: \"${PFB_BASE_URL%/}/${PFB_CHANNEL}/"
-    if ! grep -qF "${_expect_url_prefix}" "${_candidate}" 2>/dev/null; then
-        die 4 "the candidate conf does not resolve to ${PFB_BASE_URL%/}/${PFB_CHANNEL}/ — a stale or foreign conf; inspect: sh ${ON_BOX_HOOK} onestart"
+    # The marker alone is not enough — and neither is the expected prefix appearing
+    # ANYWHERE in the candidate: extraction and validation are ONE operation. The
+    # candidate must carry EXACTLY ONE url key, and that line must be canonically
+    # formed — `url: "<value>",` and nothing else — or the run stops before the
+    # probe. Otherwise a quote or newline smuggled through PFB_BASE_URL makes the
+    # probe fetch a truncated/foreign URL, and a commented or extra url line could
+    # satisfy a grep-anywhere check while the real value points elsewhere.
+    _url_keys="$(grep -c '^[[:space:]]*url[[:space:]]*:' "${_candidate}" 2>/dev/null || true)"
+    _url_wellformed="$(sed -n 's/^[[:space:]]*url:[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p' "${_candidate}" 2>/dev/null | grep -c . || true)"
+    _catalog_url="$(sed -n 's/^[[:space:]]*url:[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p' "${_candidate}" 2>/dev/null | head -n 1)"
+    [ "${_url_keys}" -eq 1 ] && [ "${_url_wellformed}" -eq 1 ] || {
+        die 4 "$(printf 'the candidate conf does not carry exactly one canonical quoted url key (found %s url key line(s), %s well-formed) — refusing to probe or activate; inspect: sh %s onestart' \
+            "${_url_keys}" "${_url_wellformed}" "${ON_BOX_HOOK}")"
+    }
+    # The extracted VALUE itself must be the URL this run drove the hook to write —
+    # a value pointing anywhere else is a stale or foreign conf.
+    case "${_catalog_url}" in
+        "${PFB_BASE_URL%/}/${PFB_CHANNEL}/"*) ;;
+        *)
+            die 4 "the candidate conf does not resolve to ${PFB_BASE_URL%/}/${PFB_CHANNEL}/ — a stale or foreign conf; inspect: sh ${ON_BOX_HOOK} onestart"
+            ;;
+    esac
+    # The value must be plain catalogue coordinates: no control characters (a
+    # double quote is already impossible in the extracted value) and exactly one
+    # <varver> path segment after the channel.
+    if printf '%s' "${_catalog_url}" | grep -q '[[:cntrl:]]'; then
+        die 4 "the candidate conf's url value carries control characters — refusing to probe or activate"
     fi
-    # One canonical URL out of the candidate — the url: line the prefix check just
-    # matched.
-    _catalog_url="$(sed -n 's/^[[:space:]]*url:[[:space:]]*"\([^"]*\)".*/\1/p' "${_candidate}" | head -n 1)"
-    [ -n "${_catalog_url}" ] ||
-        die 4 "the candidate conf carries no url: line — cannot probe the catalogue"
+    _catalog_varver="${_catalog_url#"${PFB_BASE_URL%/}/${PFB_CHANNEL}/"}"
+    case "${_catalog_varver}" in
+        '' | */*)
+            die 4 "the candidate conf's url value is not <base>/<channel>/<varver> ('${_catalog_url}') — refusing to probe or activate"
+            ;;
+    esac
     # 3b. Probe the catalogue BEFORE activating anything (issue #2926): the URL the
     #    candidate names must actually serve a catalogue, so <url>/meta.conf has to
     #    answer. The probe is bounded — hard timeout, body discarded to /dev/null —
@@ -499,9 +520,21 @@ pfb_channel_install() {
     #    in-place rewrite did, now an atomic rename within REPOS_DIR). CONF_CREATED
     #    keeps its meaning for the failure paths below: a conf this run created is
     #    removed if a later step fails; an inherited one never is.
+    #
+    #    Fail closed unless the destination is ABSENT or a REGULAR file: `mv` into a
+    #    directory (or a symlink to one) named pfblockerng-<ch>.conf succeeds by
+    #    moving the candidate INSIDE it — activation never established, yet cleanup
+    #    would be disarmed and pkg would run on.
+    if [ -e "${CONF_PATH}" ] && [ ! -f "${CONF_PATH}" ]; then
+        die 1 "${CONF_PATH} exists and is not a regular file — refusing to activate over it"
+    fi
     [ -f "${CONF_PATH}" ] || CONF_CREATED=1
     mv "${_candidate}" "${CONF_PATH}" ||
         die 1 "could not activate ${CONF_PATH} from the validated candidate"
+    # _candidate stays armed for the EXIT trap until the destination is VERIFIED as
+    # the activated regular file.
+    [ -f "${CONF_PATH}" ] ||
+        die 1 "${CONF_PATH} is not a regular file after activation — refusing to continue"
     _candidate=""
     printf '==> Conf resolved:\n'
     sed -n 's/^[[:space:]]*url:[[:space:]]*/    url: /p' "${CONF_PATH}"
