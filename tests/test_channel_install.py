@@ -11,6 +11,10 @@ branch: a ``pkgstate/<name>/{version,repo}`` directory pair per installed packag
 ``catalog/<repo>`` file listing offered versions in catalogue order, and a shared
 invocation log (``pkg-invocations.log``) asserted against directly — a mutation is any
 logged line starting with ``install`` or ``delete``.
+
+A fake ``fetch`` binary (see ``_FETCH_STUB``) answers the catalogue probe
+(``<catalogue-url>/meta.conf``, issue #2926): it records every attempted URL and
+succeeds unless ``PFB_STUB_FETCH_FAIL=1``.
 """
 
 from __future__ import annotations
@@ -218,6 +222,31 @@ exit 0
 """
 
 
+# The fake fetch(1): one line per call in fetch-invocations.log —
+# ``pkg-log-bytes=<size of the pkg log at call time> <last non-flag argument>`` — so a
+# test can assert the EXACT probed URL and prove the probe ran before the first pkg
+# call (size 0). Succeeds unless ``PFB_STUB_FETCH_FAIL=1``.
+_FETCH_STUB = r"""#!/bin/sh
+# fake fetch(1) stub for tests/test_channel_install.py — see module docstring.
+ROOT="${PFB_TEST_ROOT}"
+LOG="${ROOT}/fetch-invocations.log"
+_pkg_log_bytes=0
+if [ -f "${ROOT}/pkg-invocations.log" ]; then
+    _pkg_log_bytes=$(( $(wc -c < "${ROOT}/pkg-invocations.log") + 0 ))
+fi
+_url=""
+for _arg in "$@"; do
+    case "${_arg}" in
+        -*) ;;
+        *) _url="${_arg}" ;;
+    esac
+done
+printf 'pkg-log-bytes=%s %s\n' "${_pkg_log_bytes}" "${_url}" >> "${LOG}"
+[ -n "${PFB_STUB_FETCH_FAIL:-}" ] && exit 1
+exit 0
+"""
+
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -269,6 +298,12 @@ def _pkg_ca_file_capture(root: str) -> Path:
     return Path(root) / "pkg-ca-file.log"
 
 
+def _fetch_log(root: str) -> Path:
+    """One line per fetch call: ``pkg-log-bytes=<size> <url>`` — created ONLY by an
+    actual fetch call, so a run that dies before the probe leaves nothing behind."""
+    return Path(root) / "fetch-invocations.log"
+
+
 def _write_pkg_stub(root: str) -> str:
     """Install the fake pkg(8) binary under root/bin/pkg; return its path."""
     bin_dir = os.path.join(root, "bin")
@@ -285,6 +320,17 @@ def _write_pkg_stub(root: str) -> str:
     for p in (_pkg_stdin_capture(root), _pkg_log(root), _pkg_ca_path_capture(root), _pkg_ca_file_capture(root)):
         if not p.exists():
             p.write_text("")
+    return stub_path
+
+
+def _write_fetch_stub(root: str) -> str:
+    """Install the fake fetch(1) binary under root/bin/fetch; return its path."""
+    bin_dir = os.path.join(root, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    stub_path = os.path.join(bin_dir, "fetch")
+    with open(stub_path, "w") as fh:
+        fh.write(_FETCH_STUB)
+    os.chmod(stub_path, 0o755)
     return stub_path
 
 
@@ -365,6 +411,7 @@ def _prepare_install(
     accepted forms can share every other fixture.
     """
     pkg_bin = _write_pkg_stub(root)
+    fetch_bin = _write_fetch_stub(root)
     _seed_box(root)
     _seed_catalog(root, _repo_name(channel), catalog)
 
@@ -381,6 +428,7 @@ def _prepare_install(
         {
             "PFBLOCKERNG_ROOT": root,
             "PKG_BIN": pkg_bin,
+            "FETCH_BIN": fetch_bin,
             "PFB_BASE_URL": _BASE_URL,
             "PFB_TEST_ROOT": root,
             **(extra_env or {}),
@@ -798,6 +846,7 @@ def test_stale_foreign_conf_rejected_when_detection_fails() -> None:
             **os.environ,
             "PFBLOCKERNG_ROOT": root,
             "PKG_BIN": pkg_bin,
+            "FETCH_BIN": _write_fetch_stub(root),
             "PFB_BASE_URL": _BASE_URL,
             "PFB_TEST_ROOT": root,
             "PFB_STUB_INFO_MANIFEST": manifest,
@@ -1231,6 +1280,7 @@ def test_piped_invocation_leaves_pkg_stdin_empty_and_installs_a_real_hook() -> N
             **os.environ,
             "PFBLOCKERNG_ROOT": root,
             "PKG_BIN": pkg_bin,
+            "FETCH_BIN": _write_fetch_stub(root),
             "PFB_BASE_URL": _BASE_URL,
             "PFB_TEST_ROOT": root,
             "PFB_STUB_INFO_MANIFEST": manifest,
@@ -1758,3 +1808,87 @@ def test_output_reader_does_not_outlive_the_run() -> None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(proc.pid, signal.SIGKILL)
             proc.wait(timeout=30)
+
+
+# --------------------------------------------------------------------------- #
+# 24. Catalogue probe before activation (issue #2926)
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_fetch_binary_fails_at_step_1_with_exit_1() -> None:
+    """FETCH_BIN is validated beside PKG_BIN: a missing fetch must fail loudly at
+    step 1 — before the hook or any conf candidate is written — exit 1, naming the
+    missing path in the message."""
+    with tempfile.TemporaryDirectory() as root:
+        channel = "stable"
+        _seed_box(root)
+        env = {
+            **os.environ,
+            "PFBLOCKERNG_ROOT": root,
+            "PKG_BIN": _write_pkg_stub(root),
+            "FETCH_BIN": "/nonexistent/fetch",
+            "PFB_BASE_URL": _BASE_URL,
+            "PFB_TEST_ROOT": root,
+        }
+        proc = subprocess.run(
+            ["sh", str(_SCRIPT), "--channel", channel], env=env, capture_output=True, text=True, check=False
+        )
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "/nonexistent/fetch" in proc.stderr, proc.stderr
+        assert not _hook_path(root).exists(), "AFTER: no hook file must be written"
+        assert not _conf_path(root, channel).exists(), "AFTER: no conf file must be written"
+
+
+def test_fresh_install_failed_probe_exits_4_without_conf_or_pkg_call() -> None:
+    """Scenario: given a fresh box (plus an already-working peer subscription), when
+    the catalogue probe fails, then the run exits 4 with NO conf activated for this
+    channel, zero pkg invocations, the peer conf byte-identical, and no candidate
+    conf left behind in the repos directory."""
+    with tempfile.TemporaryDirectory() as root:
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+
+        proc = _run_install(root, "stable", extra_env={"PFB_STUB_FETCH_FAIL": "1"})
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert not _conf_path(root, "stable").exists(), "a failed probe must not activate a conf"
+        assert _pkg_log(root).read_text() == "", "a failed probe must invoke no pkg"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
+        leftovers = [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")]
+        assert leftovers == [], f"the candidate conf leaked: {leftovers}"
+        assert _fetch_log(root).read_text() == (
+            f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf\n"
+        ), "the probe must request the generated catalogue's meta.conf"
+
+
+def test_failed_probe_keeps_a_pre_existing_conf_byte_identical() -> None:
+    """Scenario: given a box whose conf predates this run, when the catalogue probe
+    fails, then the run exits 4 and the original conf bytes are retained EXACTLY —
+    the hook stages a candidate, never CONF_PATH, so nothing is rewritten before
+    the catalogue is proven."""
+    with tempfile.TemporaryDirectory() as root:
+        original = "# operator's conf — pending boot-time generation\n"
+        conf = _seed_conf_file(root, _conf_name("stable"), original)
+
+        proc = _run_install(root, "stable", extra_env={"PFB_STUB_FETCH_FAIL": "1"})
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert conf.read_text() == original, (
+            "a failed probe must never rewrite an existing conf — it was never touched"
+        )
+        assert _pkg_log(root).read_text() == "", "a failed probe must invoke no pkg"
+        leftovers = [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")]
+        assert leftovers == [], f"the candidate conf leaked: {leftovers}"
+
+
+def test_probe_requests_the_exact_generated_catalog_url_before_any_pkg_call() -> None:
+    """fetch receives ``<base>/<channel>/<varver>/meta.conf`` — the catalogue URL the
+    hook generated, exactly one canonical URL — and the probe lands BEFORE the first
+    pkg call: the stub records the pkg log's size at fetch time, and it must be 0."""
+    with tempfile.TemporaryDirectory() as root:
+        proc = _run_install(root, "stable")
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _fetch_log(root).read_text().splitlines() == [
+            f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf"
+        ], "exactly one probe of the generated catalogue's meta.conf, before any pkg call"
