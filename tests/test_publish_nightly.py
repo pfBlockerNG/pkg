@@ -66,6 +66,7 @@ def _row(
     extra_pkgs: Sequence[str] = (),
     role: str | None = None,
     php_version: str = "8.3",
+    py_flavor: str = "py311",
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "pfsense_version": pfsense_version,
@@ -73,7 +74,7 @@ def _row(
         "freebsd_version": f"{freebsd_major}.0-RELEASE",
         "freebsd_major": freebsd_major,
         "php_version": php_version,
-        "py_flavor": "py311",
+        "py_flavor": py_flavor,
         "variant": variant,
         "status": "active",
         "extra_pkgs": list(extra_pkgs),
@@ -112,6 +113,12 @@ ROW_PLUS16_25_11 = _row(
     php_version="8.4",
 )
 ROW_PLUS15_03 = _row(freebsd_major="15", pfsense_version="26.03", variant="Plus")
+# Same major + PHP as ROW_CE15 but a distinct Python flavor — the third key
+# dimension (issue #2926): identity is the complete tuple, so this row must get
+# its OWN leg/artifact, never ROW_CE15's py311 build.
+ROW_CE15_PY312 = _row(
+    freebsd_major="15", pfsense_version="3.0", variant="CE", py_flavor="py312"
+)
 ROW_ROUTE_ONLY_17 = _row(
     freebsd_major="17", pfsense_version="17.0", variant="CE", role="route-only"
 )
@@ -589,6 +596,46 @@ class HappyFanOutTests(_TempDirTestCase):
         self.assertNotEqual(published_sha("plus-25.11"), sha_by_php["8.5"])
         self.assertEqual(published_sha("plus-26.03"), sha_by_php["8.5"])
         self.assertEqual(published_sha("plus-26.07"), sha_by_php["8.5"])
+
+    def test_same_major_php_distinct_py_flavors_route_their_own_artifacts(self) -> None:
+        """issue #2926: the key is the COMPLETE tuple — same FreeBSD major AND same
+        PHP (8.3) but distinct py_flavor (py311 vs py312) are two separate builds,
+        each route receiving only its own exact-flavor artifact. A _build_key that
+        ignores or hardcodes py_flavor would collapse these legs and fail here."""
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot()
+        legs = [_LegSpec(row=ROW_CE15), _LegSpec(row=ROW_CE15_PY312)]
+        route_rows = [ROW_CE15, ROW_CE15_PY312]
+        handoff = _build_handoff(
+            snapshot, legs=legs, route_rows=route_rows, assets_root=results_dir
+        )
+
+        report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+        self.assertEqual(
+            set(report.touched),
+            {("nightly", "ce-2.8"), ("nightly", "ce-3.0")},
+        )
+        sha_by_flavor = {
+            str(entry["matrix_row"]["py_flavor"]): entry["artifact"]["sha256"]
+            for entry in handoff["builds"]
+        }
+        self.assertEqual(set(sha_by_flavor), {"py311", "py312"})
+        self.assertNotEqual(sha_by_flavor["py311"], sha_by_flavor["py312"])
+        docs = self.pkg_repo / "docs" / "nightly"
+        canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+
+        def published_sha(varver: str) -> str:
+            return hashlib.sha256(
+                (docs / varver / canonical_name).read_bytes()
+            ).hexdigest()
+
+        self.assertEqual(published_sha("ce-2.8"), sha_by_flavor["py311"])
+        self.assertEqual(published_sha("ce-3.0"), sha_by_flavor["py312"])
+        self.assertNotEqual(
+            (docs / "ce-2.8" / canonical_name).read_bytes(),
+            (docs / "ce-3.0" / canonical_name).read_bytes(),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1419,7 +1466,10 @@ class RoutingTests(_TempDirTestCase):
         )
         with self.assertRaises(pn.PublishNightlyError) as ctx:
             _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
-        self.assertIn("no built asset", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("no built asset", message)
+        # The diagnostic must carry the COMPLETE runtime tuple, py flavor included.
+        self.assertIn("runtime tuple ('16', '8.5', 'py311')", message)
 
     def test_canonical_asset_serving_zero_route_rows_rejected(self) -> None:
         results_dir = self.new_results_dir()
@@ -1593,6 +1643,63 @@ class RouteOnlyTests(_TempDirTestCase):
         report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
         self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
         self.assertFalse((self.pkg_repo / "docs" / "nightly" / "ce-17.0").exists())
+
+
+# --------------------------------------------------------------------------- #
+# Legacy result-directory transition (fix round 1, review finding 1): the
+# producer's pre-tuple contract used nightly-result-<major>/. The consumer
+# prefers the tuple-bearing directory and falls back to the legacy one ONLY
+# while a major carries exactly ONE build tuple; a major with multiple tuples
+# never falls back (that would conflate distinct PHP/Python artifacts).
+# --------------------------------------------------------------------------- #
+
+
+class LegacyLayoutTests(_TempDirTestCase):
+    def test_single_tuple_major_falls_back_to_legacy_result_dir(self) -> None:
+        """An unchanged one-build-per-major producer handoff publishes unchanged
+        from the legacy nightly-result-<major>/ directory."""
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot()
+        handoff = _build_handoff(
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=[ROW_CE15],
+            assets_root=results_dir,
+        )
+        _leg_dir(results_dir, ROW_CE15).rename(
+            results_dir / f"{pn._LEG_DIR_PREFIX}15"
+        )
+
+        report = _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+
+        self.assertEqual(report.touched, (("nightly", "ce-2.8"),))
+        docs = self.pkg_repo / "docs" / "nightly"
+        canonical_name = f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+        self.assertTrue((docs / "ce-2.8" / canonical_name).is_file())
+        self.assertTrue((docs / "ce-2.8" / _CHARSET_PKG).is_file())
+
+    def test_multi_tuple_major_never_falls_back_to_legacy_dir(self) -> None:
+        """Two build tuples share major 16; a legacy nightly-result-16/ directory
+        must NOT be consulted for either — falling back there would conflate the
+        PHP 8.4 and PHP 8.5 artifacts, the exact ambiguity issue #2926 removes."""
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot()
+        handoff = _build_handoff(
+            snapshot,
+            legs=[_LegSpec(row=ROW_PLUS16_25_11), _LegSpec(row=ROW_PLUS16_03)],
+            route_rows=[ROW_PLUS16_25_11, ROW_PLUS16_03],
+            assets_root=results_dir,
+        )
+        _leg_dir(results_dir, ROW_PLUS16_25_11).rename(
+            results_dir / f"{pn._LEG_DIR_PREFIX}16"
+        )
+
+        with self.assertRaises(pn.PublishNightlyError) as ctx:
+            _run(handoff=handoff, results_dir=results_dir, pkg_repo=self.pkg_repo)
+        message = str(ctx.exception)
+        self.assertIn("missing canonical asset", message)
+        self.assertIn("('16', '8.4', 'py311')", message)
+        self.assertFalse((self.pkg_repo / "docs" / "nightly").exists())
 
 
 # --------------------------------------------------------------------------- #
