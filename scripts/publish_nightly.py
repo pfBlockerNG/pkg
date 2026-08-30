@@ -34,6 +34,25 @@ import publish_release as pr
 _CHANNEL = "nightly"
 _LEG_DIR_PREFIX = "nightly-result-"
 
+# Nightly build identity is the exact runtime tuple (issue #2926): the same
+# FreeBSD major may be built more than once with different PHP/Python runtimes,
+# so every build-keyed map, guard, and result-directory suffix is keyed by the
+# complete tuple, never the major alone.
+_BuildKey = tuple[str, str, str]
+
+
+def _build_key(row: Mapping[str, object]) -> _BuildKey:
+    return (
+        str(row["freebsd_major"]),
+        str(row["php_version"]),
+        str(row["py_flavor"]),
+    )
+
+
+def _leg_dirname(row: Mapping[str, object]) -> str:
+    major, php_version, py_flavor = _build_key(row)
+    return f"{_LEG_DIR_PREFIX}{major}-php{php_version}-{py_flavor}"
+
 
 class PublishNightlyError(Exception):
     """A handoff-shape, routing, or CLI-level failure detected at ingestion."""
@@ -157,12 +176,13 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
         ]
     except pfb_pkg.PkgError as exc:
         raise PublishNightlyError(f"handoff build_matrix is invalid: {exc}") from exc
-    build_rows = {str(row["freebsd_major"]): row for row in build_matrix}
+    build_keys = [_build_key(row) for row in build_matrix]
+    build_rows = dict(zip(build_keys, build_matrix))
     if len(build_rows) != len(build_matrix):
+        duplicates = sorted({key for key in build_keys if build_keys.count(key) > 1})
         raise PublishNightlyError(
-            "handoff build_matrix contains duplicate FreeBSD majors"
+            f"handoff build_matrix contains duplicate build tuples {duplicates!r}"
         )
-
     matrix_digest = handoff["matrix_digest"]
     if not isinstance(matrix_digest, str) or not nc.DIGEST.fullmatch(matrix_digest):
         raise PublishNightlyError(
@@ -208,7 +228,7 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
         raise PublishNightlyError("handoff builds must be a non-empty list")
 
     normalized_builds: list[dict[str, object]] = []
-    majors: set[str] = set()
+    build_keys: set[_BuildKey] = set()
     for entry in builds_raw:
         if not isinstance(entry, dict) or set(entry) != _BUILD_ENTRY_FIELDS:
             raise PublishNightlyError(
@@ -220,14 +240,15 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             raise PublishNightlyError(
                 f"handoff build matrix_row is invalid: {exc}"
             ) from exc
-        major = str(matrix_row["freebsd_major"])
-        if major in majors:
+        major, php_version, _py_flavor = key = _build_key(matrix_row)
+        label = f"FreeBSD {major} php{php_version}"
+        if key in build_keys:
             raise PublishNightlyError(
-                f"handoff builds contain duplicate FreeBSD major {major!r}"
+                f"handoff builds contain duplicate build tuple {key!r}"
             )
-        if build_rows.get(major) != matrix_row:
+        if build_rows.get(key) != matrix_row:
             raise PublishNightlyError(
-                f"handoff build entry for FreeBSD {major} does not match build_matrix"
+                f"handoff build entry for {label} does not match build_matrix"
             )
         record_raw = entry["record"]
         if (
@@ -235,7 +256,7 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             and record_raw.get("dependency_builder") is None
         ):
             raise PublishNightlyError(
-                f"handoff build record for FreeBSD {major} dependency_builder "
+                f"handoff build record for {label} dependency_builder "
                 "is required at the Nightly boundary"
             )
         try:
@@ -244,7 +265,7 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             )
         except pfb_pkg.PkgError as exc:
             raise PublishNightlyError(
-                f"handoff build record for FreeBSD {major} is invalid: {exc}"
+                f"handoff build record for {label} is invalid: {exc}"
             ) from exc
         if (
             record["matrix_row"] != matrix_row
@@ -253,16 +274,16 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             or record["freebsd_ports_sha"] != ports_sha
         ):
             raise PublishNightlyError(
-                f"handoff build record for FreeBSD {major} disagrees with handoff provenance"
+                f"handoff build record for {label} disagrees with handoff provenance"
             )
         if record["source_date_epoch"] != source_date_epoch:
             raise PublishNightlyError(
-                f"handoff build record for FreeBSD {major} source_date_epoch "
+                f"handoff build record for {label} source_date_epoch "
                 "disagrees with handoff provenance"
             )
         if record.get("dependency_builder") != dependency_builder:
             raise PublishNightlyError(
-                f"handoff build record for FreeBSD {major} dependency_builder "
+                f"handoff build record for {label} dependency_builder "
                 "disagrees with handoff provenance"
             )
         artifact = nc.validate_artifacts([entry["artifact"]])[0]
@@ -271,7 +292,7 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             or artifact["name"] != f"pfSense-pkg-pfBlockerNG-{pkg_version}.pkg"
         ):
             raise PublishNightlyError(
-                f"handoff canonical artifact for FreeBSD {major} has inconsistent identity"
+                f"handoff canonical artifact for {label} has inconsistent identity"
             )
         dep_artifacts = nc.validate_dep_artifacts(
             entry["dep_artifacts"],
@@ -283,7 +304,7 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
             raise PublishNightlyError(
                 f"handoff dep_artifacts count must match extra_pkgs (got {len(dep_artifacts)}, expected {expected_deps})"
             )
-        majors.add(major)
+        build_keys.add(key)
         normalized_builds.append(
             {
                 "matrix_row": matrix_row,
@@ -292,8 +313,12 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
                 "dep_artifacts": dep_artifacts,
             }
         )
-    if majors != set(build_rows):
-        raise PublishNightlyError("handoff builds do not cover every build_matrix row")
+    if build_keys != set(build_rows):
+        missing = sorted(set(build_rows) - build_keys)
+        raise PublishNightlyError(
+            "handoff builds do not cover every build_matrix row "
+            f"(missing build tuples {missing!r})"
+        )
 
     return _ValidatedHandoff(
         pkg_version=pkg_version,
@@ -305,13 +330,13 @@ def _validate_handoff(handoff: object, *, source_run_id: str) -> _ValidatedHando
 
 
 # --------------------------------------------------------------------------- #
-# Asset discovery + verification — one leg directory per BUILD major.
+# Asset discovery + verification — one leg directory per exact build tuple.
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
 class _Leg:
-    major: str
+    key: _BuildKey
     matrix_row: Mapping[str, object]
     canonical: pc.VerifiedAsset
     dependencies: tuple[pc.VerifiedAsset, ...]
@@ -327,8 +352,8 @@ def _verify_builds(
     for index, entry in enumerate(validated.builds):
         matrix_row = entry["matrix_row"]
         assert isinstance(matrix_row, Mapping)
-        major = str(matrix_row["freebsd_major"])
-        legdir = results_dir / f"{_LEG_DIR_PREFIX}{major}"
+        key = _build_key(matrix_row)
+        legdir = results_dir / _leg_dirname(matrix_row)
         artifact = entry["artifact"]
         assert isinstance(artifact, Mapping)
 
@@ -340,7 +365,7 @@ def _verify_builds(
         canonical_path = legdir / artifact["name"]
         if not canonical_path.is_file():
             raise PublishNightlyError(
-                f"missing canonical asset for FreeBSD {major}: {canonical_path}"
+                f"missing canonical asset for {key!r}: {canonical_path}"
             )
         canonical_asset = pc.verify_asset(
             canonical_path,
@@ -352,24 +377,24 @@ def _verify_builds(
         record = pc._canonical_record(canonical_asset)
         if record != entry["record"]:
             raise PublishNightlyError(
-                f"FreeBSD {major} canonical asset record does not match the handoff build record"
+                f"{key} canonical asset record does not match the handoff build record"
             )
         if record["canonical_package_version"] != validated.pkg_version:
             raise PublishNightlyError(
-                f"FreeBSD {major} canonical asset version {record['canonical_package_version']!r} "
+                f"{key} canonical asset version {record['canonical_package_version']!r} "
                 f"does not match handoff pkg_version {validated.pkg_version!r}"
             )
         if record["source_sha"] != validated.source_sha:
             raise PublishNightlyError(
-                f"FreeBSD {major} canonical asset source_sha does not match handoff source_sha"
+                f"{key} canonical asset source_sha does not match handoff source_sha"
             )
         if record["freebsd_ports_sha"] != validated.ports_sha:
             raise PublishNightlyError(
-                f"FreeBSD {major} canonical asset freebsd_ports_sha does not match handoff ports_sha"
+                f"{key} canonical asset freebsd_ports_sha does not match handoff ports_sha"
             )
         if record["matrix_row"] != matrix_row:
             raise PublishNightlyError(
-                f"FreeBSD {major} canonical asset matrix_row does not match this build entry's matrix_row"
+                f"{key} canonical asset matrix_row does not match this build entry's matrix_row"
             )
 
         dependencies: list[pc.VerifiedAsset] = []
@@ -380,7 +405,7 @@ def _verify_builds(
             dep_path = legdir / dep["name"]
             if not dep_path.is_file():
                 raise PublishNightlyError(
-                    f"missing dependency asset {dep['name']!r} for FreeBSD {major}: {dep_path}"
+                    f"missing dependency asset {dep['name']!r} for {key}: {dep_path}"
                 )
             dependencies.append(
                 pc.verify_asset(
@@ -394,7 +419,7 @@ def _verify_builds(
 
         legs.append(
             _Leg(
-                major=major,
+                key=key,
                 matrix_row=matrix_row,
                 canonical=canonical_asset,
                 dependencies=tuple(dependencies),
@@ -404,8 +429,9 @@ def _verify_builds(
 
 
 # --------------------------------------------------------------------------- #
-# Route targeting — fan each leg out to every build-role ROUTE row sharing its
-# FreeBSD major. Route-only rows are never targeted (no frozen Nightly assets).
+# Route targeting — fan each leg out to every build-role ROUTE row matching its
+# exact runtime tuple. Route-only rows are never targeted (no frozen Nightly
+# assets).
 # --------------------------------------------------------------------------- #
 
 
@@ -417,18 +443,20 @@ def _route_targets(
     build_rows, _route_only_rows = pc._normalize_route_matrix(route_matrix_rows)
 
     targets: dict[str, pr._Target] = {}
-    used_majors: set[str] = set()
+    used_keys: set[_BuildKey] = set()
     for row in build_rows.values():
-        major = str(row["freebsd_major"])
-        matches = [leg for leg in legs if leg.major == major]
+        major, php_version, _py_flavor = key = _build_key(row)
+        matches = [leg for leg in legs if leg.key == key]
         if not matches:
             raise PublishNightlyError(
-                f"ROUTE build row {row['variant']}/{row['pfsense_version']} (FreeBSD {major}) has no built asset"
+                f"ROUTE build row {row['variant']}/{row['pfsense_version']} "
+                f"(FreeBSD {major} php{php_version}) has no built asset"
             )
         if len(matches) > 1:
             raise PublishNightlyError(
-                f"ROUTE build row {row['variant']}/{row['pfsense_version']} (FreeBSD {major}) matches more than "
-                "one built asset — forged handoff"
+                f"ROUTE build row {row['variant']}/{row['pfsense_version']} "
+                f"(runtime tuple {key!r}) matches more than one built asset — "
+                "forged handoff"
             )
         leg = matches[0]
         varver = brp.catalog_name_from_version(row["pfsense_version"], row["variant"])
@@ -437,8 +465,8 @@ def _route_targets(
                 f"two ROUTE build rows resolve to the same varver {varver!r}"
             )
 
-        # Canonical fan-out is per-major; extra_pkgs deps attach only to
-        # ROUTE rows that declare their origin (issue #2383).
+        # Canonical fan-out is per exact runtime tuple; extra_pkgs deps attach
+        # only to ROUTE rows that declare their origin (issue #2383).
         dependencies: list[pc.VerifiedAsset] = []
         for dep in leg.dependencies:
             if not brp._pkg_matches_abi(dep.manifest, f"FreeBSD:{major}:*"):
@@ -452,12 +480,12 @@ def _route_targets(
         targets[varver] = pr._Target(
             row=row, canonical=leg.canonical, dependencies=dependencies
         )
-        used_majors.add(major)
+        used_keys.add(key)
 
-    unused = {leg.major for leg in legs} - used_majors
+    unused = {leg.key for leg in legs} - used_keys
     if unused:
         raise PublishNightlyError(
-            f"canonical asset(s) for FreeBSD major(s) {sorted(unused)!r} serve no ROUTE build row"
+            f"canonical asset(s) for runtime tuple(s) {sorted(unused)!r} serve no ROUTE build row"
         )
     return targets
 
