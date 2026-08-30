@@ -1892,3 +1892,96 @@ def test_probe_requests_the_exact_generated_catalog_url_before_any_pkg_call() ->
         assert _fetch_log(root).read_text().splitlines() == [
             f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf"
         ], "exactly one probe of the generated catalogue's meta.conf, before any pkg call"
+
+
+def test_hostile_base_url_with_embedded_quote_fails_before_probe() -> None:
+    """A base URL carrying a double quote makes the hook write a conf whose url
+    value terminates at the embedded quote — extraction and validation used to be
+    uncoupled, so the grep-anywhere prefix check accepted the line while the probe
+    fetched a TRUNCATED URL. The candidate must be rejected before any fetch."""
+    with tempfile.TemporaryDirectory() as root:
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+
+        proc = _run_install(root, "stable", extra_env={"PFB_BASE_URL": f'{_BASE_URL}"hostile'})
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert not _fetch_log(root).exists(), "a malformed candidate must be rejected before any fetch"
+        assert _pkg_log(root).read_text() == "", "a rejected candidate must invoke no pkg"
+        assert not _conf_path(root, "stable").exists(), "a rejected candidate must not activate a conf"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
+        assert [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")] == [], (
+            "the candidate conf leaked"
+        )
+
+
+def test_hostile_base_url_forging_prefix_in_extra_url_line_fails_closed() -> None:
+    """A newline-bearing base URL makes the hook write a second, well-formed url
+    key carrying the expected prefix; a grep-anywhere check accepts it while the
+    FIRST url (the one extraction picks up) points elsewhere. Exactly one url key
+    is allowed — the candidate must be rejected before any fetch."""
+    with tempfile.TemporaryDirectory() as root:
+        hostile = f'{_BASE_URL}/one",\nurl: "{_BASE_URL}/stable/evil'
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+
+        proc = _run_install(root, "stable", extra_env={"PFB_BASE_URL": hostile})
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert not _fetch_log(root).exists(), "a multi-url candidate must be rejected before any fetch"
+        assert _pkg_log(root).read_text() == "", "a rejected candidate must invoke no pkg"
+        assert not _conf_path(root, "stable").exists(), "a rejected candidate must not activate a conf"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
+        assert [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")] == [], (
+            "the candidate conf leaked"
+        )
+
+
+def test_hostile_base_url_forging_prefix_in_comment_fails_closed() -> None:
+    """A newline-bearing base URL can forge the expected prefix inside a COMMENT
+    line, which a grep-anywhere prefix check accepts while the single real url
+    points elsewhere. The extracted url VALUE must itself match the expected
+    <base>/<channel>/ prefix — the candidate must be rejected before any fetch."""
+    with tempfile.TemporaryDirectory() as root:
+        hostile = f'{_BASE_URL}/one",\n# url: "{_BASE_URL}/stable/evil'
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+
+        proc = _run_install(root, "stable", extra_env={"PFB_BASE_URL": hostile})
+
+        assert proc.returncode == 4, proc.stdout + proc.stderr
+        assert not _fetch_log(root).exists(), "a forged-prefix candidate must be rejected before any fetch"
+        assert _pkg_log(root).read_text() == "", "a rejected candidate must invoke no pkg"
+        assert not _conf_path(root, "stable").exists(), "a rejected candidate must not activate a conf"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"
+        assert [p for p in os.listdir(_repos_dir(root)) if not p.endswith(".conf")] == [], (
+            "the candidate conf leaked"
+        )
+
+
+@pytest.mark.parametrize("hostile_kind", ["directory", "symlink-to-directory"])
+def test_conf_path_not_a_regular_file_fails_closed(hostile_kind: str) -> None:
+    """A directory (or a symlink to one) named like the conf must fail closed:
+    `mv candidate CONF_PATH` into a directory SUCCEEDS by moving the candidate
+    inside it — activation never established, cleanup disarmed, pkg still run.
+    Exit 1, no candidate leak, zero pkg calls, peer conf untouched."""
+    with tempfile.TemporaryDirectory() as root:
+        peer = _seed_conf_file(root, _conf_name("nightly"), "# peer nightly conf\n")
+        conf_path = _conf_path(root, "stable")
+        hostile_dir = _repos_dir(root) / "hostile-dir"
+        hostile_dir.mkdir()
+        if hostile_kind == "directory":
+            conf_path.mkdir()
+        else:
+            os.symlink(hostile_dir, conf_path)
+
+        proc = _run_install(root, "stable")
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "not a regular file" in proc.stderr, proc.stderr
+        assert _pkg_log(root).read_text() == "", "activation refusal must invoke no pkg"
+        if hostile_kind == "directory":
+            assert conf_path.is_dir() and os.listdir(conf_path) == [], (
+                f"the candidate must not be moved inside the hostile directory: {os.listdir(conf_path)}"
+            )
+        else:
+            assert hostile_dir.is_symlink() or hostile_dir.is_dir()
+            assert os.listdir(hostile_dir) == [], f"the candidate leaked: {os.listdir(hostile_dir)}"
+        assert peer.read_text() == "# peer nightly conf\n", "the peer conf must be untouched"

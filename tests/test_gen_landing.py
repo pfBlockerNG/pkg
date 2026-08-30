@@ -2683,7 +2683,11 @@ def test_write_site_bakes_a_base_url_containing_shell_metacharacters_as_inert_da
     monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
 
     probe = tmp_path / "pwned"
-    evil_base = f"https://evil.example.org/$(touch {probe})`touch {probe}`'\"&"
+    # A double quote is deliberately ABSENT: the installer now rejects a base
+    # carrying `"` before the probe (a canonical quoted `url: "value",` key cannot
+    # carry one — the success path can only prove inertness of the remaining
+    # metacharacters: command substitution, backticks, single quote, `&`).
+    evil_base = f"https://evil.example.org/$(touch {probe})`touch {probe}`'&"
     gl.write_site(str(site), evil_base, str(_PKG_SITE_DIR))
 
     published_text = (site / "install.sh").read_text()
