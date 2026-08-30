@@ -2363,7 +2363,7 @@ def test_published_installer_runs_piped_with_embedded_hook(tmp_path: Path, monke
     """
     import subprocess
 
-    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub
+    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub, _write_timeout_stub
 
     site = tmp_path / "site"
     site.mkdir()
@@ -2395,6 +2395,7 @@ def test_published_installer_runs_piped_with_embedded_hook(tmp_path: Path, monke
         "PFBLOCKERNG_ROOT": str(root),
         "PKG_BIN": str(fake_pkg),
         "FETCH_BIN": str(_write_fetch_stub(str(root))),
+        "TIMEOUT_BIN": str(_write_timeout_stub(str(root))),
         "PFB_TEST_ROOT": str(root),
         "PFB_BASE_URL": base,
     }
@@ -2440,7 +2441,7 @@ def test_published_installer_never_treats_the_on_box_hook_as_its_checkout_source
     """
     import subprocess
 
-    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub
+    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub, _write_timeout_stub
 
     site = tmp_path / "site"
     site.mkdir()
@@ -2482,6 +2483,7 @@ def test_published_installer_never_treats_the_on_box_hook_as_its_checkout_source
         "PFBLOCKERNG_ROOT": str(root),
         "PKG_BIN": str(fake_pkg),
         "FETCH_BIN": str(_write_fetch_stub(str(root))),
+        "TIMEOUT_BIN": str(_write_timeout_stub(str(root))),
         "PFB_TEST_ROOT": str(root),
         "PFB_BASE_URL": base,
     }
@@ -2516,7 +2518,7 @@ def test_published_installer_saved_to_disk_still_replaces_a_stale_on_box_hook(tm
     """
     import subprocess
 
-    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub
+    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub, _write_timeout_stub
 
     site = tmp_path / "site"
     site.mkdir()
@@ -2556,6 +2558,7 @@ def test_published_installer_saved_to_disk_still_replaces_a_stale_on_box_hook(tm
         "PFBLOCKERNG_ROOT": str(root),
         "PKG_BIN": str(fake_pkg),
         "FETCH_BIN": str(_write_fetch_stub(str(root))),
+        "TIMEOUT_BIN": str(_write_timeout_stub(str(root))),
         "PFB_TEST_ROOT": str(root),
         "PFB_BASE_URL": base,
     }
@@ -2586,7 +2589,7 @@ def test_write_site_bakes_the_sites_base_url_into_the_published_installer(tmp_pa
     """
     import subprocess
 
-    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub
+    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub, _write_timeout_stub
 
     site = tmp_path / "site"
     site.mkdir()
@@ -2627,6 +2630,7 @@ def test_write_site_bakes_the_sites_base_url_into_the_published_installer(tmp_pa
         "PFBLOCKERNG_ROOT": str(root),
         "PKG_BIN": str(fake_pkg),
         "FETCH_BIN": str(_write_fetch_stub(str(root))),
+        "TIMEOUT_BIN": str(_write_timeout_stub(str(root))),
         "PFB_TEST_ROOT": str(root),
     }
     result = subprocess.run(
@@ -2676,7 +2680,7 @@ def test_write_site_bakes_a_base_url_containing_shell_metacharacters_as_inert_da
     """
     import subprocess
 
-    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub
+    from tests.test_channel_install import _PKG_STUB, _seed_box, _write_fetch_stub, _write_timeout_stub
 
     site = tmp_path / "site"
     site.mkdir()
@@ -2715,6 +2719,7 @@ def test_write_site_bakes_a_base_url_containing_shell_metacharacters_as_inert_da
         "PFBLOCKERNG_ROOT": str(root),
         "PKG_BIN": str(fake_pkg),
         "FETCH_BIN": str(_write_fetch_stub(str(root))),
+        "TIMEOUT_BIN": str(_write_timeout_stub(str(root))),
         "PFB_TEST_ROOT": str(root),
     }
     result = subprocess.run(
