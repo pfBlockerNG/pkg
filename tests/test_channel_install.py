@@ -1878,10 +1878,11 @@ def test_missing_fetch_binary_fails_at_step_1_with_exit_1() -> None:
 def test_missing_timeout_binary_fails_at_step_1_with_exit_1() -> None:
     """A missing timeout(1) is an environment error, not an unreachable catalogue."""
     with tempfile.TemporaryDirectory() as root:
-        proc = _run_install(root, "stable", extra_env={"TIMEOUT_BIN": "/nonexistent/timeout"})
+        missing_timeout = str(Path(root) / "missing-timeout")
+        proc = _run_install(root, "stable", extra_env={"TIMEOUT_BIN": missing_timeout})
 
         assert proc.returncode == 1, proc.stdout + proc.stderr
-        assert "/nonexistent/timeout" in proc.stderr, proc.stderr
+        assert missing_timeout in proc.stderr, proc.stderr
         assert not _hook_path(root).exists(), "no hook file may be written"
         assert not _conf_path(root, "stable").exists(), "no conf file may be written"
         assert not _fetch_log(root).exists(), "no catalogue probe may run"
