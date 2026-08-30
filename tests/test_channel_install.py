@@ -249,6 +249,13 @@ printf 'pkg-log-bytes=%s %s\n' "${_pkg_log_bytes}" "${_url}" >> "${LOG}"
 exit 0
 """
 
+_TIMEOUT_STUB = r"""#!/bin/sh
+# fake timeout(1): record the complete bounded invocation, then run its child.
+printf '%s\n' "$*" >> "${PFB_TEST_ROOT}/timeout-invocations.log"
+shift 3
+exec "$@"
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -313,6 +320,11 @@ def _fetch_argv_log(root: str) -> Path:
     return Path(root) / "fetch-argv.log"
 
 
+def _timeout_log(root: str) -> Path:
+    """One line per timeout call: grace, wall-clock budget, child, and child argv."""
+    return Path(root) / "timeout-invocations.log"
+
+
 def _write_pkg_stub(root: str) -> str:
     """Install the fake pkg(8) binary under root/bin/pkg; return its path."""
     bin_dir = os.path.join(root, "bin")
@@ -339,6 +351,17 @@ def _write_fetch_stub(root: str) -> str:
     stub_path = os.path.join(bin_dir, "fetch")
     with open(stub_path, "w") as fh:
         fh.write(_FETCH_STUB)
+    os.chmod(stub_path, 0o755)
+    return stub_path
+
+
+def _write_timeout_stub(root: str) -> str:
+    """Install the fake timeout(1) binary under root/bin/timeout; return its path."""
+    bin_dir = os.path.join(root, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    stub_path = os.path.join(bin_dir, "timeout")
+    with open(stub_path, "w") as fh:
+        fh.write(_TIMEOUT_STUB)
     os.chmod(stub_path, 0o755)
     return stub_path
 
@@ -1904,6 +1927,9 @@ def test_probe_requests_the_exact_generated_catalog_url_before_any_pkg_call() ->
         assert _fetch_log(root).read_text().splitlines() == [
             f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf"
         ], "exactly one probe of the generated catalogue's meta.conf, before any pkg call"
+        assert stat.S_IMODE(_conf_path(root, "stable").stat().st_mode) == 0o644, (
+            "the activated repository conf must remain world-readable"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1950,13 +1976,22 @@ def test_probe_argv_carries_the_no_redirect_flag_and_failed_pkg_keeps_inherited_
     never removed); the stub's argv log pins the exact flags."""
     with tempfile.TemporaryDirectory() as root:
         conf = _seed_conf_file(root, _conf_name("stable"), "# inherited stable conf\n")
+        timeout_bin = _write_timeout_stub(root)
 
-        proc = _run_install(root, "stable", update_fails=True)
+        proc = _run_install(
+            root,
+            "stable",
+            update_fails=True,
+            extra_env={"TIMEOUT_BIN": timeout_bin},
+        )
 
         assert proc.returncode == 4, proc.stdout + proc.stderr
         assert _fetch_argv_log(root).read_text().splitlines() == [
             f"-q -A -o /dev/null -T 30 {_BASE_URL}/stable/ce-2.8/meta.conf"
         ], "the probe must carry exactly the no-redirect flag (-A) with its bounded flags"
+        assert _timeout_log(root).read_text().splitlines() == [
+            f"-k 5 30 {Path(root) / 'bin' / 'fetch'} -q -A -o /dev/null -T 30 {_BASE_URL}/stable/ce-2.8/meta.conf"
+        ], "timeout(1) must own a hard 30-second wall-clock budget around fetch"
         assert _fetch_log(root).read_text() == (
             f"pkg-log-bytes=0 {_BASE_URL}/stable/ce-2.8/meta.conf\n"
         ), "the probe still lands before any pkg call"

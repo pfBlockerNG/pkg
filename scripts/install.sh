@@ -26,6 +26,7 @@
 # Env (all overridable; forks/staging/tests set these):
 #   PKG_BIN           pkg(8) binary path (default: /usr/local/sbin/pkg)
 #   FETCH_BIN         fetch(1) binary for the catalogue probe (default: /usr/bin/fetch)
+#   TIMEOUT_BIN       timeout(1) binary for the probe wall-clock cap (default: timeout)
 #   PFBLOCKERNG_ROOT  filesystem root prefix (default: /)
 #   PFB_BASE_URL      catalog base (default: http://<PFB_REPO_HOST>)
 #   PFB_SSL_CA_CERT_PATH  CA hash dir exported to pkg (default: <root>/etc/ssl/certs)
@@ -46,6 +47,7 @@ HOOK_SRC="${SCRIPT_DIR}/pfblockerng_repo_generate.sh"
 
 PKG_BIN="${PKG_BIN:-/usr/local/sbin/pkg}"
 FETCH_BIN="${FETCH_BIN:-/usr/bin/fetch}"
+TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
 PFBLOCKERNG_ROOT="${PFBLOCKERNG_ROOT:-/}"
 ROOT="${PFBLOCKERNG_ROOT%/}"
 # The pkg repository domain, once. The scheme is chosen per use: the CATALOGUE is fetched
@@ -512,15 +514,14 @@ pfb_channel_install() {
     fi
     # 3b. Probe the catalogue BEFORE activating anything (issue #2926): the URL the
     #    candidate names must actually serve a catalogue, so <url>/meta.conf has to
-    #    answer. The probe is bounded — hard timeout, body discarded to /dev/null,
-    #    `-A` so a redirect can never establish resource existence (a redirect
-    #    landing page answering 200 for anything must not pass the probe) — and its
-    #    stdin is /dev/null like every other child (piped-script safety).
+    #    answer. timeout(1) owns the hard wall-clock cap; fetch's `-T` remains the
+    #    per-operation stall cap. The body is discarded, and `-A` prevents the
+    #    redirected-not-found behavior that option exists to reject.
     #    On failure NOTHING is activated: no pkg call is made, a fresh box keeps no
     #    conf, and an existing conf — never touched by this run — survives
     #    byte-identical.
     printf '==> Probing %s/meta.conf\n' "${_catalog_url%/}"
-    if ! "${FETCH_BIN}" -q -A -o /dev/null -T 30 "${_catalog_url%/}/meta.conf" </dev/null; then
+    if ! "${TIMEOUT_BIN}" -k 5 30 "${FETCH_BIN}" -q -A -o /dev/null -T 30 "${_catalog_url%/}/meta.conf" </dev/null; then
         die 4 "$(printf '%s/meta.conf is unreachable — not activating the %s repository conf. Inspect the catalogue: %s' \
             "${_catalog_url%/}" "${REPO_NAME}" "${_catalog_url%/}/meta.conf")"
     fi
