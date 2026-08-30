@@ -25,6 +25,7 @@
 #
 # Env (all overridable; forks/staging/tests set these):
 #   PKG_BIN           pkg(8) binary path (default: /usr/local/sbin/pkg)
+#   FETCH_BIN         fetch(1) binary for the catalogue probe (default: /usr/bin/fetch)
 #   PFBLOCKERNG_ROOT  filesystem root prefix (default: /)
 #   PFB_BASE_URL      catalog base (default: http://<PFB_REPO_HOST>)
 #   PFB_SSL_CA_CERT_PATH  CA hash dir exported to pkg (default: <root>/etc/ssl/certs)
@@ -44,6 +45,7 @@ SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd)"
 HOOK_SRC="${SCRIPT_DIR}/pfblockerng_repo_generate.sh"
 
 PKG_BIN="${PKG_BIN:-/usr/local/sbin/pkg}"
+FETCH_BIN="${FETCH_BIN:-/usr/bin/fetch}"
 PFBLOCKERNG_ROOT="${PFBLOCKERNG_ROOT:-/}"
 ROOT="${PFBLOCKERNG_ROOT%/}"
 # The pkg repository domain, once. The scheme is chosen per use: the CATALOGUE is fetched
@@ -315,10 +317,11 @@ re-run: a converged box performs no package changes.
 
 Exit codes:
   0  ok, including a reported no-op (already up to date)
-  1  environment: pkg binary or hook source not found
+  1  environment: pkg/fetch binary or hook source not found
   2  usage: unknown argument, unknown/missing --channel
-  4  target unavailable: the hook could not resolve the conf, pkg update failed, the
-     catalogue offers nothing, or pkg version -t gave no usable answer
+  4  target unavailable: the hook could not resolve the conf, the catalogue probe
+     (meta.conf) failed, pkg update failed, the catalogue offers nothing, or pkg
+     version -t gave no usable answer
   5  a pkg operation (delete/install) failed, including a package-script failure while pkg exited 0
   6  post-install verification failed
 USAGE
@@ -391,6 +394,8 @@ pfb_channel_install() {
     # 1. Environment.
     command -v "${PKG_BIN}" >/dev/null 2>&1 ||
         die 1 "'${PKG_BIN}' not found — run this ON a pfSense box, or set PKG_BIN"
+    command -v "${FETCH_BIN}" >/dev/null 2>&1 ||
+        die 1 "'${FETCH_BIN}' not found — set FETCH_BIN to a fetch(1) binary"
 
     # 2. Boot-time generator hook: install/refresh only if missing or different.
     #    Try the EMBEDDED hook first; HOOK_SRC (the checkout copy under scripts/) is
@@ -419,16 +424,28 @@ pfb_channel_install() {
     fi
     rm -f "${_hook_tmp}"
 
-    # 3. Conf: stage a stub ONLY if absent — an existing conf is never truncated, the
-    #    hook rewrites it in place (or leaves it untouched if detection fails), so no
-    #    backup/restore dance is needed here (the predecessor two-script flow used to
-    #    stage over a possibly-working conf before proving the new one).
+    # 3. Conf: the hook's output is staged into an INACTIVE candidate file — never
+    #    into CONF_PATH. Activating a repository conf before the catalogue it names
+    #    is proven reachable is the failure mode this staging exists to prevent
+    #    (issue #2926): a fresh box would be stranded with a dead subscription and a
+    #    working one overwritten. The candidate basename deliberately does not end
+    #    in .conf, so pkg(8)'s repos glob never sees a half-generated repository
+    #    definition; it becomes the real conf only in 3c, after the probe.
+    mkdir -p "${REPOS_DIR}"
     CONF_CREATED=0
-    if [ ! -f "${CONF_PATH}" ]; then
-        mkdir -p "${REPOS_DIR}"
-        printf '# pfBlockerNG %s repo conf — pending boot-time generation (ADR-39).\n' "${PFB_CHANNEL}" >"${CONF_PATH}"
-        CONF_CREATED=1
-    fi
+    _candidate="$(mktemp "${REPOS_DIR}/pfb-candidate.XXXXXX")" ||
+        die 1 "mktemp failed while staging the candidate conf"
+    # Every exit path — die(), a signal, normal completion — must leave no candidate
+    # behind. Same discipline as _pkg_mutate's capture files; _pkg_mutate re-arms
+    # these traps later, which is safe because the candidate is gone by then
+    # (_candidate="" after 3c). rm -f "" is a no-op, so the unset case is safe too.
+    _candidate_cleanup() {
+        rm -f "${_candidate:-}"
+    }
+    trap '_candidate_cleanup' EXIT
+    trap '_candidate_cleanup; exit 130' INT
+    trap '_candidate_cleanup; exit 143' TERM
+    trap '_candidate_cleanup; exit 129' HUP
 
     # Drive the hook for THIS channel's conf only. Its orphan guard skips an absent
     # path, so every peer conf is aimed at a path that cannot exist: a run against
@@ -441,26 +458,51 @@ pfb_channel_install() {
         PFB_TESTING_CONF="${_no_conf}" \
         PFB_EDGE_CONF="${_no_conf}" \
         PFB_NIGHTLY_CONF="${_no_conf}" \
-        "${_own_conf_var}=${CONF_PATH}" \
+        "${_own_conf_var}=${_candidate}" \
         PFB_BASE_URL="${PFB_BASE_URL}" \
         PFB_FINGERPRINT_DIR="${FINGERPRINT_DIR}" \
         PFB_PRODUCT_LABEL="${ROOT}/etc/product_label" \
         PFB_VERSION_FILE="${ROOT}/etc/version" \
         sh "${ON_BOX_HOOK}" onestart </dev/null || true
 
-    if ! grep -q "${CONF_MARKER}" "${CONF_PATH}" 2>/dev/null; then
-        [ "${CONF_CREATED}" -eq 1 ] && rm -f "${CONF_PATH}"
-        die 4 "the generator hook did not resolve ${CONF_PATH} (no marker line) — variant detection may have failed; inspect: sh ${ON_BOX_HOOK} onestart"
+    if ! grep -q "${CONF_MARKER}" "${_candidate}" 2>/dev/null; then
+        die 4 "the generator hook did not resolve a ${PFB_CHANNEL} conf (no marker line in the candidate) — variant detection may have failed; inspect: sh ${ON_BOX_HOOK} onestart"
     fi
-    # The marker alone is not enough: the hook leaves an EXISTING conf UNCHANGED
-    # when detection fails, so a pre-existing conf carrying the marker but
-    # resolving to ANOTHER base/channel (a stale conf from a fork, a staged
-    # prefix, or a restored config backup) must be rejected too.
+    # The marker alone is not enough: the hook leaves an EXISTING target UNCHANGED
+    # when detection fails, so a candidate carrying the marker but resolving to
+    # ANOTHER base/channel (a stale conf from a fork, a staged prefix, or a restored
+    # config backup) must be rejected too.
     _expect_url_prefix="url: \"${PFB_BASE_URL%/}/${PFB_CHANNEL}/"
-    if ! grep -qF "${_expect_url_prefix}" "${CONF_PATH}" 2>/dev/null; then
-        [ "${CONF_CREATED}" -eq 1 ] && rm -f "${CONF_PATH}"
-        die 4 "${CONF_PATH} does not resolve to ${PFB_BASE_URL%/}/${PFB_CHANNEL}/ — a stale or foreign conf; inspect: sh ${ON_BOX_HOOK} onestart"
+    if ! grep -qF "${_expect_url_prefix}" "${_candidate}" 2>/dev/null; then
+        die 4 "the candidate conf does not resolve to ${PFB_BASE_URL%/}/${PFB_CHANNEL}/ — a stale or foreign conf; inspect: sh ${ON_BOX_HOOK} onestart"
     fi
+    # One canonical URL out of the candidate — the url: line the prefix check just
+    # matched.
+    _catalog_url="$(sed -n 's/^[[:space:]]*url:[[:space:]]*"\([^"]*\)".*/\1/p' "${_candidate}" | head -n 1)"
+    [ -n "${_catalog_url}" ] ||
+        die 4 "the candidate conf carries no url: line — cannot probe the catalogue"
+    # 3b. Probe the catalogue BEFORE activating anything (issue #2926): the URL the
+    #    candidate names must actually serve a catalogue, so <url>/meta.conf has to
+    #    answer. The probe is bounded — hard timeout, body discarded to /dev/null —
+    #    and its stdin is /dev/null like every other child (piped-script safety).
+    #    On failure NOTHING is activated: no pkg call is made, a fresh box keeps no
+    #    conf, and an existing conf — never touched by this run — survives
+    #    byte-identical.
+    printf '==> Probing %s/meta.conf\n' "${_catalog_url%/}"
+    if ! "${FETCH_BIN}" -q -o /dev/null -T 30 "${_catalog_url%/}/meta.conf" </dev/null; then
+        die 4 "$(printf '%s/meta.conf is unreachable — not activating the %s repository conf. Inspect the catalogue: %s' \
+            "${_catalog_url%/}" "${REPO_NAME}" "${_catalog_url%/}/meta.conf")"
+    fi
+
+    # 3c. Activation, only after the probe proved the catalogue. A pre-existing conf
+    #    is replaced by the freshly generated bytes (exactly what the hook's old
+    #    in-place rewrite did, now an atomic rename within REPOS_DIR). CONF_CREATED
+    #    keeps its meaning for the failure paths below: a conf this run created is
+    #    removed if a later step fails; an inherited one never is.
+    [ -f "${CONF_PATH}" ] || CONF_CREATED=1
+    mv "${_candidate}" "${CONF_PATH}" ||
+        die 1 "could not activate ${CONF_PATH} from the validated candidate"
+    _candidate=""
     printf '==> Conf resolved:\n'
     sed -n 's/^[[:space:]]*url:[[:space:]]*/    url: /p' "${CONF_PATH}"
 
