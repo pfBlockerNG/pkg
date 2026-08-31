@@ -99,7 +99,7 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {(row["variant"], row["pfsense_version"]) for row in rows},
-            {("CE", "2.8"), ("CE", "2.9"), ("Plus", "26.03"), ("Plus", "26.07")},
+            {("CE", "2.8"), ("CE", "2.9"), ("Plus", "26.03"), ("Plus", "26.07"), ("Plus", "25.11")},
         )
 
     def test_nightly_pull_and_cleanup_use_only_the_validated_digest_reference(
