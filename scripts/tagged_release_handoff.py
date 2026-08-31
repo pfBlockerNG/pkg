@@ -160,7 +160,7 @@ def _dependency_packages(
     *,
     ports_sha: str,
     source_date_epoch: int,
-    dependency_builder: Mapping[str, str],
+    dependency_builder: Mapping[str, str] | None,
 ) -> dict[str, dict[str, dict[str, object]]]:
     if not isinstance(value, Mapping):
         raise HandoffError("dependency_packages must be an object")
@@ -271,10 +271,17 @@ def _validate_handoff_fields(
     rows = _route_matrix(route_matrix)
     if type(source_date_epoch) is not int or source_date_epoch < 0:
         raise HandoffError("source_date_epoch must be a non-negative integer")
-    try:
-        normalized_builder = validate_dependency_builder(dependency_builder)
-    except PkgError as exc:
-        raise HandoffError(str(exc)) from exc
+    if dependency_builder is None:
+        if any(row["extra_pkgs"] for row in rows):
+            raise HandoffError(
+                "dependency_builder is required when route_matrix contains extra packages"
+            )
+        normalized_builder = None
+    else:
+        try:
+            normalized_builder = validate_dependency_builder(dependency_builder)
+        except PkgError as exc:
+            raise HandoffError(str(exc)) from exc
     normalized_packages = _dependency_packages(
         dependency_packages,
         rows,
@@ -366,7 +373,6 @@ def validate_build_records(
         "source_sha": handoff.get("source_sha"),
         "freebsd_ports_sha": handoff.get("ports_sha"),
         "source_date_epoch": handoff.get("source_date_epoch"),
-        "dependency_builder": handoff.get("dependency_builder"),
     }
     for index, record in enumerate(records):
         if not isinstance(record, Mapping):
@@ -374,6 +380,13 @@ def validate_build_records(
         for name, value in expected.items():
             if record.get(name) != value:
                 raise BuildRecordIdentityError(index, name)
+        dependency_builder = record.get("dependency_builder")
+        if dependency_builder is None:
+            row = record.get("matrix_row")
+            if not isinstance(row, Mapping) or row.get("extra_pkgs") != []:
+                raise BuildRecordIdentityError(index, "dependency_builder")
+        elif dependency_builder != handoff.get("dependency_builder"):
+            raise BuildRecordIdentityError(index, "dependency_builder")
 
 
 def _dependency_requirements(
