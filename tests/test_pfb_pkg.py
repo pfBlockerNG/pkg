@@ -23,6 +23,16 @@ from pathlib import Path
 import pfb_pkg
 import pytest
 
+DEPENDENCY_BUILDER = {
+    "python": "3.11.15",
+    "pip": "26.2.1",
+    "setuptools": "75.6.0",
+    "wheel": "0.45.1",
+    "zstandard": "0.25.0",
+    "uv": "0.12.6",
+    "uv_lock_sha256": "d" * 64,
+}
+
 
 def _record(**overrides: object) -> dict:
     row = {
@@ -48,9 +58,10 @@ def _record(**overrides: object) -> dict:
         "native_recipe_identity": "pfSense-pkg-pfBlockerNG",
         "emitted_identity": "pfSense-pkg-pfBlockerNG",
         "matrix_row": row,
-        "freebsd_ports_sha": "b" * 64,
+        "freebsd_ports_sha": "b" * 40,
         "route": "stable/ce-2.8",
         "source_date_epoch": 0,
+        "dependency_builder": DEPENDENCY_BUILDER,
         "build_input_digest": "",
     }
     record.update(overrides)
@@ -66,6 +77,48 @@ def test_build_record_valid_and_digest_is_canonical() -> None:
     assert pfb_pkg.validate_build_record(record) == record
     changed = dict(record, source_sha="c" * 40)
     assert pfb_pkg.build_input_digest(changed) != record["build_input_digest"]
+
+
+def test_build_record_allows_missing_dependency_builder_without_extra_packages() -> None:
+    record = _record()
+    record["matrix_row"] = {**record["matrix_row"], "extra_pkgs": []}
+    record.pop("dependency_builder")
+    record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+
+    assert pfb_pkg.validate_build_record(record) == record
+
+
+def test_build_record_allows_valid_dependency_builder_without_extra_packages() -> None:
+    record = _record()
+    record["matrix_row"] = {**record["matrix_row"], "extra_pkgs": []}
+    record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+
+    assert pfb_pkg.validate_build_record(record) == record
+
+
+def test_build_record_rejects_malformed_dependency_builder_without_extra_packages() -> None:
+    record = _record(dependency_builder={**DEPENDENCY_BUILDER, "wheel": "not-a-version"})
+    record["matrix_row"] = {**record["matrix_row"], "extra_pkgs": []}
+    record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+
+    with pytest.raises(pfb_pkg.PkgError, match="dependency_builder"):
+        pfb_pkg.validate_build_record(record)
+
+
+def test_build_record_allows_legacy_missing_builder_with_extra_packages() -> None:
+    record = _record(freebsd_ports_sha="b" * 64)
+    record.pop("dependency_builder")
+    record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+
+    assert pfb_pkg.validate_build_record(record) == record
+
+
+def test_build_record_rejects_malformed_dependency_builder() -> None:
+    record = _record(dependency_builder={**DEPENDENCY_BUILDER, "wheel": "not-a-version"})
+    with pytest.raises(pfb_pkg.PkgError, match="dependency_builder"):
+        pfb_pkg.validate_build_record(record)
+    with pytest.raises(pfb_pkg.PkgError, match="dependency_builder"):
+        pfb_pkg.load_build_record(json.dumps(record))
 
 
 @pytest.mark.parametrize(
@@ -176,6 +229,12 @@ def test_build_record_rejects_malformed_or_tampered(mutator: Callable[..., objec
     record = _record()
     mutator(record)
     with pytest.raises(pfb_pkg.PkgError):
+        pfb_pkg.validate_build_record(record)
+
+def test_build_record_rejects_unknown_field_with_valid_digest() -> None:
+    record = _record(unknown=True)
+
+    with pytest.raises(pfb_pkg.PkgError, match="exact fields"):
         pfb_pkg.validate_build_record(record)
 
 

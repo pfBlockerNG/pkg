@@ -1802,6 +1802,112 @@ class IntakeAndHandoffTests(_TempDirTestCase):
             )
         self.assertIn("route_matrix must be a non-empty JSON array", str(ctx.exception))
 
+    def _null_builder_handoff(self, rows: Sequence[dict[str, object]]) -> Path:
+        handoff = _write_handoff(
+            self.tmp / "pfblockerng-release-handoff.json", rows=rows, tag="v4.0.0.b1"
+        )
+        payload = json.loads(handoff.read_text(encoding="utf-8"))
+        payload["dependency_builder"] = None
+        handoff.write_text(json.dumps(payload), encoding="utf-8")
+        return handoff
+
+    def test_handoff_null_builder_without_extra_packages_accepted(self) -> None:
+        validated = trh.load_handoff(
+            self._null_builder_handoff((ROW_CE_NO_EXTRA,)),
+            expected_release_tag="v4.0.0.b1",
+            expected_source_sha="a" * 40,
+        )
+        self.assertIsNone(validated["dependency_builder"])
+
+    def test_handoff_null_builder_with_extra_packages_rejected(self) -> None:
+        with self.assertRaises(trh.HandoffError) as ctx:
+            trh.load_handoff(
+                self._null_builder_handoff((ROW_CE,)),
+                expected_release_tag="v4.0.0.b1",
+                expected_source_sha="a" * 40,
+            )
+        self.assertIn(
+            "dependency_builder is required when route_matrix contains extra packages",
+            str(ctx.exception),
+        )
+
+    def test_handoff_null_builder_with_mixed_extra_packages_rejected(self) -> None:
+        with self.assertRaises(trh.HandoffError) as ctx:
+            trh.load_handoff(
+                self._null_builder_handoff((ROW_CE_NO_EXTRA, ROW_PLUS_03_TWIN)),
+                expected_release_tag="v4.0.0.b1",
+                expected_source_sha="a" * 40,
+            )
+        self.assertIn(
+            "dependency_builder is required when route_matrix contains extra packages",
+            str(ctx.exception),
+        )
+
+    def test_handoff_malformed_builder_without_extra_packages_rejected(self) -> None:
+        handoff = _write_handoff(
+            self.tmp / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE_NO_EXTRA,),
+            tag="v4.0.0.b1",
+        )
+        payload = json.loads(handoff.read_text(encoding="utf-8"))
+        payload["dependency_builder"] = {**_DEPENDENCY_BUILDER, "wheel": "not-a-version"}
+        handoff.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(trh.HandoffError) as ctx:
+            trh.load_handoff(
+                handoff, expected_release_tag="v4.0.0.b1", expected_source_sha="a" * 40
+            )
+        self.assertIn("dependency_builder", str(ctx.exception))
+
+    def test_handoff_valid_builder_without_extra_packages_accepted(self) -> None:
+        validated = trh.load_handoff(
+            _write_handoff(
+                self.tmp / "pfblockerng-release-handoff.json",
+                rows=(ROW_CE_NO_EXTRA,),
+                tag="v4.0.0.b1",
+            ),
+            expected_release_tag="v4.0.0.b1",
+            expected_source_sha="a" * 40,
+        )
+        self.assertEqual(validated["dependency_builder"], _DEPENDENCY_BUILDER)
+
+    def _builderless_record(self, row: dict[str, object]) -> dict[str, object]:
+        record = _record(row=row)
+        record.pop("dependency_builder")
+        record["build_input_digest"] = pfb_pkg.build_input_digest(record)
+        return record
+
+    def test_null_builder_handoff_binds_builderless_empty_extras_records(self) -> None:
+        handoff = trh.load_handoff(
+            self._null_builder_handoff((ROW_CE_NO_EXTRA,)),
+            expected_release_tag="v4.0.0.b1",
+            expected_source_sha="a" * 40,
+        )
+        trh.validate_build_records(
+            handoff, [self._builderless_record(ROW_CE_NO_EXTRA)]
+        )
+
+    def test_null_builder_handoff_rejects_builderless_nonempty_extras_record(self) -> None:
+        handoff = trh.load_handoff(
+            self._null_builder_handoff((ROW_CE_NO_EXTRA,)),
+            expected_release_tag="v4.0.0.b1",
+            expected_source_sha="a" * 40,
+        )
+        with self.assertRaises(trh.BuildRecordIdentityError) as ctx:
+            trh.validate_build_records(
+                handoff, [self._builderless_record(ROW_CE)]
+            )
+        self.assertEqual(ctx.exception.field, "dependency_builder")
+
+    def test_null_builder_handoff_rejects_builder_record_mismatch(self) -> None:
+        handoff = trh.load_handoff(
+            self._null_builder_handoff((ROW_CE_NO_EXTRA,)),
+            expected_release_tag="v4.0.0.b1",
+            expected_source_sha="a" * 40,
+        )
+        with self.assertRaises(trh.BuildRecordIdentityError) as ctx:
+            trh.validate_build_records(handoff, [_record(row=ROW_CE_NO_EXTRA)])
+        self.assertEqual(ctx.exception.field, "dependency_builder")
+
     def test_published_release_without_handoff_uses_pkg_compatibility_matrix(
         self,
     ) -> None:
