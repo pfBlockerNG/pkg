@@ -214,6 +214,14 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             self.assertNotIn("github-actions[bot]@users.noreply.github.com", text)
 
 
+    def test_publication_tests_disable_uv_cache_without_a_lockfile(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        setup = text[text.index("astral-sh/setup-uv@") :]
+        self.assertIn("enable-cache: false", setup)
+
+
 def _tagged_intake_script() -> str:
     text = INGEST.read_text(encoding="utf-8")
     block = text.split("      - name: Download exact immutable Release input", 1)[1]
