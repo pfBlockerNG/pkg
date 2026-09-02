@@ -16,10 +16,16 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 INGEST = WORKFLOWS / "ingest.yml"
 RENDER = WORKFLOWS / "render-site.yml"
 SIGNING_STEP = "Configure pfblockerng-bot signing"
-WRITER_SCRIPTS = ("scripts/publish-pkg-repo.sh", "scripts/render-pkg-site.sh")
-# Every git verb that writes an object history can carry: a step reaching any of
-# them is a writer, whichever line its arguments continue onto.
+# A step is a writer when it runs any repo shell script (the two writers today,
+# and whatever joins them) or reaches a git verb that writes history itself,
+# whichever line its arguments continue onto.
+_RUNS_REPO_SCRIPT = re.compile(r"\bscripts/[\w.-]+\.sh\b")
 _GIT_WRITE = re.compile(r"\bgit\b[^\n]*\b(?:commit|tag|merge|cherry-pick|revert|am)\b")
+
+
+def _workflows() -> list[Path]:
+    # GitHub honours both spellings, so a writer saved as .yaml is still a writer.
+    return sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
 
 
 def _steps(workflow: Path, job: str) -> list[dict[str, object]]:
@@ -30,12 +36,12 @@ def _steps(workflow: Path, job: str) -> list[dict[str, object]]:
 def _writer_steps() -> list[tuple[Path, str, int, str]]:
     """Every (workflow, job, step index, step name) that can write a commit."""
     found: list[tuple[Path, str, int, str]] = []
-    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+    for workflow in _workflows():
         spec = yaml.safe_load(workflow.read_text(encoding="utf-8"))
         for job in (spec.get("jobs") or {}):
             for index, step in enumerate(_steps(workflow, job)):
                 run = str(step.get("run") or "").replace("\\\n", " ")
-                writes = any(script in run for script in WRITER_SCRIPTS) or _GIT_WRITE.search(run)
+                writes = _RUNS_REPO_SCRIPT.search(run) or _GIT_WRITE.search(run)
                 if writes:
                     found.append((workflow, job, index, str(step.get("name") or f"step {index}")))
     return found
@@ -203,8 +209,8 @@ class IngestionWorkflowContractTests(unittest.TestCase):
     def test_every_writer_job_configures_signing_before_it_writes(self) -> None:
         """Discovered, not listed: a future writer job inherits the requirement.
 
-        A writer is any step that runs one of the commit-writing scripts or calls
-        git commit itself. Its job must configure the bot signing key in an
+        A writer is any step that runs a repo shell script or calls a git verb
+        that writes history. Its job must configure the bot signing key in an
         earlier step, because $GITHUB_ENV and $RUNNER_TEMP do not cross jobs.
         """
         writers = _writer_steps()
@@ -223,7 +229,9 @@ class IngestionWorkflowContractTests(unittest.TestCase):
             )
 
     def test_the_signing_step_provisions_the_key_it_promises(self) -> None:
-        for workflow, job, index, name in _writer_steps():
+        writers = _writer_steps()
+        self.assertTrue(writers, "no writer step discovered; the finder is broken")
+        for workflow, job, index, name in writers:
             earlier = [s for s in _steps(workflow, job)[:index] if s.get("name") == SIGNING_STEP]
             self.assertTrue(
                 earlier,
@@ -249,8 +257,8 @@ class IngestionWorkflowContractTests(unittest.TestCase):
 
     def test_nothing_commits_as_the_generic_actions_identity(self) -> None:
         # The identity lives in the scripts, which is where the retired one lived
-        # too, so the ban covers them and not just the workflows that call them.
-        for path in sorted(WORKFLOWS.glob("*.yml")) + [ROOT / script for script in WRITER_SCRIPTS]:
+        # too, so the ban covers every script and every workflow, not a listed few.
+        for path in _workflows() + sorted((ROOT / "scripts").glob("*.sh")):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("github-actions[bot]", text, f"generic Actions identity in {path.name}")
 
