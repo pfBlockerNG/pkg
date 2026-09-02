@@ -17,19 +17,19 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: false
-
       - name: Run publisher and renderer tests
-        run: uv run --with pytest==9.1.1 --with zstandard==0.25.0 pytest -q tests
+        run: uv run --with pytest==9.1.1 --with zstandard==0.25.0 --with pyyaml==6.0.3 pytest -q tests
 
   shell:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Require dash and jq
+      - name: Require dash, jq and ssh-keygen
         run: |
           DASH=$(command -v dash)
           JQ=$(command -v jq)
-          [ -x "$DASH" ] && [ -x "$JQ" ]
+          KEYGEN=$(command -v ssh-keygen)
+          [ -x "$DASH" ] && [ -x "$JQ" ] && [ -x "$KEYGEN" ]
       - name: Install pinned ShellSpec
         env:
           SHELLSPEC_VERSION: 0.28.1

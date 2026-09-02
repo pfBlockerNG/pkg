@@ -19,6 +19,7 @@ Describe 'publish-pkg-repo.sh'
 
   setup() {
     scrub_git_env
+    scrub_writer_env
     base="$(mktemp -d "${SHELLSPEC_TMPBASE:-/tmp}/pubpkgrepo.XXXXXX")"
 
     # --- bare origin + a working PKG_REPO clone with one committed catalogue ---
@@ -517,6 +518,37 @@ JSON
     The variable committer should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
   End
 
+  It 'SSH-signs the catalogue commit when a workflow provisioned the signing key'
+    ssh-keygen -q -t ed25519 -N '' -C pfblockerng-bot -f "${base}/bot-key"
+    export PFB_BOT_SIGNING_KEY_FILE="${base}/bot-key"
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    # The commit object itself carries the signature, so a dropped gpg.format,
+    # signingkey or commit.gpgsign reddens this even though the fixture repo
+    # config says commit.gpgsign false.
+    landed="$(git_fixture -C "${base}/pkg-repo" cat-file commit HEAD)"
+    The variable landed should include 'gpgsig -----BEGIN SSH SIGNATURE-----'
+    author="$(git_fixture -C "${base}/pkg-repo" log -1 --format='%an <%ae>')"
+    The variable author should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
+  End
+
+  It 'refuses to commit at all when Actions provisioned no signing key'
+    export GITHUB_ACTIONS=true
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    When run script "$script"
+    The status should not equal 0
+    The output should not include 'ADVANCE'
+    The stderr should include 'refusing an unsigned catalogue commit'
+    local_head="$(git_fixture -C "${base}/pkg-repo" rev-parse main)"
+    The variable local_head should equal "$original_head"
+    remote_head="$(git_fixture -C "${base}/remote.git" rev-parse refs/heads/main)"
+    The variable remote_head should equal "$original_remote_head"
+  End
 
   It 'the commit message carries the release tag and source_run_id as trailers'
     export FAKE_MODE=success

@@ -679,23 +679,23 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
 
     assert_catalogue_only_staged
 
-    # Fixed pfblockerng-bot identity via per-invocation -c flags. When
-    # PFB_BOT_SIGNING_KEY_FILE is set (ingest/render workflows), also SSH-sign.
-
-    if [ -n "${PFB_BOT_SIGNING_KEY_FILE:-}" ]; then
-        git -C "$PKG_REPO" \
-            -c user.name="pfblockerng-bot" \
-            -c user.email="293667935+pfblockerng-bot@users.noreply.github.com" \
-            -c gpg.format=ssh \
-            -c user.signingkey="$PFB_BOT_SIGNING_KEY_FILE" \
-            -c commit.gpgsign=true \
-            commit --quiet -m "$commit_message"
-    else
-        git -C "$PKG_REPO" \
-            -c user.name="pfblockerng-bot" \
-            -c user.email="293667935+pfblockerng-bot@users.noreply.github.com" \
-            commit --quiet -m "$commit_message"
+    # The identity comes from per-invocation -c flags, not repo config: a bare CI
+    # checkout carries no git identity and this script must not depend on one.
+    # A workflow provisions the signing key file; an empty commit.gpgsign is git's
+    # false, so the local path needs no second invocation. Refuse to write an
+    # unsigned catalogue commit from Actions, whatever provisioned the checkout.
+    if [ -z "${PFB_BOT_SIGNING_KEY_FILE:-}" ] && [ -n "${GITHUB_ACTIONS:-}" ]; then
+        echo "::error::PFB_BOT_SIGNING_KEY_FILE is not set — refusing an unsigned catalogue commit" >&2
+        exit 1
     fi
+
+    git -C "$PKG_REPO" \
+        -c user.name="pfblockerng-bot" \
+        -c user.email="293667935+pfblockerng-bot@users.noreply.github.com" \
+        -c gpg.format=ssh \
+        -c user.signingkey="${PFB_BOT_SIGNING_KEY_FILE:-}" \
+        -c commit.gpgsign="${PFB_BOT_SIGNING_KEY_FILE:+true}" \
+        commit --quiet -m "$commit_message"
 
     if push_out=$(git -C "$PKG_REPO" push origin HEAD:main 2>&1); then
         printf '%s\n' "$push_out" >&2

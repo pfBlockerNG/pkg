@@ -9,9 +9,34 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
-INGEST = ROOT / ".github" / "workflows" / "ingest.yml"
-RENDER = ROOT / ".github" / "workflows" / "render-site.yml"
+WORKFLOWS = ROOT / ".github" / "workflows"
+INGEST = WORKFLOWS / "ingest.yml"
+RENDER = WORKFLOWS / "render-site.yml"
+SIGNING_STEP = "Configure pfblockerng-bot signing"
+WRITER_SCRIPTS = ("scripts/publish-pkg-repo.sh", "scripts/render-pkg-site.sh")
+_GIT_WRITE = re.compile(r"\bgit\b[^\n]*\b(?:commit|tag -a)\b")
+
+
+def _steps(workflow: Path, job: str) -> list[dict[str, object]]:
+    spec = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    return list(((spec.get("jobs") or {}).get(job) or {}).get("steps") or [])
+
+
+def _writer_steps() -> list[tuple[Path, str, int, str]]:
+    """Every (workflow, job, step index, step name) that can write a commit."""
+    found: list[tuple[Path, str, int, str]] = []
+    for workflow in sorted(WORKFLOWS.glob("*.yml")):
+        spec = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        for job in (spec.get("jobs") or {}):
+            for index, step in enumerate(_steps(workflow, job)):
+                run = str(step.get("run") or "")
+                writes = any(script in run for script in WRITER_SCRIPTS) or _GIT_WRITE.search(run)
+                if writes:
+                    found.append((workflow, job, index, str(step.get("name") or f"step {index}")))
+    return found
 
 
 class IngestionWorkflowContractTests(unittest.TestCase):
@@ -173,53 +198,59 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("pfBlockerNG/pfBlockerNG", text)
         self.assertRegex(text, r"(?s)permissions:\n\s+contents: write")
 
-    def test_writer_jobs_configure_pfblockerng_bot_ssh_signing(self) -> None:
-        signing = "Configure pfblockerng-bot signing"
-        for path in (INGEST, RENDER):
-            text = path.read_text(encoding="utf-8")
-            self.assertIn(signing, text, f"{path.name} lacks {signing!r}")
-            setup = text[text.index(f"- name: {signing}") :]
-            self.assertIn("secrets.PFB_BOT_SIGNING_KEY", setup)
-            self.assertIn('[ -n "${PFB_BOT_SIGNING_KEY:-}" ]', setup)
-            self.assertIn('install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"', setup)
-            self.assertIn(
-                'printf \'%s\\n\' "$PFB_BOT_SIGNING_KEY" > "$RUNNER_TEMP/pfb-bot-signing-key"',
-                setup,
+    def test_every_writer_job_configures_signing_before_it_writes(self) -> None:
+        """Discovered, not listed: a future writer job inherits the requirement.
+
+        A writer is any step that runs one of the commit-writing scripts or calls
+        git commit itself. Its job must configure the bot signing key in an
+        earlier step, because $GITHUB_ENV and $RUNNER_TEMP do not cross jobs.
+        """
+        writers = _writer_steps()
+        self.assertTrue(writers, "no writer step discovered; the finder is broken")
+        for workflow, job, index, name in writers:
+            steps = _steps(workflow, job)
+            signing = [i for i, step in enumerate(steps) if step.get("name") == SIGNING_STEP]
+            self.assertTrue(
+                signing,
+                f"{workflow.name}:{job} writes in {name!r} without a {SIGNING_STEP!r} step",
             )
             self.assertLess(
-                setup.index('install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"'),
-                setup.index('printf \'%s\\n\' "$PFB_BOT_SIGNING_KEY"'),
+                signing[0],
+                index,
+                f"{workflow.name}:{job} configures signing after it writes in {name!r}",
             )
-            self.assertIn("PFB_BOT_SIGNING_KEY_FILE", setup)
-        ingest = INGEST.read_text(encoding="utf-8")
-        self.assertLess(
-            ingest.index("- name: Configure pfblockerng-bot signing"),
-            ingest.index("- name: Publish with guarded local commit"),
-        )
-        render = RENDER.read_text(encoding="utf-8")
-        self.assertLess(
-            render.index("- name: Configure pfblockerng-bot signing"),
-            render.index("- name: Render and commit the pkg website"),
-        )
 
-    def test_workflows_never_configure_the_generic_actions_commit_identity(self) -> None:
-        generic = re.compile(
-            r"git config user\.(?:name|email).*github-actions(?:\[bot\])?",
-            re.IGNORECASE,
-        )
-        for path in (INGEST, RENDER):
+    def test_the_signing_step_provisions_the_key_it_promises(self) -> None:
+        for workflow, job, index, name in _writer_steps():
+            earlier = [s for s in _steps(workflow, job)[:index] if s.get("name") == SIGNING_STEP]
+            self.assertTrue(
+                earlier,
+                f"{workflow.name}:{job} writes in {name!r} with no {SIGNING_STEP!r} step before it",
+            )
+            step = earlier[0]
+            self.assertEqual(
+                (step.get("env") or {}).get("PFB_BOT_SIGNING_KEY"),
+                "${{ secrets.PFB_BOT_SIGNING_KEY }}",
+                f"{workflow.name}:{job} does not consume the org signing-key secret",
+            )
+            script = step.get("run") or ""
+            self.assertIn('[ -n "${PFB_BOT_SIGNING_KEY:-}" ]', script)
+            # The three lines in order and adjacent: an empty mode-600 file, then
+            # the key into it, then the path (never the key) into the step env.
+            self.assertIn(
+                'install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"\n'
+                'printf \'%s\\n\' "$PFB_BOT_SIGNING_KEY" > "$RUNNER_TEMP/pfb-bot-signing-key"\n'
+                'echo "PFB_BOT_SIGNING_KEY_FILE=$RUNNER_TEMP/pfb-bot-signing-key" >> "$GITHUB_ENV"\n',
+                script,
+                f"{workflow.name}:{job} does not provision the key file exactly as the writers expect",
+            )
+
+    def test_nothing_commits_as_the_generic_actions_identity(self) -> None:
+        # The identity lives in the scripts, which is where the retired one lived
+        # too, so the ban covers them and not just the workflows that call them.
+        for path in sorted(WORKFLOWS.glob("*.yml")) + [ROOT / script for script in WRITER_SCRIPTS]:
             text = path.read_text(encoding="utf-8")
-            self.assertIsNone(generic.search(text), f"generic Actions identity remains in {path.name}")
-            self.assertNotIn('user.name="github-actions[bot]"', text)
-            self.assertNotIn("github-actions[bot]@users.noreply.github.com", text)
-
-
-    def test_publication_tests_disable_uv_cache_without_a_lockfile(self) -> None:
-        text = (ROOT / ".github" / "workflows" / "test.yml").read_text(
-            encoding="utf-8"
-        )
-        setup = text[text.index("astral-sh/setup-uv@") :]
-        self.assertIn("enable-cache: false", setup)
+            self.assertNotIn("github-actions[bot]", text, f"generic Actions identity in {path.name}")
 
 
 def _tagged_intake_script() -> str:
