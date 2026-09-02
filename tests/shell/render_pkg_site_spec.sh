@@ -345,19 +345,6 @@ PY
     The variable committer should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
   End
 
-  It 'r9b: refuses to commit unsigned when GITHUB_ACTIONS is set without a signing key'
-    git_fixture -C "${base}/pkg-repo" config --unset user.email
-    git_fixture -C "${base}/pkg-repo" config --unset user.name
-    export GIT_CONFIG_GLOBAL=/dev/null
-    export GIT_CONFIG_SYSTEM=/dev/null
-    unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-    unset PFB_BOT_SIGNING_KEY_FILE
-    export GITHUB_ACTIONS=true
-    When run script "$script"
-    The status should equal 1
-    The output should include 'sync attempt'
-    The stderr should include 'PFB_BOT_SIGNING_KEY_FILE'
-  End
 
   # --- r10: a hard push failure is not remote contention ----------------------
 

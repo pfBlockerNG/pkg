@@ -679,12 +679,9 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
 
     assert_catalogue_only_staged
 
-    # Fixed pfblockerng-bot identity via per-invocation -c flags. GitHub Actions
-    # must also pass PFB_BOT_SIGNING_KEY_FILE (SSH key) so the commit is signed.
-    if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${PFB_BOT_SIGNING_KEY_FILE:-}" ]; then
-        echo "::error::PFB_BOT_SIGNING_KEY_FILE is required in GitHub Actions" >&2
-        exit 1
-    fi
+    # Fixed pfblockerng-bot identity via per-invocation -c flags. When
+    # PFB_BOT_SIGNING_KEY_FILE is set (ingest/render workflows), also SSH-sign.
+
     if [ -n "${PFB_BOT_SIGNING_KEY_FILE:-}" ]; then
         git -C "$PKG_REPO" \
             -c user.name="pfblockerng-bot" \
