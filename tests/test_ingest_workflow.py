@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import textwrap
 import unittest
@@ -171,6 +172,46 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         self.assertEqual(text.count("uses: actions/checkout@"), 1)
         self.assertNotIn("pfBlockerNG/pfBlockerNG", text)
         self.assertRegex(text, r"(?s)permissions:\n\s+contents: write")
+
+    def test_writer_jobs_configure_pfblockerng_bot_ssh_signing(self) -> None:
+        signing = "Configure pfblockerng-bot signing"
+        for path in (INGEST, RENDER):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(signing, text, f"{path.name} lacks {signing!r}")
+            setup = text[text.index(f"- name: {signing}") :]
+            self.assertIn("secrets.PFB_BOT_SIGNING_KEY", setup)
+            self.assertIn('[ -n "${PFB_BOT_SIGNING_KEY:-}" ]', setup)
+            self.assertIn('install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"', setup)
+            self.assertIn(
+                'printf \'%s\\n\' "$PFB_BOT_SIGNING_KEY" > "$RUNNER_TEMP/pfb-bot-signing-key"',
+                setup,
+            )
+            self.assertLess(
+                setup.index('install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"'),
+                setup.index('printf \'%s\\n\' "$PFB_BOT_SIGNING_KEY"'),
+            )
+            self.assertIn("PFB_BOT_SIGNING_KEY_FILE", setup)
+        ingest = INGEST.read_text(encoding="utf-8")
+        self.assertLess(
+            ingest.index("- name: Configure pfblockerng-bot signing"),
+            ingest.index("- name: Publish with guarded local commit"),
+        )
+        render = RENDER.read_text(encoding="utf-8")
+        self.assertLess(
+            render.index("- name: Configure pfblockerng-bot signing"),
+            render.index("- name: Render and commit the pkg website"),
+        )
+
+    def test_workflows_never_configure_the_generic_actions_commit_identity(self) -> None:
+        generic = re.compile(
+            r"git config user\.(?:name|email).*github-actions(?:\[bot\])?",
+            re.IGNORECASE,
+        )
+        for path in (INGEST, RENDER):
+            text = path.read_text(encoding="utf-8")
+            self.assertIsNone(generic.search(text), f"generic Actions identity remains in {path.name}")
+            self.assertNotIn('user.name="github-actions[bot]"', text)
+            self.assertNotIn("github-actions[bot]@users.noreply.github.com", text)
 
 
 def _tagged_intake_script() -> str:

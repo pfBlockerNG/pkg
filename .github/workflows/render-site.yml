@@ -30,6 +30,19 @@ jobs:
           fetch-depth: 1
           persist-credentials: true
 
+      - name: Configure pfblockerng-bot signing
+        env:
+          PFB_BOT_SIGNING_KEY: ${{ secrets.PFB_BOT_SIGNING_KEY }}
+        run: |
+          set -eu
+          [ -n "${PFB_BOT_SIGNING_KEY:-}" ] || {
+            echo "::error::PFB_BOT_SIGNING_KEY secret is not set"
+            exit 1
+          }
+          install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"
+          printf '%s\n' "$PFB_BOT_SIGNING_KEY" > "$RUNNER_TEMP/pfb-bot-signing-key"
+          echo "PFB_BOT_SIGNING_KEY_FILE=$RUNNER_TEMP/pfb-bot-signing-key" >> "$GITHUB_ENV"
+
       - name: Render and commit the pkg website
         env:
           BASE_URL: https://pkg.pfblockerng.com

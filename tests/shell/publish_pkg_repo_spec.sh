@@ -513,8 +513,24 @@ JSON
     The stderr should include 'main'
     author="$(git_fixture -C "${base}/pkg-repo" log -1 --format='%an <%ae>')"
     committer="$(git_fixture -C "${base}/pkg-repo" log -1 --format='%cn <%ce>')"
-    The variable author should equal 'github-actions[bot] <github-actions[bot]@users.noreply.github.com>'
-    The variable committer should equal 'github-actions[bot] <github-actions[bot]@users.noreply.github.com>'
+    The variable author should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
+    The variable committer should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
+  End
+
+  It 'refuses to commit unsigned when GITHUB_ACTIONS is set without a signing key'
+    git_fixture -C "${base}/pkg-repo" config --unset user.email
+    git_fixture -C "${base}/pkg-repo" config --unset user.name
+    export GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_SYSTEM=/dev/null
+    unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    unset PFB_BOT_SIGNING_KEY_FILE
+    export GITHUB_ACTIONS=true
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    When run script "$script"
+    The status should equal 1
+    The output should include 'sync attempt'
+    The stderr should include 'PFB_BOT_SIGNING_KEY_FILE'
   End
 
   It 'the commit message carries the release tag and source_run_id as trailers'

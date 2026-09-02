@@ -208,6 +208,20 @@ jobs:
           umask 077
           printf '%s\n' "$PFB_PKG_SIGNING_KEY" > "${RUNNER_TEMP}/pfb-pkg-signing.key"
 
+      - name: Configure pfblockerng-bot signing
+        if: inputs.operation != 'nightly-cleanup'
+        env:
+          PFB_BOT_SIGNING_KEY: ${{ secrets.PFB_BOT_SIGNING_KEY }}
+        run: |
+          set -eu
+          [ -n "${PFB_BOT_SIGNING_KEY:-}" ] || {
+            echo "::error::PFB_BOT_SIGNING_KEY secret is not set"
+            exit 1
+          }
+          install -m 600 /dev/null "$RUNNER_TEMP/pfb-bot-signing-key"
+          printf '%s\n' "$PFB_BOT_SIGNING_KEY" > "$RUNNER_TEMP/pfb-bot-signing-key"
+          echo "PFB_BOT_SIGNING_KEY_FILE=$RUNNER_TEMP/pfb-bot-signing-key" >> "$GITHUB_ENV"
+
       - name: Publish with guarded local commit
         if: inputs.operation != 'nightly-cleanup'
         id: publish

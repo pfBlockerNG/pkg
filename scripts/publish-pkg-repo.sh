@@ -679,14 +679,26 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
 
     assert_catalogue_only_staged
 
-    # Fixed bot identity via per-invocation -c flags, not repo config: a bare CI
-    # checkout carries no git identity, and this script must not depend on one
-    # being configured elsewhere (matches release.yml/module-durations.yml's
-    # direct-to-repo commits).
-    git -C "$PKG_REPO" \
-        -c user.name="github-actions[bot]" \
-        -c user.email="github-actions[bot]@users.noreply.github.com" \
-        commit --quiet -m "$commit_message"
+    # Fixed pfblockerng-bot identity via per-invocation -c flags. GitHub Actions
+    # must also pass PFB_BOT_SIGNING_KEY_FILE (SSH key) so the commit is signed.
+    if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${PFB_BOT_SIGNING_KEY_FILE:-}" ]; then
+        echo "::error::PFB_BOT_SIGNING_KEY_FILE is required in GitHub Actions" >&2
+        exit 1
+    fi
+    if [ -n "${PFB_BOT_SIGNING_KEY_FILE:-}" ]; then
+        git -C "$PKG_REPO" \
+            -c user.name="pfblockerng-bot" \
+            -c user.email="293667935+pfblockerng-bot@users.noreply.github.com" \
+            -c gpg.format=ssh \
+            -c user.signingkey="$PFB_BOT_SIGNING_KEY_FILE" \
+            -c commit.gpgsign=true \
+            commit --quiet -m "$commit_message"
+    else
+        git -C "$PKG_REPO" \
+            -c user.name="pfblockerng-bot" \
+            -c user.email="293667935+pfblockerng-bot@users.noreply.github.com" \
+            commit --quiet -m "$commit_message"
+    fi
 
     if push_out=$(git -C "$PKG_REPO" push origin HEAD:main 2>&1); then
         printf '%s\n' "$push_out" >&2
