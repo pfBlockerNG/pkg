@@ -17,7 +17,9 @@ INGEST = WORKFLOWS / "ingest.yml"
 RENDER = WORKFLOWS / "render-site.yml"
 SIGNING_STEP = "Configure pfblockerng-bot signing"
 WRITER_SCRIPTS = ("scripts/publish-pkg-repo.sh", "scripts/render-pkg-site.sh")
-_GIT_WRITE = re.compile(r"\bgit\b[^\n]*\b(?:commit|tag -a)\b")
+# Every git verb that writes an object history can carry: a step reaching any of
+# them is a writer, whichever line its arguments continue onto.
+_GIT_WRITE = re.compile(r"\bgit\b[^\n]*\b(?:commit|tag|merge|cherry-pick|revert|am)\b")
 
 
 def _steps(workflow: Path, job: str) -> list[dict[str, object]]:
@@ -32,7 +34,7 @@ def _writer_steps() -> list[tuple[Path, str, int, str]]:
         spec = yaml.safe_load(workflow.read_text(encoding="utf-8"))
         for job in (spec.get("jobs") or {}):
             for index, step in enumerate(_steps(workflow, job)):
-                run = str(step.get("run") or "")
+                run = str(step.get("run") or "").replace("\\\n", " ")
                 writes = any(script in run for script in WRITER_SCRIPTS) or _GIT_WRITE.search(run)
                 if writes:
                     found.append((workflow, job, index, str(step.get("name") or f"step {index}")))

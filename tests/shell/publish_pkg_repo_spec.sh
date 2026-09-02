@@ -520,6 +520,8 @@ JSON
 
   It 'SSH-signs the catalogue commit when a workflow provisioned the signing key'
     ssh-keygen -q -t ed25519 -N '' -C pfblockerng-bot -f "${base}/bot-key"
+    # The real CI quadrant: Actions set AND a provisioned key.
+    export GITHUB_ACTIONS=true
     export PFB_BOT_SIGNING_KEY_FILE="${base}/bot-key"
     export FAKE_MODE=success
     export FAKE_TOUCHED=edge/ce-2.8

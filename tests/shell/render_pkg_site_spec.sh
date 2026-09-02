@@ -350,6 +350,8 @@ PY
 
   It 'r9b: SSH-signs the site commit when a workflow provisioned the signing key'
     ssh-keygen -q -t ed25519 -N '' -C pfblockerng-bot -f "${base}/bot-key"
+    # The real CI quadrant: Actions set AND a provisioned key.
+    export GITHUB_ACTIONS=true
     export PFB_BOT_SIGNING_KEY_FILE="${base}/bot-key"
     When run script "$script"
     The status should equal 0
