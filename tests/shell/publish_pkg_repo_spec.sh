@@ -534,6 +534,12 @@ JSON
     # config says commit.gpgsign false.
     landed="$(git_fixture -C "${base}/pkg-repo" cat-file commit HEAD)"
     The variable landed should include 'gpgsig -----BEGIN SSH SIGNATURE-----'
+    # And the signature is by THAT key: verified against an allowed-signers file
+    # naming the bot's e-mail with the public half of the provisioned key.
+    printf '293667935+pfblockerng-bot@users.noreply.github.com %s\n' \
+        "$(cut -d' ' -f1,2 "${base}/bot-key.pub")" > "${base}/allowed-signers"
+    verified="$(git_fixture -C "${base}/pkg-repo" -c gpg.ssh.allowedSignersFile="${base}/allowed-signers" log -1 --format=%G?)"
+    The variable verified should equal 'G'
     author="$(git_fixture -C "${base}/pkg-repo" log -1 --format='%an <%ae>')"
     The variable author should equal 'pfblockerng-bot <293667935+pfblockerng-bot@users.noreply.github.com>'
   End
