@@ -6,7 +6,7 @@
   //
   // Pragmatic ruleset: structural/consistency rules are enforced; style rules
   // that fight the deliberate documentation style are disabled. Keep this in
-  // sync with the rationale in CLAUDE.md if it changes.
+  // sync with the rationale in AGENTS.md if it changes.
   "default": true,
 
   // line-length: ADRs/README use long prose and wide tables on purpose.
