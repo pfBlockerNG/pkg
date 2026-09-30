@@ -127,14 +127,8 @@ def human_size(n: int) -> str:
     return f"{f:.1f} GiB"
 
 
-def ver_key(v: str) -> tuple[list[int], int, int]:
-    """The newest-build sort key — see ``pfb_pkg.pkg_version_sort_key``.
-
-    Must order the alpha/beta/rc prerelease stages correctly (not just fold them
-    away), since testing/edge-channel rows compared here can be release-tag-shaped
-    (``4.0.0.alpha.1`` etc.) as well as nightly-dated or bare edition versions.
-    """
-    return pkg_version_sort_key(v)
+# The newest-build sort key: pkg's own version order, for pfBlockerNG and pfSense versions alike.
+ver_key = pkg_version_sort_key
 
 
 def artifact_datetime(epoch: float) -> str:

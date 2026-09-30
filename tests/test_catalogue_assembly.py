@@ -752,6 +752,33 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(remaining), ca.DEFAULT_RETENTION_KEEP)
         self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
 
+    def test_prerelease_of_a_newer_release_is_retained_over_older_releases(
+        self,
+    ) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "testing" / "ce-2.8"
+        versions = ["3.3.3", "3.3.4", "3.3.7", "3.3.8", "3.3.9", "3.3.10.a1"]
+        self.assertEqual(len(versions), ca.DEFAULT_RETENTION_KEEP + 1)
+        self._seed(catalogue_dir, versions)
+        evicted = ca.prune_retained(out, "testing", "ce-2.8")
+        self.assertEqual(
+            [path.name for path in evicted], ["pfSense-pkg-pfBlockerNG-3.3.3.pkg"]
+        )
+        self.assertIn("pfSense-pkg-pfBlockerNG-3.3.10.a1.pkg", _pkg_names(catalogue_dir))
+
+    def test_epoch_outranks_version_when_choosing_what_to_evict(self) -> None:
+        # pkg: PORTEPOCH supersedes PORTVERSION, so 3.3.3,1 is the NEWEST build here.
+        out = self.tmp / "out"
+        catalogue_dir = out / "stable" / "ce-2.8"
+        versions = ["3.3.3,1", "3.3.5", "3.3.6", "3.3.7", "3.3.8", "3.3.9"]
+        self.assertEqual(len(versions), ca.DEFAULT_RETENTION_KEEP + 1)
+        self._seed(catalogue_dir, versions)
+        evicted = ca.prune_retained(out, "stable", "ce-2.8")
+        self.assertEqual(
+            [path.name for path in evicted], ["pfSense-pkg-pfBlockerNG-3.3.5.pkg"]
+        )
+        self.assertIn("pfSense-pkg-pfBlockerNG-3.3.3,1.pkg", _pkg_names(catalogue_dir))
+
     def test_two_varvers_prune_independently(self) -> None:
         out = self.tmp / "out"
         dir_a = out / "stable" / "ce-2.8"

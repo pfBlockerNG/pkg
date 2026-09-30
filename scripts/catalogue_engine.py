@@ -25,6 +25,7 @@ from pfb_pkg import (
     PFB_BUILD_RECORD_KEY,
     PkgError,
     load_build_record,
+    pkg_version_sort_key,
     read_compact_manifest,
     validate_project_pkg,
     zstd_compress,
@@ -626,15 +627,22 @@ def _write_catalog_dir(
     All source bytes are read BEFORE the wipe so a source .pkg living inside ``dest``
     (e.g. nightly-retention inputs already in the bucket) survives the rebuild.
     """
-    # Read every source up front (sources may live inside dest — see nightly retention).
-    staged: list[tuple[str, bytes, float, dict]] = []
-    for (name, version), (path, manifest) in sorted(items.items()):
-        # name/version come from the .pkg's own manifest and become the published
-        # filename — guard both before either is joined onto dest (issue #1965).
+    # name/version come from the .pkg's own manifest and become the published
+    # filename — guard both before either is ordered or joined onto dest (issue #1965).
+    for (name, version), (path, _manifest) in items.items():
         _safe_segment(name, what=f"{path.name}: manifest name", pattern=_PKG_SEGMENT_RE)
         _safe_segment(
             version, what=f"{path.name}: manifest version", pattern=_PKG_SEGMENT_RE
         )
+    # pkg keeps the LAST duplicate name on load: list the newest version last (issue #3386).
+    ordered = sorted(
+        items.items(),
+        key=lambda item: (item[0][0], pkg_version_sort_key(item[0][1]), item[0][1]),
+    )
+
+    # Read every source up front (sources may live inside dest — see nightly retention).
+    staged: list[tuple[str, bytes, float, dict]] = []
+    for (name, version), (path, manifest) in ordered:
         canonical = f"{name}-{version}.pkg"
         staged.append((canonical, path.read_bytes(), path.stat().st_mtime, manifest))
 
