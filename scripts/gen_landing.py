@@ -357,8 +357,9 @@ def latest_versions(pkgs: Iterable[dict]) -> dict[str, str]:
 def build_table(pkgs: list[dict]) -> list[dict]:
     """The table rows: the newest version's package per (channel, ABI), display-sorted.
 
-    Older builds stay reachable via the directory-browse page — the table surfaces
-    only what a human would install right now.
+    Tagged catalogues hold a single version (#3390), so an older tagged build is no longer
+    browsable; older nightly builds stay reachable via the directory-browse page. The
+    table surfaces only what a human would install right now.
     """
     latest = latest_versions(pkgs)
     rows = [p for p in pkgs if p["version"] == latest.get(p["channel"])]
@@ -950,8 +951,9 @@ def older_releases(pkgs: list[dict]) -> list[dict]:
 def _older_releases_by_edition(
     pkgs: list[dict], matrix: list[dict] | None
 ) -> dict[str, list[dict]]:
-    """The retained older releases grouped by edition key (matrix-joined by ABI), so each
-    edition's disclosure folds in directly under that edition's table. Empty when none.
+    """The older release rows (a varver still serving a build another varver has moved
+    past) grouped by edition key (matrix-joined by ABI), so each edition's disclosure
+    folds in directly under that edition's table. Empty when none.
 
     Rows follow the shared table order (issue #1863): pfBlockerNG version desc, then
     pfSense version desc, then channel.
@@ -965,7 +967,7 @@ def _older_releases_by_edition(
 
 
 def _older_releases_details(rows: list[dict]) -> str:
-    """One edition's retained older releases, folded into a collapsed disclosure; "" when
+    """One edition's older release rows, folded into a collapsed disclosure; "" when
     that channel has none. The surrounding heading identifies the channel."""
     if not rows:
         return ""

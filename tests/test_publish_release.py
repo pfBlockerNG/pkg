@@ -8,7 +8,7 @@ assemble every (channel, varver) target this run's canonical assets cover
 No ledger — "already published" is read straight off the files already on disk, so
 these tests exercise the tree as the source of truth: run publish_release.run() twice
 with the same assets and assert nothing changes the second time, run it with a new
-tag and assert the old generation survives retention, etc.
+tag and assert the new version replaces the old one (one version per catalogue, #3390), etc.
 
 Fixture .pkg archives mirror tests/test_publish_catalogues.py's _wrap_canonical_pkg /
 _wrap_dependency_pkg (full validate_project_pkg-shaped canonical archives, minimal
@@ -322,6 +322,12 @@ def _wrap_canonical_pkg(
         php_dep: {"origin": f"lang/{php_dep}", "version": "1.0"},
         python_dep: {"origin": f"lang/{python_dep}", "version": "1.0"},
     }
+    # Real canonical manifests list the route row's extra packages as dependencies
+    # (e.g. the nightly 3.4.7 build lists py311-charset-normalizer), named
+    # ``<py_flavor>-<port name>``.
+    for origin in row["extra_pkgs"]:
+        portname = origin.split("/", 1)[1].removeprefix("py-")
+        deps[f"{row['py_flavor']}-{portname}"] = {"origin": origin, "version": "3.4.0"}
     files = {
         name: {
             "sum": "1$" + hashlib.sha256(data).hexdigest(),
@@ -3740,6 +3746,128 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         )
         for link in links:
             self.assertTrue((docs / link).is_file(), link)
+
+    def _assert_carries_dependency(self, channel: str) -> None:
+        """The dependency the build declares is on disk and in both descriptors."""
+        catalogue_dir = self._catalogue(channel)
+        self.assertTrue((catalogue_dir / _CHARSET_PKG).is_file(), channel)
+        self.assertIn(_CHARSET_NAME, _packagesite_names(catalogue_dir), channel)
+        self.assertIn(
+            _CHARSET_NAME, {str(row["name"]) for row in _data_rows(catalogue_dir)}, channel
+        )
+
+    def test_older_build_lifting_a_lagging_edge_brings_the_dependency_along(
+        self,
+    ) -> None:
+        """Given stable 3.2.10 went to stable+testing with its dependency (edge has none),
+        When the older testing build 3.2.9.b1 is published to testing+edge,
+        Then edge lists stable's 3.2.10 AND the dependency that build declares, on disk and
+        in both descriptors, byte for byte as stable holds it; and the report names both
+        skipped destinations while only edge is updated."""
+        self._publish(
+            "v3.2.10",
+            "stable",
+            '["stable","testing"]',
+            rows=(ROW_CE,),
+            include_dependency=True,
+        )
+
+        report = self._publish(
+            "v3.2.9.b1",
+            "testing",
+            '["testing","edge"]',
+            rows=(ROW_CE,),
+            include_dependency=True,
+        )
+
+        for channel in self._CHANNELS[1:]:
+            self._assert_lists_only(channel, "3.2.10")
+            self._assert_carries_dependency(channel)
+        self.assertEqual(
+            (self._catalogue("edge") / _CHARSET_PKG).read_bytes(),
+            (self._catalogue("stable") / _CHARSET_PKG).read_bytes(),
+        )
+        self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+        self.assertEqual(
+            report.skipped,
+            (
+                ("testing", "ce-2.8", "3.2.9.b1", "3.2.10"),
+                ("edge", "ce-2.8", "3.2.9.b1", "3.2.10"),
+            ),
+        )
+        self.assertEqual(
+            [line for line in report.describe() if line.startswith("updated ")],
+            ["updated edge/ce-2.8"],
+        )
+
+    def test_lifting_a_newer_testing_build_onto_a_new_edge_brings_the_dependency_along(
+        self,
+    ) -> None:
+        """Given testing serves 3.3.12.a1 with its dependency and edge does not exist,
+        When the older prerelease 3.3.10.a1 is published to testing+edge,
+        Then edge lists 3.3.12.a1 AND the dependency that build declares."""
+        self._publish(
+            "v3.3.12.a1",
+            "testing",
+            '["testing"]',
+            rows=(ROW_CE,),
+            include_dependency=True,
+        )
+
+        self._publish(
+            "v3.3.10.a1",
+            "testing",
+            '["testing","edge"]',
+            rows=(ROW_CE,),
+            include_dependency=True,
+        )
+
+        for channel in ("testing", "edge"):
+            self._assert_lists_only(channel, "3.3.12.a1")
+            self._assert_carries_dependency(channel)
+
+    def test_skipped_stale_publish_is_reported_and_is_not_a_noop(self) -> None:
+        """Given every channel lists 3.3.10,
+        When the older release 3.3.9 is published to all three,
+        Then the tree is unchanged and the report names each skipped destination with the
+        newer version that won, instead of claiming every destination already matches."""
+        self._publish("v3.3.10", "stable", self._ALL)
+        before = _tree_snapshot(self.pkg_repo)
+
+        report = self._publish("v3.3.9", "stable", self._ALL)
+
+        self.assertEqual(_tree_snapshot(self.pkg_repo), before)
+        self.assertEqual(report.touched, ())
+        self.assertEqual(
+            report.skipped,
+            tuple((channel, "ce-2.8", "3.3.9", "3.3.10") for channel in self._CHANNELS),
+        )
+        self.assertEqual(
+            report.describe(),
+            [
+                f"skipped {channel}/ce-2.8: 3.3.9 is older than 3.3.10"
+                for channel in self._CHANNELS
+            ],
+        )
+
+    def test_stale_catalogue_holding_an_older_version_is_pruned_and_rewritten(
+        self,
+    ) -> None:
+        """Given edge lists 3.4.0.a1 and 3.3.9 in a complete catalogue,
+        When the older testing build 3.3.11.a1 is published to testing+edge,
+        Then edge is rewritten to list 3.4.0.a1 only, and testing lists 3.3.11.a1."""
+        self._publish("v3.4.0.a1", "edge", '["edge"]')
+        self._seed("edge", "v3.3.9", "stable")
+        ca.regenerate_catalogue(self.pkg_repo / "docs", "edge", "ce-2.8")
+        self.assertEqual(self._listed("edge")["packagesite"], ["3.3.9", "3.4.0.a1"])
+
+        report = self._publish("v3.3.11.a1", "testing", '["testing","edge"]')
+
+        self.assertEqual(
+            set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
+        )
+        self._assert_lists_only("edge", "3.4.0.a1")
+        self._assert_lists_only("testing", "3.3.11.a1")
 
 
 # --------------------------------------------------------------------------- #

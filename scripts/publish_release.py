@@ -31,7 +31,9 @@ destination but freshly placed at another is expected, not a divergence.
 One version per catalogue (pfBlockerNG/pfBlockerNG#3390): pkg installs the first
 candidate a repository lists, not the newest, so each stable/testing/edge catalogue
 keeps only the newest version eligible for it (its own or a slower channel's). A
-destination already holding a newer eligible build skips this run's older one, and a
+destination already holding a newer eligible build skips this run's older one, and the
+report says so (``PublishReport.skipped``) rather than claiming a NOOP. A build lifted
+onto a destination from a slower channel brings the dependency packages it declares. A
 catalogue found holding more than one version is pruned to one even on an otherwise
 unchanged republish.
 
@@ -558,17 +560,23 @@ def _catalogue_carries_key(dest_dir: Path, expected_public: bytes) -> bool:
 @dataclass(frozen=True)
 class PublishReport:
     touched: tuple[tuple[str, str], ...]
+    # (channel, varver, incoming version, newer eligible version) per destination that
+    # kept its newer build instead of taking this run's older one.
+    skipped: tuple[tuple[str, str, str, str], ...] = ()
 
     @property
     def noop(self) -> bool:
         return not self.touched
 
     def describe(self) -> list[str]:
-        if not self.touched:
-            return [
-                "NOOP: every destination already matches this run's verified assets"
-            ]
-        return [f"updated {channel}/{varver}" for channel, varver in self.touched]
+        lines = [f"updated {channel}/{varver}" for channel, varver in self.touched]
+        lines += [
+            f"skipped {channel}/{varver}: {incoming} is older than {eligible}"
+            for channel, varver, incoming, eligible in self.skipped
+        ]
+        return lines or [
+            "NOOP: every destination already matches this run's verified assets"
+        ]
 
 
 def publish(
@@ -589,13 +597,13 @@ def publish(
 
     expected_public = _expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str, str, str]] = []
     source_index: dict[Path, list[tuple[str, str]]] = {}
     for varver in sorted(targets):
         target = targets[varver]
         asset_map = _asset_map(target)
-        incoming_key = pfb_pkg.pkg_version_sort_key(
-            str(target.canonical.manifest["version"])
-        )
+        incoming = str(target.canonical.manifest["version"])
+        incoming_key = pfb_pkg.pkg_version_sort_key(incoming)
         for channel in intake.destinations:
             dest_dir = site_root / channel / varver
             # A destination already past this build keeps the newer one: dropping this
@@ -607,6 +615,7 @@ def publish(
             )
             changed = False
             if stale:
+                skipped.append((channel, varver, incoming, cast(str, eligible)))
                 dest_dir.mkdir(parents=True, exist_ok=True)
             else:
                 # Eviction runs FIRST: a dependency is placed only when its name is
@@ -652,7 +661,7 @@ def publish(
     if source_index:
         ca.verify_multi_destination_identity(site_root, source_index)
 
-    return PublishReport(touched=tuple(touched))
+    return PublishReport(touched=tuple(touched), skipped=tuple(skipped))
 
 
 def _load_compatibility_route_matrix(

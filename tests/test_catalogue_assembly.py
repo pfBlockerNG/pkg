@@ -99,27 +99,36 @@ def _make_pkg(
     abi: str = "FreeBSD:15:*",
     origin: str | None = None,
     local_name: str | None = None,
+    deps: dict[str, dict[str, str]] | None = None,
 ) -> Path:
     """A minimal, valid .pkg: zstd-tar carrying only +COMPACT_MANIFEST."""
-    manifest = {
+    manifest: dict[str, object] = {
         "name": name,
         "version": version,
         "abi": abi,
         "origin": origin or f"net/{name}",
     }
+    if deps is not None:
+        manifest["deps"] = deps
     path = directory / (local_name or f"pkg-{next(_pkg_counter)}.pkg")
     _write_tar_pkg(path, json.dumps(manifest, separators=(",", ":")).encode())
     return path
 
 
 def _canonical_pkg(
-    directory: Path, *, version: str, abi: str = "FreeBSD:15:*", **kw: str | None
+    directory: Path,
+    *,
+    version: str,
+    abi: str = "FreeBSD:15:*",
+    deps: dict[str, dict[str, str]] | None = None,
+    **kw: str | None,
 ) -> Path:
     return _make_pkg(
         directory,
         name=pfb_pkg.CANONICAL_EMITTED_IDENTITY,
         version=version,
         abi=abi,
+        deps=deps,
         **kw,
     )
 
@@ -225,7 +234,7 @@ def _seed_canonical(
     tmp: Path, catalogue_dir: Path, versions: list[str], *, abi: str = "FreeBSD:15:*"
 ) -> None:
     """Drop canonically-named .pkg fixtures for each of ``versions`` into
-    ``catalogue_dir`` — shared by RetentionTests and ContainmentAwarePruningTests
+    ``catalogue_dir`` — shared by RetentionTests and the containment tests
     below. ``tmp`` is the scratch dir the source fixture files get written into
     before ``_drop`` copies them under their canonical on-disk name."""
     for v in versions:
@@ -1016,34 +1025,24 @@ class NewestEligibleVersionTests(_TempDirTestCase):
 
 
 class SlowerChannelsNeverProtectStaleVersionsTests(_TempDirTestCase):
-    def test_edge_does_not_keep_a_version_only_because_stable_serves_it(self) -> None:
-        out = self.tmp / "out"
-        edge_dir = out / "edge" / "ce-2.8"
-        stable_dir = out / "stable" / "ce-2.8"
-        versions = ["1.0.0", "1.0.1", "1.0.2"]
-        _seed_canonical(self.tmp, edge_dir, versions)
-        _seed_canonical(self.tmp, stable_dir, [versions[0]])
-
-        evicted = ca.prune_retained(out, "edge", "ce-2.8")
-
-        self.assertEqual(len(evicted), 2)
-        self.assertEqual(_pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-1.0.2.pkg"])
-
-    def test_testing_does_not_keep_a_version_only_because_stable_serves_it(
+    def test_a_faster_channel_does_not_keep_a_version_only_because_stable_serves_it(
         self,
     ) -> None:
-        out = self.tmp / "out"
-        testing_dir = out / "testing" / "ce-2.8"
-        stable_dir = out / "stable" / "ce-2.8"
-        versions = ["1.0.0", "1.0.1", "1.0.2"]
-        _seed_canonical(self.tmp, testing_dir, versions)
-        _seed_canonical(self.tmp, stable_dir, [versions[0]])
+        for channel in ("testing", "edge"):
+            with self.subTest(channel=channel):
+                out = self.tmp / f"out-{channel}"
+                channel_dir = out / channel / "ce-2.8"
+                stable_dir = out / "stable" / "ce-2.8"
+                versions = ["1.0.0", "1.0.1", "1.0.2"]
+                _seed_canonical(self.tmp, channel_dir, versions)
+                _seed_canonical(self.tmp, stable_dir, [versions[0]])
 
-        ca.prune_retained(out, "testing", "ce-2.8")
+                evicted = ca.prune_retained(out, channel, "ce-2.8")
 
-        self.assertEqual(
-            _pkg_names(testing_dir), ["pfSense-pkg-pfBlockerNG-1.0.2.pkg"]
-        )
+                self.assertEqual(len(evicted), 2)
+                self.assertEqual(
+                    _pkg_names(channel_dir), ["pfSense-pkg-pfBlockerNG-1.0.2.pkg"]
+                )
 
     def test_stable_ignores_faster_channel_presence(self) -> None:
         # Containment only ever flows slower -> faster, never back.
@@ -1138,18 +1137,6 @@ class ContainmentBackfillTests(_TempDirTestCase):
             copied[slower.resolve()], [("testing", "ce-2.8"), ("edge", "ce-2.8")]
         )
 
-    def test_slower_version_older_than_own_newest_is_not_copied(self) -> None:
-        out = self.tmp / "out"
-        testing_dir = out / "testing" / "ce-2.8"
-        edge_dir = out / "edge" / "ce-2.8"
-        _seed_canonical(self.tmp, testing_dir, ["1.0.0"])
-        _seed_canonical(self.tmp, edge_dir, ["2.0.0"])
-
-        copied = ca.backfill_from_slower_channels(out, "edge", "ce-2.8")
-
-        self.assertEqual(copied, {})
-        self.assertEqual(_pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-2.0.0.pkg"])
-
     def test_only_the_newest_slower_version_is_copied(self) -> None:
         out = self.tmp / "out"
         stable_dir = out / "stable" / "ce-2.8"
@@ -1222,7 +1209,7 @@ class ContainmentBackfillTests(_TempDirTestCase):
         self.assertIn("slower channels disagree", str(ctx.exception))
         self.assertEqual(_pkg_names(edge_dir), [])
 
-    def test_dependency_never_copied(self) -> None:
+    def test_undeclared_dependency_is_not_copied(self) -> None:
         out = self.tmp / "out"
         testing_dir = out / "testing" / "ce-2.8"
         edge_dir = out / "edge" / "ce-2.8"
@@ -1243,6 +1230,88 @@ class ContainmentBackfillTests(_TempDirTestCase):
         self.assertIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", _pkg_names(edge_dir))
         self.assertNotIn("py311-charset-normalizer-3.4.0.pkg", _pkg_names(edge_dir))
         self.assertEqual(len(copied), 1)
+
+    def _seed_declaring(
+        self, catalogue_dir: Path, version: str, deps: dict[str, dict[str, str]]
+    ) -> Path:
+        """A canonical build whose manifest declares ``deps``, dropped into ``catalogue_dir``."""
+        _drop(
+            catalogue_dir,
+            _canonical_pkg(
+                self.tmp,
+                version=version,
+                deps=deps,
+                local_name=f"pfSense-pkg-pfBlockerNG-{version}.pkg",
+            ),
+        )
+        return catalogue_dir / f"pfSense-pkg-pfBlockerNG-{version}.pkg"
+
+    _CHARSET = "py311-charset-normalizer-3.4.0.pkg"
+    _CHARSET_DECLARED = {
+        "py311-charset-normalizer": {
+            "origin": "textproc/py-charset-normalizer",
+            "version": "3.4.0",
+        },
+        # A dependency pfSense's own repositories serve: declared, never held here.
+        "gnugrep": {"origin": "textproc/gnugrep", "version": "3.12"},
+    }
+
+    def test_declared_dependency_is_copied_with_the_build(self) -> None:
+        out = self.tmp / "out"
+        testing_dir = out / "testing" / "ce-2.8"
+        edge_dir = out / "edge" / "ce-2.8"
+        canonical = self._seed_declaring(testing_dir, "1.0.0", self._CHARSET_DECLARED)
+        _drop(testing_dir, _dep_pkg(self.tmp, local_name=self._CHARSET))
+        edge_dir.mkdir(parents=True)
+
+        copied = ca.backfill_from_slower_channels(out, "edge", "ce-2.8")
+
+        self.assertEqual(
+            _pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg", self._CHARSET]
+        )
+        self.assertEqual(
+            (edge_dir / self._CHARSET).read_bytes(),
+            (testing_dir / self._CHARSET).read_bytes(),
+        )
+        # Only the canonical package feeds the fan-out identity index.
+        self.assertEqual(list(copied), [canonical.resolve()])
+
+    def test_declared_dependency_already_at_destination_is_left_alone(self) -> None:
+        out = self.tmp / "out"
+        testing_dir = out / "testing" / "ce-2.8"
+        edge_dir = out / "edge" / "ce-2.8"
+        self._seed_declaring(testing_dir, "1.0.0", self._CHARSET_DECLARED)
+        _drop(testing_dir, _dep_pkg(self.tmp, local_name=self._CHARSET))
+        _drop(
+            edge_dir,
+            _dep_pkg(
+                self.tmp, origin="textproc/py-earlier-build", local_name=self._CHARSET
+            ),
+        )
+        earlier = (edge_dir / self._CHARSET).read_bytes()
+
+        ca.backfill_from_slower_channels(out, "edge", "ce-2.8")
+
+        self.assertEqual((edge_dir / self._CHARSET).read_bytes(), earlier)
+
+    def test_dependency_name_escaping_the_catalogue_is_ignored(self) -> None:
+        out = self.tmp / "out"
+        testing_dir = out / "testing" / "ce-2.8"
+        edge_dir = out / "edge" / "ce-2.8"
+        self._seed_declaring(
+            testing_dir, "1.0.0", {"../loose": {"origin": "x/loose", "version": "1.0"}}
+        )
+        # testing_dir/../loose-1.0.pkg: exists, but outside the catalogue directory.
+        _drop(
+            out / "testing",
+            _dep_pkg(self.tmp, name="loose", version="1.0", local_name="loose-1.0.pkg"),
+        )
+        edge_dir.mkdir(parents=True)
+
+        ca.backfill_from_slower_channels(out, "edge", "ce-2.8")
+
+        self.assertFalse((out / "edge" / "loose-1.0.pkg").exists())
+        self.assertEqual(_pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
 
     def test_nightly_destination_copies_nothing(self) -> None:
         out = self.tmp / "out"

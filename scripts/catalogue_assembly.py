@@ -43,9 +43,9 @@ _KNOWN_CHANNELS: frozenset[str] = frozenset({"stable", "testing", "edge", "night
 # guard is this module's own; the engine has no reason to know about NAME_MAX.
 _MAX_VARVER_LENGTH = 255
 
-# pkg picks the FIRST candidate a repository lists, not the newest (#3390). Nightly
-# versions sort alike as strings and as pkg versions, so its history is safe; "3.3.10" <
-# "3.3.9" as strings, so a tagged catalogue lists exactly one version.
+# pkg picks the FIRST candidate a repository lists, not the newest (#3390): "3.3.10" <
+# "3.3.9" as strings, so a tagged catalogue lists exactly one version. Nightly is out
+# of scope for #3390 and keeps its five newest builds.
 NIGHTLY_RETENTION_KEEP = 5
 TAGGED_RETENTION_KEEP = 1
 
@@ -165,6 +165,30 @@ def _iter_canonical_packages(catalogue_dir: Path) -> list[tuple[Path, str]]:
     return found
 
 
+def _copy_declared_dependencies(src: Path, dest_dir: Path) -> None:
+    """Copy the dependency ``.pkg`` files the canonical build ``src`` declares (manifest
+    ``deps``; file ``<name>-<version>.pkg``) from ``src``'s own catalogue into
+    ``dest_dir``, so a lifted build never lands without the packages it needs.
+
+    A dependency's identity is its filename, so one already at the destination is left
+    exactly as it is. A declared package ``src``'s catalogue does not hold (pfSense's own
+    repositories serve it) is skipped, as is any name that would leave the catalogue.
+    """
+    deps = pfb_pkg.read_compact_manifest(src).get("deps")
+    if not isinstance(deps, dict):
+        return
+    for name, dep in deps.items():
+        version = dep.get("version") if isinstance(dep, dict) else None
+        if not isinstance(version, str):
+            continue
+        filename = f"{name}-{version}.pkg"
+        if Path(filename).name != filename:
+            continue
+        source, target = src.parent / filename, dest_dir / filename
+        if source.is_file() and not target.exists():
+            shutil.copy2(source, target)
+
+
 def newest_eligible_version(
     site_root: str | Path, channel: str, varver: str
 ) -> str | None:
@@ -194,7 +218,8 @@ def backfill_from_slower_channels(
     ``varver`` onto ``channel`` (byte-identical), unless ``channel`` already has
     that build or a newer one. Older slower builds are never copied: a tagged
     catalogue lists exactly one version (#3390), so ``prune_retained`` would drop
-    them again.
+    them again. The dependency ``.pkg`` files the copied build declares come with it
+    when the destination lacks them (``_copy_declared_dependencies``).
 
     Nightly is untagged and independent: this function never copies from it or
     into it (``_SLOWER_CHANNELS["nightly"]`` is empty, and a nightly destination
@@ -257,6 +282,7 @@ def backfill_from_slower_channels(
             f"incoming sha256={hashlib.sha256(src.read_bytes()).hexdigest()}"
         )
     shutil.copy2(src, dest)
+    _copy_declared_dependencies(src, dest_dir)
     destinations = [(slower, varver) for slower in origins[newest]]
     destinations.append((channel, varver))
     return {src.resolve(): destinations}

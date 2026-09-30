@@ -36,14 +36,13 @@ stable, testing and edge; a testing prerelease for testing and edge; an edge
 prerelease for edge only. After `3.3.10` is released all three channels list
 `3.3.10`; after a later `3.3.11.a1` testing prerelease, testing and edge list
 `3.3.11.a1` and stable stays on `3.3.10`. Nightly catalogues are the exception: they
-keep their five newest builds.
+keep their five newest builds. A catalogue that still lists several versions from
+before this rule converges on the next publish that reaches it.
 
 Why: `pkg` (FreeBSD) installs the first candidate a repository lists, not the
 newest. It loads candidates in string order, where `3.3.9` sorts above `3.3.10.a1`, so
 a catalogue holding several tagged versions can install or keep an older one
 ([pfBlockerNG/pfBlockerNG#3390](https://github.com/pfBlockerNG/pfBlockerNG/issues/3390)).
-Nightly versions (`YYYYMMDDHHMMSS.<sha>`) sort the same as strings and as `pkg`
-versions, so keeping several is safe.
 
 Limitation: a tagged catalogue has no in-catalogue rollback. To go back to an older
 tagged build, install its `.pkg` from the matching
