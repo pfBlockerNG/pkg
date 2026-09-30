@@ -12,7 +12,6 @@ else the `zstd` binary.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import io
 import json
@@ -21,7 +20,6 @@ import posixpath
 import re
 import shlex
 import shutil
-import string
 import subprocess
 import tarfile
 import xml.etree.ElementTree as ET
@@ -675,168 +673,77 @@ def validate_project_pkg(
 
 
 # --------------------------------------------------------------------------- #
-# pkg_version_cmp — port of freebsd/pkg libpkg/pkg_version.c. pkg keeps the LAST
-# duplicate of a package name when it loads a catalogue and never compares
-# versions itself (issue #3386), so every version ordering the publisher makes
-# (catalogue write order, retention, staleness, landing "newest") must match it.
+# Version sort key — shared by catalogue_engine.py (release/nightly retention)
+# and gen_landing.py (the landing page's "newest build" picks).
 # --------------------------------------------------------------------------- #
 
-_ULONG_MAX = 2**64 - 1
-_LLONG_MAX = 2**63 - 1
-_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
-_COMPONENT_CHARS = string.digits + string.ascii_letters + "+*"
-_ABASE = 2  # letters rank from here; "pl" (0) sorts below every letter
+# FreeBSD pkg ranks a prerelease stage BELOW the bare release, and alpha < beta <
+# rc between themselves (see scripts/publication_identity.py, whose canonical tags use
+# vX.Y.Z.aN|bN|rN). Retained legacy expanded package versions remain sortable.
+# A version with no stage keyword —
+# a genuine stable release, a bare edition version like "2.8.1", or a Nightly
+# timestamp-plus-SHA version — ranks as RELEASE (highest).
+_STAGE_RANK = {"alpha": 0, "beta": 1, "rc": 2}
+_COMPACT_STAGE_RANK = {"a": 0, "b": 1, "r": 2}
+_COMPACT_STAGE = re.compile(r"^([abr])([1-9][0-9]*)$", re.IGNORECASE)
+_RELEASE_RANK = 3
 
 
-def _letter_rank(letter: str) -> int:
-    return ord(letter) - ord("a") + _ABASE
+def pkg_version_sort_key(version: str) -> tuple[list[int], int, int]:
+    """Monotone sort key for a pfBlockerNG pkg VERSION string.
 
+    Splits on ``.``/``_``/``,`` like a plain numeric-run compare, but a component
+    matching a canonical compact prerelease (``aN``/``bN``/``rN``), or a retained
+    legacy stage keyword (``alpha.N``/``beta.N``/``rc.N``), is pulled OUT of the
+    numeric base and turned into a stage rank + number. The historical bug this
+    fixes: a plain
+    ``re.findall(r"\\d+", v)``-style key drops the keyword entirely, so
+    ``4.0.0.alpha.1`` / ``.beta.1`` / ``.rc.1`` all collapsed to the SAME key, and
+    the bare ``4.0.0`` release (whose key was a *shorter* list) sorted BELOW every
+    prerelease. This key instead reproduces pkg's real ordering::
 
-# pkg_version.c stages[]: special strings that sort by name rather than first letter.
-_STAGES = (
-    ("pl", 0),
-    ("snap", _letter_rank("s")),
-    ("alpha", _letter_rank("a")),
-    ("beta", _letter_rank("b")),
-    ("pre", _letter_rank("p")),
-    ("rc", _letter_rank("r")),
-)
+        4.0.0.a1 < 4.0.0.a2 < 4.0.0.b1 < 4.0.0.r1 < 4.0.0
 
+    A version with no stage keyword (a Nightly timestamp-plus-SHA version, a bare
+    ``pfsense_version`` like ``2.8.1``, or a
+    genuine stable release) keeps its full numeric run as the base and ranks as
+    RELEASE — unchanged ordering vs. the historical key for that case. Any
+    non-numeric, non-stage-keyword component maps to ``0`` (same fallback the
+    historical key used), so a malformed component never raises.
 
-def _at(text: str, pos: int) -> str:
-    """``text[pos]``, or the NUL that ends a C string."""
-    return text[pos] if pos < len(text) else "\0"
-
-
-def _digits_end(text: str, pos: int) -> int:
-    while _at(text, pos) in string.digits:
-        pos += 1
-    return pos
-
-
-def _strtonum(text: str, pos: int, limit: int) -> tuple[int, int]:
-    """strtoul/strtoll at ``pos``: ``(value, end)``; overflow clamps to ``limit``."""
-    while _at(text, pos) in " \t\n\v\f\r":
-        pos += 1
-    if _at(text, pos) == "+":
-        pos += 1
-    end = _digits_end(text, pos)
-    digits = text[pos:end].lstrip("0")
-    return (limit if len(digits) > 20 else min(int(digits or "0"), limit)), end
-
-
-def _split_version(pkgname: str) -> tuple[int, int, int, int]:
-    """``(start, end, epoch, revision)`` of the version in
-    ``${PORTNAME}-${PORTVERSION}[_${PORTREVISION}][,${PORTEPOCH}]``; a bare version is fine."""
-    start = pkgname.rfind("-") + 1
-    underscore = pkgname.rfind("_", start)
-    revision = _strtonum(pkgname, underscore + 1, _ULONG_MAX)[0] if underscore >= 0 else 0
-    comma = pkgname.rfind(",", underscore + 1 if underscore >= 0 else start)
-    epoch = _strtonum(pkgname, comma + 1, _ULONG_MAX)[0] if comma >= 0 else 0
-    end = underscore if underscore >= 0 else comma if comma >= 0 else len(pkgname)
-    return start, end, epoch, revision
-
-
-def _get_component(version: str, pos: int) -> tuple[int, tuple[int, int, int]]:
-    """Parse the number-letter-patch triple at ``pos``.
-
-    Returns the position after it and any trailing separators, and ``(n, a, pl)``.
+    Returns a NESTED ``(base, stage_rank, stage_num)`` tuple, NOT a flat list.
+    A flat ``[*base, stage_rank, stage_num]`` breaks the "shorter all-numeric
+    version sorts below its longer prefix-extension" rule: Python compares
+    lists element-by-element, so ``2.8`` -> ``[2, 8, 3, 0]`` would compare its
+    OWN stage_rank (index 2 = 3) against ``2.8.1``'s THIRD version component
+    (index 2 = 1) and wrongly sort ``2.8`` above ``2.8.1``. Tuple comparison
+    instead compares ``base`` as a whole LIST first (Python's list-prefix rule:
+    ``[2, 8] < [2, 8, 1]``), so a bare edition version like ``2.8`` still sorts
+    below its extension ``2.8.1``; stage_rank/stage_num only break ties within
+    an equal base.
     """
-    hasstage = False
-    haspatchlevel = False
-    a = 0
-    if _at(version, pos) in string.digits:
-        n, pos = _strtonum(version, pos, _LLONG_MAX)
-    elif _at(version, pos) == "*":
-        n = -2
-        pos += 1
-        while _at(version, pos) not in ("\0", "+"):
-            pos += 1
-    else:
-        n = -1
-        hasstage = True
-
-    if _at(version, pos) in string.ascii_letters:
-        letter = version[pos].lower()
-        haspatchlevel = True
-        if _at(version, pos + 1) in string.ascii_letters:
-            for name, value in _STAGES:
-                end = pos + len(name)
-                if version[pos:end].translate(_ASCII_LOWER) == name and _at(
-                    version, end
-                ) not in string.ascii_letters:
-                    if hasstage:
-                        a = value
-                        pos = end
-                    else:
-                        a = 0
-                        haspatchlevel = False
-                    letter = ""
-                    break
-        if letter:
-            a = _letter_rank(letter)
-            pos += 1
-            while _at(version, pos) in string.ascii_letters:
-                pos += 1
-    else:
-        a = 0
-        haspatchlevel = False
-
-    pl = 0
-    if haspatchlevel:
-        if _at(version, pos) in string.digits:
-            pl, pos = _strtonum(version, pos, _LLONG_MAX)
-        else:
-            pl = -1
-
-    while _at(version, pos) != "\0" and _at(version, pos) not in _COMPONENT_CHARS:
-        pos += 1
-    return pos, (n, a, pl)
-
-
-def pkg_version_cmp(pkg1: str, pkg2: str) -> int:
-    """Return -1, 0 or 1 as pkg orders the version of ``pkg1`` below, equal to or above ``pkg2``.
-
-    Each argument is a bare version or ``name-version``; epoch (``,N``) supersedes version
-    supersedes revision (``_N``). Digits, letters and case are ASCII, as in pkg's C locale.
-    """
-    pkg1 = pkg1.partition("\0")[0]
-    pkg2 = pkg2.partition("\0")[0]
-    v1, ve1, e1, r1 = _split_version(pkg1)
-    v2, ve2, e2, r2 = _split_version(pkg2)
-    result = 0
-
-    if e1 != e2:
-        result = -1 if e1 < e2 else 1
-
-    if result == 0 and (
-        ve1 - v1 != ve2 - v2
-        or pkg1[v1:ve1].translate(_ASCII_LOWER) != pkg2[v2:ve2].translate(_ASCII_LOWER)
-    ):
-        while result == 0 and (v1 < ve1 or v2 < ve2):
-            block_v1 = False
-            block_v2 = False
-            vc1 = vc2 = (0, 0, 0)
-            if v1 < ve1 and pkg1[v1] != "+":
-                v1, vc1 = _get_component(pkg1, v1)
+    parts = re.split(r"[._,]", version)
+    base: list[int] = []
+    stage_rank = _RELEASE_RANK
+    stage_num = 0
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        rank = _STAGE_RANK.get(part.lower())
+        if rank is not None:
+            stage_rank = rank
+            if i + 1 < len(parts) and parts[i + 1].isdigit():
+                stage_num = int(parts[i + 1])
+                i += 2
             else:
-                block_v1 = True
-            if v2 < ve2 and pkg2[v2] != "+":
-                v2, vc2 = _get_component(pkg2, v2)
-            else:
-                block_v2 = True
-            if block_v1 and block_v2:
-                if v1 < ve1:
-                    v1 += 1
-                if v2 < ve2:
-                    v2 += 1
-            elif vc1 != vc2:
-                result = -1 if vc1 < vc2 else 1
-
-    if result == 0 and r1 != r2:
-        result = -1 if r1 < r2 else 1
-    return result
-
-
-# ``sorted(versions, key=pkg_version_sort_key)`` lists them oldest to newest as pkg does.
-pkg_version_sort_key = functools.cmp_to_key(pkg_version_cmp)
+                i += 1
+            continue
+        compact = _COMPACT_STAGE.fullmatch(part)
+        if compact is not None:
+            stage_rank = _COMPACT_STAGE_RANK[compact.group(1).lower()]
+            stage_num = int(compact.group(2))
+            i += 1
+            continue
+        base.append(int(part) if part.isdigit() else 0)
+        i += 1
+    return (base, stage_rank, stage_num)

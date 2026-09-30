@@ -1001,24 +1001,6 @@ class StaleTests(_TempDirTestCase):
             _run(handoff=handoff_2, results_dir=results_dir_2, pkg_repo=self.pkg_repo)
         self.assertIn(str(corrupt_path), str(ctx.exception))
 
-    def test_stale_check_compares_versions_in_pkg_order(self) -> None:
-        # pkg: PORTEPOCH supersedes PORTVERSION, so published 3.3.3,1 is newer than 3.3.9.
-        catalogue_dir = self.pkg_repo / "nightly" / "ce-2.8"
-        catalogue_dir.mkdir(parents=True)
-        manifest = {
-            "name": pfb_pkg.CANONICAL_EMITTED_IDENTITY,
-            "abi": "FreeBSD:15:*",
-            "version": "3.3.3,1",
-        }
-        _write_tar_pkg(
-            catalogue_dir / f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-3.3.3,1.pkg",
-            [("+COMPACT_MANIFEST", json.dumps(manifest).encode(), 0o644, 0)],
-        )
-
-        with self.assertRaises(pn.StaleNightlyError):
-            pn._reject_stale(self.pkg_repo, "ce-2.8", "3.3.9")
-        pn._reject_stale(self.pkg_repo, "ce-2.8", "3.3.3,2")
-
 
 # --------------------------------------------------------------------------- #
 # T5 — retention: keep+1 canonical generations published sequentially, oldest

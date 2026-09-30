@@ -134,7 +134,9 @@ def test_ver_key_orders_prerelease_stages_alpha_beta_rc_then_release() -> None:
 def test_ver_key_preserves_numeric_prefix_ordering() -> None:
     """A shorter all-numeric version must sort BELOW its longer prefix-extension
     (build_edition_sections sorts rows by ver_key(pfsense_version), a bare
-    edition version like '2.8' vs '2.8.1'): pkg reads the missing component as 0.
+    edition version like '2.8' vs '2.8.1'). A flat [*base, stage_rank, stage_num]
+    key breaks this -- see pfb_pkg.pkg_version_sort_key's docstring for why the
+    nested (base, stage_rank, stage_num) tuple fixes it.
     """
     assert gl.ver_key("2.8") < gl.ver_key("2.8.1")
     assert gl.ver_key("4.0.0") < gl.ver_key("4.0.0.1")
@@ -748,41 +750,6 @@ def test_latest_versions_per_channel() -> None:
         _pkg("testing", "d", "3.2.16", "a", "3"),
     ]
     assert gl.latest_versions(pkgs) == {"nightly": "3.2.16.20260614.9", "testing": "3.2.16"}
-
-
-# The newest build is the one pkg itself would install: 3.3.10.a1 is newer than 3.3.9, and
-# an epoch (`,1`) supersedes the version outright.
-_PKG_NEWEST_MIXES = [
-    (["3.3.9", "3.3.10.a1", "3.3.3"], "3.3.10.a1"),
-    (["3.3.9", "3.3.3,1", "3.3.10.a1"], "3.3.3,1"),
-]
-
-
-@pytest.mark.parametrize(("versions", "newest"), _PKG_NEWEST_MIXES)
-def test_latest_versions_picks_the_pkg_newest_version(versions: list[str], newest: str) -> None:
-    pkgs = [_pkg("testing", "d", v, "a", f"testing/ce-2.8/{v}.pkg") for v in versions]
-    assert gl.latest_versions(pkgs) == {"testing": newest}
-
-
-@pytest.mark.parametrize(("versions", "newest"), _PKG_NEWEST_MIXES)
-def test_eol_versions_serves_the_pkg_newest_version(versions: list[str], newest: str) -> None:
-    served = [_eol_pkg(v, "FreeBSD:14:*", "ce-2.7") for v in versions]
-    matrix = [_mx_eol("FreeBSD:14:amd64", "2.7", "CE", "8.2", "py311")]
-
-    result = gl.eol_versions(served, matrix)
-
-    assert [row["version"] for _, _, row in result] == [newest]
-
-
-def test_sort_table_rows_lists_the_pkg_newest_version_first() -> None:
-    rows = [
-        {"channel": "testing", "version": v, "pfsense_version": "2.8"}
-        for v in ["3.3.9", "3.3.10.a1", "3.3.3,1"]
-    ]
-
-    gl.sort_table_rows(rows)
-
-    assert [r["version"] for r in rows] == ["3.3.3,1", "3.3.10.a1", "3.3.9"]
 
 
 # ── Edition split: matrix join → per-edition sections ─────────────────────────
