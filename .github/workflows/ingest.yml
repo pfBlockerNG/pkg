@@ -153,7 +153,7 @@ jobs:
 
       - name: Set up ORAS
         if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'
-        uses: oras-project/setup-oras@v1
+        uses: oras-project/setup-oras@v2
 
       - name: Log in to GHCR
         if: inputs.operation == 'nightly' || inputs.operation == 'nightly-cleanup'
