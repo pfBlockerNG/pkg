@@ -1010,7 +1010,7 @@ class StaleTests(_TempDirTestCase):
 
 class RetentionTests(_TempDirTestCase):
     def test_retention_evicts_oldest_canonical_dep_survives(self) -> None:
-        keep = ca.DEFAULT_RETENTION_KEEP
+        keep = ca.NIGHTLY_RETENTION_KEEP
         catalogue_dir = self.pkg_repo / "docs" / "nightly" / "ce-2.8"
         dep_name = "py311-charset-normalizer-3.4.0.pkg"
         first_version = None

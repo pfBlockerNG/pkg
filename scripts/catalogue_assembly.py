@@ -43,12 +43,15 @@ _KNOWN_CHANNELS: frozenset[str] = frozenset({"stable", "testing", "edge", "night
 # guard is this module's own; the engine has no reason to know about NAME_MAX.
 _MAX_VARVER_LENGTH = 255
 
-# Canonical generations retained per channel/varver.
-DEFAULT_RETENTION_KEEP = 5
+# pkg picks the FIRST candidate a repository lists, not the newest (#3390). Nightly
+# versions sort alike as strings and as pkg versions, so its history is safe; "3.3.10" <
+# "3.3.9" as strings, so a tagged catalogue lists exactly one version.
+NIGHTLY_RETENTION_KEEP = 5
+TAGGED_RETENTION_KEEP = 1
 
-# Containment order (slower -> faster): stable subset-of testing subset-of edge (issue #2147's
-# four-channel model). Nightly is untagged and independent of the tagged channels — no
-# containment either direction, so it protects nothing and is protected by nothing. Keys MUST
+# Containment order (slower -> faster): a faster channel may list any slower channel's
+# build (issue #2147's four-channel model). Nightly is untagged and independent of the
+# tagged channels — no containment either direction. Keys MUST
 # equal _KNOWN_CHANNELS; the assertion right below is the import-time pin, and
 # SlowerChannelsConsistencyTests in tests/test_catalogue_assembly.py is the test-time one.
 _SLOWER_CHANNELS: dict[str, tuple[str, ...]] = {
@@ -132,41 +135,6 @@ def _canonical_version(path: Path, manifest: Mapping[str, object]) -> str:
     return version
 
 
-def _protected_versions(site_root: Path, channel: str, varver: str) -> frozenset[str]:
-    """Canonical package versions one of ``channel``'s slower channels
-    (``_SLOWER_CHANNELS[channel]``) still carries for this SAME ``varver`` — the set
-    ``prune_retained`` must never evict from ``channel``, or a faster channel could
-    rotate a version out of its own retention window while a slower channel still
-    serves it, breaking the strict-containment contract (edge superset-of testing
-    superset-of stable).
-
-    Presence-based only: a slower-channel directory that does not exist (or does not
-    yet carry this varver) contributes nothing — no error. Scoped exactly like
-    ``prune_retained``'s own pool scan: catalogue descriptor files and
-    non-canonical dependency packages are skipped.
-
-    Bytes are never compared here: a canonical package sharing the SAME name+version
-    across destinations is already guaranteed byte-identical at publish time
-    (``verify_multi_destination_identity`` / ``publish_release.DestinationConflictError``
-    reject any divergence before this ever runs), so matching by version string alone
-    is sufficient — this function has no reason to re-verify that post-condition.
-    """
-    brp = catalogue_engine
-    versions: set[str] = set()
-    for slower_channel in _SLOWER_CHANNELS[channel]:
-        slower_dir = site_root / slower_channel / varver
-        if not slower_dir.is_dir():
-            continue
-        for path in slower_dir.glob("*.pkg"):
-            if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
-                continue
-            manifest = pfb_pkg.read_compact_manifest(path)
-            if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
-                continue
-            versions.add(_canonical_version(path, manifest))
-    return frozenset(versions)
-
-
 def _files_byte_identical(a: Path, b: Path) -> bool:
     """True iff ``a`` and ``b`` hold the same bytes. Size first — a new build
     almost always differs there, so most calls never read either file."""
@@ -175,16 +143,15 @@ def _files_byte_identical(a: Path, b: Path) -> bool:
     return a.read_bytes() == b.read_bytes()
 
 
-def _canonical_filename(path: Path, manifest: Mapping[str, object]) -> str:
-    return f"{manifest['name']}-{_canonical_version(path, manifest)}.pkg"
+def _canonical_filename(version: str) -> str:
+    return f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{version}.pkg"
 
 
 def _iter_canonical_packages(catalogue_dir: Path) -> list[tuple[Path, str]]:
-    """Canonical ``.pkg`` files in ``catalogue_dir`` as ``(path, filename)``.
+    """Canonical ``.pkg`` files in ``catalogue_dir`` as ``(path, version)``.
 
     Catalog descriptor files and non-canonical (dependency) packages are skipped,
-    matching ``_protected_versions`` / ``prune_retained`` so a dependency can
-    never be copied or compared as a containment source.
+    so a dependency is never counted, pruned, or copied as a containment source.
     """
     brp = catalogue_engine
     found: list[tuple[Path, str]] = []
@@ -194,8 +161,28 @@ def _iter_canonical_packages(catalogue_dir: Path) -> list[tuple[Path, str]]:
         manifest = pfb_pkg.read_compact_manifest(path)
         if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
             continue
-        found.append((path, _canonical_filename(path, manifest)))
+        found.append((path, _canonical_version(path, manifest)))
     return found
+
+
+def newest_eligible_version(
+    site_root: str | Path, channel: str, varver: str
+) -> str | None:
+    """Newest canonical version (``pfb_pkg.pkg_version_sort_key``) the ``channel``
+    catalogue for ``varver`` may list: one already on ``channel`` or on one of its
+    slower channels (``_SLOWER_CHANNELS``) for the same ``varver``. ``None`` when
+    nothing is published; a missing channel directory contributes nothing.
+    """
+    _validate_channel(channel)
+    _validate_varver(varver)
+    site_root = Path(site_root)
+    versions = [
+        version
+        for source in (channel, *_SLOWER_CHANNELS[channel])
+        if (source_dir := site_root / source / varver).is_dir()
+        for _path, version in _iter_canonical_packages(source_dir)
+    ]
+    return max(versions, key=pfb_pkg.pkg_version_sort_key, default=None)
 
 
 def backfill_from_slower_channels(
@@ -203,18 +190,21 @@ def backfill_from_slower_channels(
     channel: str,
     varver: str,
 ) -> dict[Path, list[tuple[str, str]]]:
-    """Copy every canonical package still retained on a slower tagged channel
-    for this ``varver`` onto ``channel`` (byte-identical).
+    """Copy the newest canonical package a slower tagged channel carries for this
+    ``varver`` onto ``channel`` (byte-identical), unless ``channel`` already has
+    that build or a newer one. Older slower builds are never copied: a tagged
+    catalogue lists exactly one version (#3390), so ``prune_retained`` would drop
+    them again.
 
     Nightly is untagged and independent: this function never copies from it or
     into it (``_SLOWER_CHANNELS["nightly"]`` is empty, and a nightly destination
     returns immediately). A same-name, different-byte collision — dest vs source,
     or two slower sources disagreeing with each other — is a hard error.
 
-    Returns a ``source_index`` fragment: each newly-copied source path maps to
-    the ``(channel, varver)`` destinations that now hold those bytes (every
-    slower origin that carried the package, plus ``channel``). Already-identical
-    destinations are left untouched and omitted from the result.
+    Returns a ``source_index`` fragment: the copied source path maps to the
+    ``(channel, varver)`` destinations that now hold those bytes (every slower
+    origin that carried the package, plus ``channel``). An already-identical
+    destination is left untouched and yields ``{}``.
     """
     site_root = Path(site_root)
     if channel == "nightly":
@@ -223,43 +213,53 @@ def backfill_from_slower_channels(
         return {}
 
     dest_dir = _catalogue_dir(site_root, channel, varver)
-    # name -> first source, then every slower (channel, path) that carries it
+    # version -> first source, then every slower channel that carries it
     first_source: dict[str, Path] = {}
-    origins: dict[str, list[tuple[str, Path]]] = {}
+    origins: dict[str, list[str]] = {}
     for slower_channel in _SLOWER_CHANNELS[channel]:
         if slower_channel == "nightly":
             continue
         slower_dir = site_root / slower_channel / varver
         if not slower_dir.is_dir():
             continue
-        for path, name in _iter_canonical_packages(slower_dir):
-            existing = first_source.get(name)
+        for path, version in _iter_canonical_packages(slower_dir):
+            existing = first_source.get(version)
             if existing is not None and not _files_byte_identical(existing, path):
                 raise CatalogueAssemblyError(
-                    f"{name}: slower channels disagree on bytes for {varver} — "
+                    f"{_canonical_filename(version)}: slower channels disagree on bytes for {varver} — "
                     f"{existing} sha256={hashlib.sha256(existing.read_bytes()).hexdigest()}, "
                     f"{path} sha256={hashlib.sha256(path.read_bytes()).hexdigest()}"
                 )
-            if existing is None:
-                first_source[name] = path
-            origins.setdefault(name, []).append((slower_channel, path))
+            first_source.setdefault(version, path)
+            origins.setdefault(version, []).append(slower_channel)
+    if not first_source:
+        return {}
 
-    copied: dict[Path, list[tuple[str, str]]] = {}
-    for name, src in first_source.items():
-        dest = dest_dir / name
-        if dest.is_file():
-            if _files_byte_identical(dest, src):
-                continue
-            raise CatalogueAssemblyError(
-                f"{dest}: already publishes a different build of {name} — "
-                f"existing sha256={hashlib.sha256(dest.read_bytes()).hexdigest()}, "
-                f"incoming sha256={hashlib.sha256(src.read_bytes()).hexdigest()}"
-            )
-        shutil.copy2(src, dest)
-        destinations = [(slower, varver) for slower, _path in origins[name]]
-        destinations.append((channel, varver))
-        copied[src.resolve()] = destinations
-    return copied
+    newest = max(first_source, key=pfb_pkg.pkg_version_sort_key)
+    own_newest = max(
+        (version for _path, version in _iter_canonical_packages(dest_dir)),
+        key=pfb_pkg.pkg_version_sort_key,
+        default=None,
+    )
+    if own_newest is not None and pfb_pkg.pkg_version_sort_key(
+        newest
+    ) < pfb_pkg.pkg_version_sort_key(own_newest):
+        return {}
+
+    src = first_source[newest]
+    dest = dest_dir / _canonical_filename(newest)
+    if dest.is_file():
+        if _files_byte_identical(dest, src):
+            return {}
+        raise CatalogueAssemblyError(
+            f"{dest}: already publishes a different build of {dest.name} — "
+            f"existing sha256={hashlib.sha256(dest.read_bytes()).hexdigest()}, "
+            f"incoming sha256={hashlib.sha256(src.read_bytes()).hexdigest()}"
+        )
+    shutil.copy2(src, dest)
+    destinations = [(slower, varver) for slower in origins[newest]]
+    destinations.append((channel, varver))
+    return {src.resolve(): destinations}
 
 
 def prune_retained(
@@ -268,19 +268,14 @@ def prune_retained(
     varver: str,
 ) -> tuple[Path, ...]:
     """Delete every CANONICAL ``.pkg`` in ``site_root/channel/varver`` beyond the
-    newest ``DEFAULT_RETENTION_KEEP`` generations, newest-first by
-    ``pfb_pkg.pkg_version_sort_key`` — EXCEPT a generation ``_protected_versions``
-    reports as still retained by one of ``channel``'s slower channels for this same
-    ``varver`` (containment-aware retention). Returns the deleted paths.
+    newest generations kept, newest-first by ``pfb_pkg.pkg_version_sort_key``:
+    ``TAGGED_RETENTION_KEEP`` on stable/testing/edge, ``NIGHTLY_RETENTION_KEEP`` on
+    nightly. Returns the deleted paths.
 
-    Without the exception: edge receives the union of every tagged stream (edge
-    prereleases + testing prereleases + stable finals), so it rotates through its
-    fixed retention slots strictly faster than testing/stable and could silently
-    evict a canonical version one of them still serves — quietly breaking this
-    project's strict-containment contract (edge superset-of testing superset-of stable,
-    documented in ``gen_landing.py``'s trust section and
-    ``docs/misc/architecture-notes.md``). See ``_protected_versions`` for the
-    byte-identity assumption this relies on instead of re-verifying.
+    Only this catalogue's own files count. A slower channel serving an older build
+    does NOT keep it here: that would leave a stale second version, which pkg may
+    pick over the newest (#3390). A newer slower build becomes this catalogue's
+    newest through ``backfill_from_slower_channels``, which runs first.
 
     Scoped to the canonical package only (manifest ``name`` ==
     ``pfb_pkg.CANONICAL_EMITTED_IDENTITY``): a dependency ``.pkg`` sitting in the
@@ -292,28 +287,13 @@ def prune_retained(
     """
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver)
-    keep = DEFAULT_RETENTION_KEEP
-
-    brp = catalogue_engine
-    canonical: list[tuple[object, Path, str]] = []
-    for path in sorted(catalogue_dir.glob("*.pkg")):
-        if not path.is_file() or path.name in brp._CATALOG_PKG_FILES:
-            continue
-        manifest = pfb_pkg.read_compact_manifest(path)
-        if manifest.get("name") != pfb_pkg.CANONICAL_EMITTED_IDENTITY:
-            continue
-        version = _canonical_version(path, manifest)
-        canonical.append((pfb_pkg.pkg_version_sort_key(version), path, version))
-
-    canonical.sort(key=lambda item: item[0], reverse=True)
-    beyond_keep = canonical[keep:]
-    # Skip the slower-channel scan entirely when nothing would be evicted anyway.
-    protected = (
-        _protected_versions(site_root, channel, varver) if beyond_keep else frozenset()
+    keep = NIGHTLY_RETENTION_KEEP if channel == "nightly" else TAGGED_RETENTION_KEEP
+    canonical = sorted(
+        _iter_canonical_packages(catalogue_dir),
+        key=lambda item: pfb_pkg.pkg_version_sort_key(item[1]),
+        reverse=True,
     )
-    evicted = tuple(
-        path for _, path, version in beyond_keep if version not in protected
-    )
+    evicted = tuple(path for path, _version in canonical[keep:])
     for path in evicted:
         path.unlink()
     return evicted

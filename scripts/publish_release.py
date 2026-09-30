@@ -28,11 +28,18 @@ identity check (``_asset_map``/``publish``'s ``source_index``) — fan-out byte
 identity stays a canonical-package invariant only; a dep already differing at one
 destination but freshly placed at another is expected, not a divergence.
 
+One version per catalogue (pfBlockerNG/pfBlockerNG#3390): pkg installs the first
+candidate a repository lists, not the newest, so each stable/testing/edge catalogue
+keeps only the newest version eligible for it (its own or a slower channel's). A
+destination already holding a newer eligible build skips this run's older one, and a
+catalogue found holding more than one version is pruned to one even on an otherwise
+unchanged republish.
+
 No-op behaviour: a ``(channel, varver)`` target whose canonical asset is already
 present, byte-identical, at the destination (dependency assets are irrelevant to this
 check — see above) AND whose ``meta``/``meta.conf``/``data.pkg``/``packagesite.pkg``
 descriptor content exactly describes every on-disk payload package is left untouched
-entirely — no copy, no prune, no regenerate. There is no ledger; "already published"
+entirely — no copy, no regenerate. There is no ledger; "already published"
 is read straight off the files already on disk. An incomplete, unreadable, stale, or
 mismatched descriptor is regenerated even when the ``.pkg`` payload is unchanged. A
 CANONICAL file sharing an incoming asset's canonical name but carrying DIFFERENT
@@ -586,15 +593,29 @@ def publish(
     for varver in sorted(targets):
         target = targets[varver]
         asset_map = _asset_map(target)
+        incoming_key = pfb_pkg.pkg_version_sort_key(
+            str(target.canonical.manifest["version"])
+        )
         for channel in intake.destinations:
             dest_dir = site_root / channel / varver
-            # Eviction runs FIRST: a dependency is placed only when its name is
-            # missing, so an undeclared leftover under that same name has to go
-            # before the drop, or the run would skip the incoming dependency and
-            # then unlink the leftover — publishing a catalogue without the extra.
-            changed = _evict_undeclared_deps(dest_dir, row=target.row)
-            if _drop_assets(dest_dir, asset_map):
-                changed = True
+            # A destination already past this build keeps the newer one: dropping this
+            # older build would only be pruned again, and evicting against its
+            # dependency row would strip the dependencies the kept build needs.
+            eligible = ca.newest_eligible_version(site_root, channel, varver)
+            stale = eligible is not None and incoming_key < pfb_pkg.pkg_version_sort_key(
+                eligible
+            )
+            changed = False
+            if stale:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                # Eviction runs FIRST: a dependency is placed only when its name is
+                # missing, so an undeclared leftover under that same name has to go
+                # before the drop, or the run would skip the incoming dependency and
+                # then unlink the leftover — publishing a catalogue without the extra.
+                changed = _evict_undeclared_deps(dest_dir, row=target.row)
+                if _drop_assets(dest_dir, asset_map):
+                    changed = True
             if not changed and not _catalogue_descriptor_complete(
                 dest_dir, root=site_root
             ):
@@ -605,8 +626,8 @@ def publish(
                 and not _catalogue_carries_key(dest_dir, expected_public)
             ):
                 changed = True
-            # Heal historical holes before prune: copy every canonical version
-            # still on a slower tagged channel (never nightly) onto this dest.
+            # Heal holes before prune: copy the newest canonical version a slower
+            # tagged channel (never nightly) serves when this dest is behind it.
             copied = ca.backfill_from_slower_channels(site_root, channel, varver)
             if copied:
                 changed = True
@@ -618,11 +639,13 @@ def publish(
             # issue #2468: only the canonical asset feeds the fan-out identity index —
             # a place-if-missing dependency skipped at one destination but placed
             # fresh at another would otherwise falsely trip verify_multi_destination_identity.
-            source_index.setdefault(target.canonical.work_path.resolve(), []).append(
-                (channel, varver)
-            )
-            if changed:
-                ca.prune_retained(site_root, channel, varver)
+            # A skipped stale destination never received this build.
+            if not stale:
+                source_index.setdefault(
+                    target.canonical.work_path.resolve(), []
+                ).append((channel, varver))
+            evicted = ca.prune_retained(site_root, channel, varver)
+            if changed or evicted:
                 ca.regenerate_catalogue(site_root, channel, varver, sign_key=sign_key)
                 touched.append((channel, varver))
 

@@ -923,15 +923,15 @@ def _older_nightlies_details(rows: list[dict]) -> str:
 
 
 def older_releases(pkgs: list[dict]) -> list[dict]:
-    """The retained release-channel builds (every channel but nightly) OTHER than the
-    newest per channel.
+    """The release-channel builds (every channel but nightly) OTHER than the newest per
+    channel.
 
     The per-edition tables surface only the latest version of each channel (the
-    "install now" view); release retention (ADR-27, catalogue_assembly.DEFAULT_RETENTION_KEEP)
-    keeps several older releases in the catalog, surfaced here for diagnostics and
-    reproducibility. Nightly has its own retention/disclosure (older_nightlies) — its
-    dated versions aren't "releases". Sorted newest-first within each channel, then by
-    ABI. Empty when no older versions are retained.
+    "install now" view). Every tagged catalogue lists one version (#3390), so an older
+    row exists only where one varver still serves a build another varver has moved past.
+    Nightly has its own disclosure (older_nightlies) — its dated versions aren't
+    "releases". Sorted newest-first within each channel, then by ABI. Empty when every
+    varver of a channel serves the same version.
     """
     latest = latest_versions(pkgs)
     rows = [

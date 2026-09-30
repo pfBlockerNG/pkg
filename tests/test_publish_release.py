@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import catalogue_assembly as ca
 import catalogue_engine
 import catalogue_fixtures as tbrp
+import gen_landing as gl
 import pfb_pkg
 import publish_catalogues as pc
 import publish_release as pr
@@ -3382,68 +3383,35 @@ class OutcomeTests(_TempDirTestCase):
                 tag="v4.0.0.b1",
             )
 
-    def test_new_version_added_alongside_retained_older(self) -> None:
-        assets_dir_1 = self.new_assets_dir()
-        _populate_assets_dir(
-            assets_dir_1,
-            rows=(ROW_CE,),
-            source_tag="v4.0.0.b1",
-            include_dependency=False,
-        )
-        _run(
-            pkg_repo=self.pkg_repo,
-            assets_dir=assets_dir_1,
-            rows=(ROW_CE,),
-            tag="v4.0.0.b1",
-        )
-
-        assets_dir_2 = self.new_assets_dir()
-        _populate_assets_dir(
-            assets_dir_2,
-            rows=(ROW_CE,),
-            source_tag="v4.0.0.b2",
-            include_dependency=False,
-        )
-        second = _run(
-            pkg_repo=self.pkg_repo,
-            assets_dir=assets_dir_2,
-            rows=(ROW_CE,),
-            tag="v4.0.0.b2",
-        )
-
-        self.assertEqual(second.touched, (("edge", "ce-2.8"),))
-        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
-        self.assertTrue(
-            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg").is_file()
-        )
-        self.assertTrue(
-            (catalogue_dir / "pfSense-pkg-pfBlockerNG-4.0.0.b2.pkg").is_file()
-        )
-
-    def test_retention_evicts_oldest_beyond_keep(self) -> None:
-        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
-        for seq in range(1, ca_default_keep() + 2):
-            tag = f"v4.0.0.b{seq}"
+    def test_each_new_version_replaces_the_older_one(self) -> None:
+        # pfBlockerNG/pfBlockerNG#3390: a tagged catalogue lists ONE canonical version.
+        for tag in ("v4.0.0.b1", "v4.0.0.b2", "v4.0.0.b3"):
             assets_dir = self.new_assets_dir()
             _populate_assets_dir(
-                assets_dir, rows=(ROW_CE,), source_tag=tag, include_dependency=False
+                assets_dir,
+                rows=(ROW_CE,),
+                source_tag=tag,
+                include_dependency=False,
             )
-            _run(pkg_repo=self.pkg_repo, assets_dir=assets_dir, rows=(ROW_CE,), tag=tag)
+            report = _run(
+                pkg_repo=self.pkg_repo,
+                assets_dir=assets_dir,
+                rows=(ROW_CE,),
+                tag=tag,
+            )
+            self.assertEqual(report.touched, (("edge", "ce-2.8"),), tag)
 
-        remaining = sorted(
-            p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg")
-        )
-        self.assertEqual(len(remaining), ca_default_keep())
-        self.assertNotIn("pfSense-pkg-pfBlockerNG-4.0.0.b1.pkg", remaining)
-        self.assertIn(
-            f"pfSense-pkg-pfBlockerNG-4.0.0.b{ca_default_keep() + 1}.pkg", remaining
+        catalogue_dir = self.pkg_repo / "docs" / "edge" / "ce-2.8"
+        self.assertEqual(
+            sorted(p.name for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg")),
+            ["pfSense-pkg-pfBlockerNG-4.0.0.b3.pkg"],
         )
 
 
 # --------------------------------------------------------------------------- #
-# Containment backfill (issue #2398): a slower-channel generation omitted from
-# a faster catalogue must be copied byte-identically before prune. Nightly is
-# outside this reconciliation.
+# Containment (issue #2398, narrowed by #3390): a faster catalogue never keeps a
+# second, older version because a slower channel serves it. Nightly is outside
+# this reconciliation.
 # --------------------------------------------------------------------------- #
 
 
@@ -3460,22 +3428,14 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         dest.write_bytes(src.read_bytes())
         return dest
 
-    def test_edge_heals_testing_version_omitted_from_edge(self) -> None:
-        # Red canary: testing/ce-2.8 has 3.2.10, edge/ce-2.8 does not.
-        # A new testing publish (destinations testing+edge) must copy it.
-        seeded = self._seed_canonical(
+    def test_older_testing_version_is_not_copied_onto_edge(self) -> None:
+        # testing/ce-2.8 has 3.2.10, edge/ce-2.8 does not. A newer testing+edge
+        # publish used to copy 3.2.10 onto edge; a catalogue lists one version
+        # (#3390), so both list the new build alone.
+        self._seed_canonical(
             "testing",
             "ce-2.8",
             _record(channel="stable", row=ROW_CE, source_tag="v3.2.10"),
-        )
-        self.assertFalse(
-            (
-                self.pkg_repo
-                / "docs"
-                / "edge"
-                / "ce-2.8"
-                / "pfSense-pkg-pfBlockerNG-3.2.10.pkg"
-            ).exists()
         )
 
         assets_dir = self.new_assets_dir()
@@ -3498,24 +3458,16 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         self.assertEqual(
             set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
         )
-        edge_pkg = (
-            self.pkg_repo
-            / "docs"
-            / "edge"
-            / "ce-2.8"
-            / "pfSense-pkg-pfBlockerNG-3.2.10.pkg"
-        )
-        self.assertTrue(edge_pkg.is_file())
-        self.assertEqual(edge_pkg.read_bytes(), seeded.read_bytes())
-        self.assertTrue(
-            (
-                self.pkg_repo
-                / "docs"
-                / "edge"
-                / "ce-2.8"
-                / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg"
-            ).is_file()
-        )
+        for channel in ("testing", "edge"):
+            catalogue_dir = self.pkg_repo / "docs" / channel / "ce-2.8"
+            self.assertEqual(
+                sorted(
+                    p.name
+                    for p in catalogue_dir.glob("pfSense-pkg-pfBlockerNG-*.pkg")
+                ),
+                ["pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg"],
+                channel,
+            )
 
     def test_nightly_catalogue_not_healed_by_tagged_publish(self) -> None:
         # publish_release rejects nightly dests (kind!=tagged). This case pins
@@ -3523,7 +3475,7 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         # backfill(channel="nightly") is catalogue_assembly's pin
         # (test_nightly_destination_copies_nothing). Mixing nightly into
         # tagged dests is IntakeError (test below).
-        seeded = self._seed_canonical(
+        self._seed_canonical(
             "testing",
             "ce-2.8",
             _record(channel="stable", row=ROW_CE, source_tag="v3.2.10"),
@@ -3548,7 +3500,7 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
             tag="v3.2.16.a1",
         )
 
-        self.assertTrue(seeded.is_file())
+        self.assertEqual(list(nightly_dir.iterdir()), [])
         self.assertFalse((nightly_dir / "pfSense-pkg-pfBlockerNG-3.2.10.pkg").exists())
         self.assertFalse(
             (nightly_dir / "pfSense-pkg-pfBlockerNG-3.2.16.a1.pkg").exists()
@@ -3572,8 +3524,222 @@ class ContainmentBackfillPublishTests(_TempDirTestCase):
         self.assertIn("nightly must not be combined", str(ctx.exception))
 
 
-def ca_default_keep() -> int:
-    return ca.DEFAULT_RETENTION_KEEP
+class SingleVersionCataloguePublishTests(_TempDirTestCase):
+    """pfBlockerNG/pfBlockerNG#3390: pkg installs the FIRST candidate a repository
+    lists, so every tagged catalogue lists exactly one canonical version -- the
+    newest eligible for its channel (a stable build is eligible for stable, testing
+    and edge; a testing build for testing and edge; an edge build for edge)."""
+
+    _ALL = '["stable","testing","edge"]'
+    _CHANNELS = ("stable", "testing", "edge")
+
+    def _catalogue(self, channel: str) -> Path:
+        return self.pkg_repo / "docs" / channel / "ce-2.8"
+
+    def _publish(
+        self,
+        tag: str,
+        channel: str,
+        destinations: str,
+        *,
+        rows: Sequence[dict[str, object]] = (ROW_CE_NO_EXTRA,),
+        include_dependency: bool = False,
+    ) -> pr.PublishReport:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir,
+            channel=channel,
+            rows=rows,
+            source_tag=tag,
+            include_dependency=include_dependency,
+        )
+        return _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=rows,
+            channel=channel,
+            destinations=destinations,
+            tag=tag,
+        )
+
+    def _seed(self, channel: str, tag: str, tag_channel: str) -> Path:
+        """Drop one already-canonical .pkg (no descriptors) into the channel's catalogue."""
+        record = _record(channel=tag_channel, row=ROW_CE_NO_EXTRA, source_tag=tag)
+        name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{record['canonical_package_version']}.pkg"
+        scratch = self.tmp / f"seed-{next(self._assets_counter)}"
+        scratch.mkdir()
+        src, _digest = _wrap_canonical_pkg(scratch, record, local_name=name)
+        dest_dir = self._catalogue(channel)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / name
+        dest.write_bytes(src.read_bytes())
+        return dest
+
+    def _listed(self, channel: str) -> dict[str, list[str]]:
+        """Canonical versions in both descriptors (what pkg reads) and on disk."""
+        catalogue_dir = self._catalogue(channel)
+        name = pfb_pkg.CANONICAL_EMITTED_IDENTITY
+        return {
+            "packagesite": sorted(
+                str(row["version"])
+                for row in _packagesite_rows(catalogue_dir)
+                if row["name"] == name
+            ),
+            "data": sorted(
+                str(row["version"])
+                for row in _data_rows(catalogue_dir)
+                if row["name"] == name
+            ),
+            "files": sorted(
+                p.name.removeprefix(f"{name}-").removesuffix(".pkg")
+                for p in catalogue_dir.glob(f"{name}-*.pkg")
+            ),
+        }
+
+    def _assert_lists_only(self, channel: str, version: str) -> None:
+        self.assertEqual(
+            self._listed(channel),
+            {"packagesite": [version], "data": [version], "files": [version]},
+            channel,
+        )
+
+    def test_stable_then_testing_then_edge_publish_each_keep_one_version(self) -> None:
+        """Given an empty tree,
+        When stable 3.3.10 goes to stable+testing+edge,
+        Then every channel lists 3.3.10 only;
+        When testing 3.3.11.a1 then goes to testing+edge,
+        Then stable still lists 3.3.10 and testing+edge list 3.3.11.a1 only;
+        When edge 3.4.0.a1 then goes to edge,
+        Then only edge changes."""
+        self._publish("v3.3.10", "stable", self._ALL)
+        for channel in self._CHANNELS:
+            self._assert_lists_only(channel, "3.3.10")
+
+        report = self._publish("v3.3.11.a1", "testing", '["testing","edge"]')
+        self.assertEqual(
+            set(report.touched), {("testing", "ce-2.8"), ("edge", "ce-2.8")}
+        )
+        self._assert_lists_only("stable", "3.3.10")
+        self._assert_lists_only("testing", "3.3.11.a1")
+        self._assert_lists_only("edge", "3.3.11.a1")
+
+        stable_before = _tree_snapshot(self._catalogue("stable"))
+        testing_before = _tree_snapshot(self._catalogue("testing"))
+        report = self._publish("v3.4.0.a1", "edge", '["edge"]')
+        self.assertEqual(report.touched, (("edge", "ce-2.8"),))
+        self.assertEqual(_tree_snapshot(self._catalogue("stable")), stable_before)
+        self.assertEqual(_tree_snapshot(self._catalogue("testing")), testing_before)
+        self._assert_lists_only("edge", "3.4.0.a1")
+
+    def test_publish_heals_catalogues_that_still_carry_their_history(self) -> None:
+        """Given the live shape (3.3.3 ... 3.3.9 on every channel, 3.3.10.a1 on
+        testing and edge), when stable 3.3.10 is published, then every catalogue
+        lists 3.3.10 only and keeps the dependency 3.3.10 needs."""
+        for tag in ("v3.3.3", "v3.3.4", "v3.3.7", "v3.3.8", "v3.3.9"):
+            for channel in self._CHANNELS:
+                self._seed(channel, tag, "stable")
+        for channel in ("testing", "edge"):
+            self._seed(channel, "v3.3.10.a1", "testing")
+
+        report = self._publish(
+            "v3.3.10",
+            "stable",
+            self._ALL,
+            rows=(ROW_CE,),
+            include_dependency=True,
+        )
+
+        self.assertEqual(
+            set(report.touched), {(channel, "ce-2.8") for channel in self._CHANNELS}
+        )
+        for channel in self._CHANNELS:
+            self._assert_lists_only(channel, "3.3.10")
+            self.assertTrue((self._catalogue(channel) / _CHARSET_PKG).is_file(), channel)
+            self.assertIn(_CHARSET_NAME, _packagesite_names(self._catalogue(channel)))
+
+    def test_republishing_the_current_version_heals_a_multi_version_catalogue(
+        self,
+    ) -> None:
+        """Given testing lists 3.3.9 and 3.3.10.a1 in a complete catalogue,
+        When 3.3.10.a1 is republished unchanged,
+        Then testing is rewritten to list 3.3.10.a1 only."""
+        self._publish("v3.3.10.a1", "testing", '["testing"]')
+        self._seed("testing", "v3.3.9", "stable")
+        ca.regenerate_catalogue(self.pkg_repo / "docs", "testing", "ce-2.8")
+        self.assertEqual(self._listed("testing")["packagesite"], ["3.3.10.a1", "3.3.9"])
+
+        report = self._publish("v3.3.10.a1", "testing", '["testing"]')
+
+        self.assertEqual(report.touched, (("testing", "ce-2.8"),))
+        self._assert_lists_only("testing", "3.3.10.a1")
+
+    def test_build_older_than_the_catalogues_newest_leaves_it_alone(self) -> None:
+        """Given edge lists 3.4.0.a1 and the dependency its row declares,
+        When testing 3.3.11.a1 is published to testing+edge,
+        Then testing lists it, and edge is untouched: still 3.4.0.a1, dependency kept."""
+        self._publish(
+            "v3.4.0.a1", "edge", '["edge"]', rows=(ROW_CE,), include_dependency=True
+        )
+        edge_before = _tree_snapshot(self._catalogue("edge"))
+        self.assertTrue((self._catalogue("edge") / _CHARSET_PKG).is_file())
+
+        report = self._publish("v3.3.11.a1", "testing", '["testing","edge"]')
+
+        self.assertEqual(report.touched, (("testing", "ce-2.8"),))
+        self.assertEqual(_tree_snapshot(self._catalogue("edge")), edge_before)
+        self._assert_lists_only("edge", "3.4.0.a1")
+        self._assert_lists_only("testing", "3.3.11.a1")
+
+    def test_older_build_lifts_a_lagging_edge_to_the_newest_eligible_version(
+        self,
+    ) -> None:
+        """Given stable and testing serve 3.2.10 but edge still lists 3.2.8,
+        When the older testing build 3.2.9.b1 is published to testing+edge,
+        Then no catalogue lists 3.2.9.b1 and edge lists stable's 3.2.10, byte for byte."""
+        stable = self._seed("stable", "v3.2.10", "stable")
+        self._seed("testing", "v3.2.10", "stable")
+        self._seed("edge", "v3.2.8", "stable")
+
+        self._publish("v3.2.9.b1", "testing", '["testing","edge"]')
+
+        for channel in ("testing", "edge"):
+            self._assert_lists_only(channel, "3.2.10")
+        edge_pkg = self._catalogue("edge") / stable.name
+        self.assertEqual(edge_pkg.read_bytes(), stable.read_bytes())
+
+    def test_older_build_gives_a_missing_catalogue_the_newest_eligible_version(
+        self,
+    ) -> None:
+        """Given only stable serves 3.2.10 (no testing or edge catalogue),
+        When the older testing build 3.2.9.b1 is published to testing+edge,
+        Then both new catalogues list stable's 3.2.10, never 3.2.9.b1."""
+        self._seed("stable", "v3.2.10", "stable")
+
+        self._publish("v3.2.9.b1", "testing", '["testing","edge"]')
+
+        for channel in ("testing", "edge"):
+            self._assert_lists_only(channel, "3.2.10")
+
+    def test_landing_links_only_files_that_still_exist(self) -> None:
+        """Given stable 3.3.9 was published and then replaced by 3.3.10,
+        When the landing page is rendered from the tree,
+        Then it links the 3.3.10 package of each channel only, and every link resolves."""
+        self._publish("v3.3.9", "stable", self._ALL)
+        self._publish("v3.3.10", "stable", self._ALL)
+        docs = self.pkg_repo / "docs"
+
+        pkgs = gl.collect_packages(str(docs), pfb_pkg.read_compact_manifest)
+        links = re.findall(r'href="\./([^"]+\.pkg)"', gl._packages_html(pkgs, None))
+
+        self.assertEqual(
+            sorted(links),
+            sorted(
+                f"{channel}/ce-2.8/pfSense-pkg-pfBlockerNG-3.3.10.pkg"
+                for channel in self._CHANNELS
+            ),
+        )
+        for link in links:
+            self.assertTrue((docs / link).is_file(), link)
 
 
 # --------------------------------------------------------------------------- #
