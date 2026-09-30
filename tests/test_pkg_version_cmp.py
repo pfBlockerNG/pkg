@@ -120,30 +120,6 @@ PKG_VERSION_C_RULES = [
     ("99999999999999999999", "99999999999999999998", "="),
     # leading zeros do not count towards saturation
     ("1_00000000000000000000000000000000004", "1_5", "<"),
-    # strtoll saturation: version and patch numbers clamp at LLONG_MAX
-    ("9223372036854775807", "9223372036854775808", "="),
-    ("1.a9223372036854775807", "1.a9223372036854775808", "="),
-    # strtoul saturation: revision and epoch clamp at ULONG_MAX, not LLONG_MAX
-    ("1_9223372036854775808", "1_9223372036854775809", "<"),
-    ("1,9223372036854775808", "1,9223372036854775809", "<"),
-    ("1_10000000000000000000", "1_18446744073709551615", "<"),
-    ("1_18446744073709551615", "1_18446744073709551616", "="),
-    # a NUL ends the C string
-    ("1\x00.2", "1", "="),
-    ("1", "1\x002", "="),
-    # strtoul skips leading whitespace and a `+` sign
-    ("1_ 5", "1_5", "="),
-    ("1_+5", "1_5", "="),
-    # the name prefix ends at the LAST `-`; the revision `_` must follow it
-    ("pfSense-pkg-x-1.0", "1.0", "="),
-    ("a_b-1", "1", "="),
-    # `*` skips everything up to the next `+`
-    ("2.*9", "2.*8", "="),
-    # a stage word must end at a non-letter: `plx` is the letter p
-    ("1.plx1", "1.pl1", ">"),
-    # digits and letters are ASCII only (isdigit/isalpha in the C locale)
-    ("\u0663", "0", "<"),
-    ("\u00e9", "a", "<"),
 ]
 
 

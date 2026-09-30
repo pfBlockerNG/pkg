@@ -637,7 +637,7 @@ def _write_catalog_dir(
     # pkg keeps the LAST duplicate name on load: list the newest version last (issue #3386).
     ordered = sorted(
         items.items(),
-        key=lambda item: (item[0][0], pkg_version_sort_key(item[0][1])),
+        key=lambda item: (item[0][0], pkg_version_sort_key(item[0][1]), item[0][1]),
     )
 
     # Read every source up front (sources may live inside dest — see nightly retention).
