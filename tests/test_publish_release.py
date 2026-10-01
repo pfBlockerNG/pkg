@@ -3696,6 +3696,27 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         self._assert_lists_only("edge", "3.4.0.a1")
         self._assert_lists_only("testing", "3.3.11.a1")
 
+    def test_stable_build_older_than_edge_updates_stable_and_testing_only(self) -> None:
+        """Given stable and testing list 3.3.10 and edge lists 4.0.0.a1 with its dependency,
+        When stable 3.3.11 is published to stable+testing+edge,
+        Then stable and testing list 3.3.11, and edge is untouched: still 4.0.0.a1."""
+        self._publish("v3.3.10", "stable", self._ALL)
+        self._publish(
+            "v4.0.0.a1", "edge", '["edge"]', rows=(ROW_CE,), include_dependency=True
+        )
+        edge_before = _tree_snapshot(self._catalogue("edge"))
+        self.assertTrue((self._catalogue("edge") / _CHARSET_PKG).is_file())
+
+        report = self._publish("v3.3.11", "stable", self._ALL)
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        self.assertEqual(_tree_snapshot(self._catalogue("edge")), edge_before)
+        self._assert_lists_only("edge", "4.0.0.a1")
+        self._assert_lists_only("stable", "3.3.11")
+        self._assert_lists_only("testing", "3.3.11")
+
     def test_older_build_lifts_a_lagging_edge_to_the_newest_eligible_version(
         self,
     ) -> None:
