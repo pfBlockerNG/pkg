@@ -3890,6 +3890,32 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         self._assert_lists_only("edge", "3.4.0.a1")
         self._assert_lists_only("testing", "3.3.11.a1")
 
+    def test_stable_build_prunes_a_stale_version_from_a_newer_family_edge(
+        self,
+    ) -> None:
+        """Given stable and testing list 3.3.10, and edge lists 4.0.0.a1 (with its
+        dependency) next to a leftover 3.3.10,
+        When stable 3.3.11 is published to stable+testing+edge,
+        Then edge is rewritten to list 4.0.0.a1 only and keeps the dependency,
+        and stable and testing list 3.3.11."""
+        self._publish("v3.3.10", "stable", self._ALL)
+        self._publish(
+            "v4.0.0.a1", "edge", '["edge"]', rows=(ROW_CE,), include_dependency=True
+        )
+        self._seed("edge", "v3.3.10", "stable")
+        ca.regenerate_catalogue(self.pkg_repo / "docs", "edge", "ce-2.8")
+        self.assertEqual(self._listed("edge")["packagesite"], ["3.3.10", "4.0.0.a1"])
+
+        report = self._publish("v3.3.11", "stable", self._ALL)
+
+        self.assertEqual(
+            set(report.touched), {(channel, "ce-2.8") for channel in self._CHANNELS}
+        )
+        self._assert_lists_only("edge", "4.0.0.a1")
+        self._assert_carries_dependency("edge")
+        self._assert_lists_only("stable", "3.3.11")
+        self._assert_lists_only("testing", "3.3.11")
+
 
 # --------------------------------------------------------------------------- #
 # publish() must actually WIRE catalogue_assembly.verify_multi_destination_
