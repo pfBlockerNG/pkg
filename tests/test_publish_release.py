@@ -3712,6 +3712,7 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         self.assertEqual(
             set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
         )
+        self.assertEqual(report.skipped, (("edge", "ce-2.8", "3.3.11", "4.0.0.a1"),))
         self.assertEqual(_tree_snapshot(self._catalogue("edge")), edge_before)
         self._assert_lists_only("edge", "4.0.0.a1")
         self._assert_lists_only("stable", "3.3.11")
@@ -3911,6 +3912,7 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         self.assertEqual(
             set(report.touched), {(channel, "ce-2.8") for channel in self._CHANNELS}
         )
+        self.assertEqual(report.skipped, (("edge", "ce-2.8", "3.3.11", "4.0.0.a1"),))
         self._assert_lists_only("edge", "4.0.0.a1")
         self._assert_carries_dependency("edge")
         self._assert_lists_only("stable", "3.3.11")
