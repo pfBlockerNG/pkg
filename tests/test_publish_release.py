@@ -3897,12 +3897,17 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         """Given stable and testing list 3.3.10, and edge lists 4.0.0.a1 (with its
         dependency) next to a leftover 3.3.10,
         When stable 3.3.11 is published to stable+testing+edge,
-        Then edge is rewritten to list 4.0.0.a1 only and keeps the dependency,
+        Then edge is rewritten to list 4.0.0.a1 only, keeps the 4.0.0.a1 build and
+        its dependency byte for byte,
         and stable and testing list 3.3.11."""
         self._publish("v3.3.10", "stable", self._ALL)
         self._publish(
             "v4.0.0.a1", "edge", '["edge"]', rows=(ROW_CE,), include_dependency=True
         )
+        kept = {
+            name: (self._catalogue("edge") / name).read_bytes()
+            for name in ("pfSense-pkg-pfBlockerNG-4.0.0.a1.pkg", _CHARSET_PKG)
+        }
         self._seed("edge", "v3.3.10", "stable")
         ca.regenerate_catalogue(self.pkg_repo / "docs", "edge", "ce-2.8")
         self.assertEqual(self._listed("edge")["packagesite"], ["3.3.10", "4.0.0.a1"])
@@ -3915,6 +3920,8 @@ class SingleVersionCataloguePublishTests(_TempDirTestCase):
         self.assertEqual(report.skipped, (("edge", "ce-2.8", "3.3.11", "4.0.0.a1"),))
         self._assert_lists_only("edge", "4.0.0.a1")
         self._assert_carries_dependency("edge")
+        for name, data in kept.items():
+            self.assertEqual((self._catalogue("edge") / name).read_bytes(), data, name)
         self._assert_lists_only("stable", "3.3.11")
         self._assert_lists_only("testing", "3.3.11")
 
