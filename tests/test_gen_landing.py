@@ -1393,7 +1393,7 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
 
     for rendered in (page, listing, nested_listing):
         assert 'rel="stylesheet"' not in rendered  # every rule ships inline (self-contained)
-        assert "assets/img/favicon-32.png\" type=\"image/png\">" in rendered
+        assert "assets/img/favicon-32.png\" sizes=\"32x32\" type=\"image/png\">" in rendered
         assert '<a class="skip" href="#main-content">Skip to content</a>' in rendered
         assert '<header class="site-header">' in rendered
         assert '<a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home">' in rendered
@@ -1403,7 +1403,7 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
         assert '<footer class="foot">' in rendered
         assert ".cards{display:grid;gap:16px;grid-template-columns:1fr}" in rendered
         assert "--page:#1F1F1F" in rendered
-        assert "@media(max-width:900px){.site-header .nav-links{display:none}.mobile-nav{display:block}" in rendered
+        assert "@media(max-width:1080px){.site-header .nav-links{display:none}.mobile-nav{display:block}" in rendered
 
     assert '<section class="pkg-hero">' in page
     assert '<p class="eyebrow">Official package repository</p>' in page
@@ -3329,7 +3329,7 @@ def test_rendered_pages_use_the_main_site_header_and_footer(tmp_path: Path, monk
         assert 'assets/img/logo-lockup.webp" type="image/webp">' in text, page
         assert 'assets/img/logo-lockup.png" alt="pfBlockerNG"' in text, page
         assert '<a href="https://pfblockerng.com/guide/">Docs</a>' in text, page
-        assert '<a href="https://pfblockerng.com/guide/installation/">Install</a>' in text, page
+        assert '<a href="https://pfblockerng.com/#install">Install</a>' in text, page
         assert '<a href="https://pfblockerng.com/faq/">FAQ</a>' in text, page
         assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in text, page
         assert 'href="https://github.com/pfBlockerNG/pfBlockerNG">' in text, page
@@ -3357,3 +3357,56 @@ def test_rendered_pages_say_the_package_site_is_hosted_on_github(tmp_path: Path,
     hero = landing[landing.index('<section class="pkg-hero">'):landing.index("</section>")]
     assert "Hosted on GitHub Pages" in hero
     assert 'href="https://github.com/pfBlockerNG/pkg"' in hero
+
+
+MAIN_MENU = [
+    ("Features", "https://pfblockerng.com/#features"),
+    ("Install", "https://pfblockerng.com/#install"),
+    ("Docs", "https://pfblockerng.com/guide/"),
+    ("FAQ", "https://pfblockerng.com/faq/"),
+    ("Packages", "https://pkg.pfblockerng.com/"),
+    ("News", "https://pfblockerng.com/#news"),
+    ("Open source", "https://pfblockerng.com/#github"),
+    ("Team", "https://pfblockerng.com/#team"),
+    ("Community", "https://pfblockerng.com/#community"),
+    ("GitHub", "https://github.com/pfBlockerNG/pfBlockerNG"),
+]
+
+
+def test_pkg_menu_matches_the_main_site_menu_and_hero_links_back(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: same menu as pfblockerng.com (absolute links back to it, Packages
+    marked current) on every page, desktop and mobile; landing hero has buttons to the main site."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        for nav_open in ('<nav class="nav-links" aria-label="Primary">', '<nav aria-label="Mobile">'):
+            nav = text[text.index(nav_open):]
+            nav = nav[:nav.index("</nav>")]
+            got = re.findall(r'<a[^>]* href="([^"]+)"[^>]*>([^<]+)</a>', nav)
+            assert [(label, href) for href, label in got] == MAIN_MENU, (page, nav_open, got)
+            assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in nav, page
+    landing = (site / "index.html").read_text()
+    hero = landing[landing.index('<section class="pkg-hero">'):]
+    hero = hero[:hero.index("</section>")]
+    assert re.search(r'<a class="btn btn-red" href="https://pfblockerng\.com/guide/installation/">[^<]*Installation guide', hero)
+    assert re.search(r'<a class="btn btn-line" href="https://pfblockerng\.com/">[^<]*pfblockerng\.com', hero)
+
+
+def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: the pkg site needs a favicon — the same set as pfblockerng.com
+    (SVG + 32px PNG + apple-touch icon) on every page, plus /favicon.ico at the site root
+    for clients that ask for it without reading the page."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        head = text[:text.index("</head>")]
+        root = "./" if page.parent == site else "../" * len(page.parent.relative_to(site).parts)
+        assert f'<link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">' in head, page
+        assert f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">' in head, page
+        assert f'<link rel="apple-touch-icon" href="{root}assets/img/apple-touch-icon.png">' in head, page
+    for rel in ("assets/img/favicon.svg", "assets/img/favicon-32.png", "assets/img/apple-touch-icon.png", "favicon.ico"):
+        assert (site / rel).read_bytes() == (_PKG_SITE_DIR / rel).read_bytes(), rel
+    ico = (site / "favicon.ico").read_bytes()
+    assert ico[:4] == b"\x00\x00\x01\x00" and ico[22:30] == b"\x89PNG\r\n\x1a\n"  # ICO wrapping a PNG image
+    svg = (site / "assets/img/favicon.svg").read_text()
+    assert "<svg" in svg[:200] and 'xmlns="http://www.w3.org/2000/svg"' in svg

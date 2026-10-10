@@ -414,7 +414,12 @@ code{font-size:.86em;padding:1px 6px;border-radius:5px;background:var(--soft);co
 .brand{display:flex;align-items:center;min-height:44px}
 .logo{display:block;width:auto;height:46px;border-radius:8px}
 .nav-links{display:flex;align-items:center;gap:28px;font-size:15px;font-weight:500;white-space:nowrap}
+.nav-links a{display:inline-flex;align-items:center;min-height:44px}
 .nav-links a[aria-current="page"]{color:var(--tint)}
+.hero-acts{display:flex;flex-wrap:wrap;gap:14px;margin:28px 0 0}
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:48px;padding:14px 22px;border-radius:10px;font-weight:600}
+.btn-red{background:#8B181A;color:#fff}.btn-red:hover{background:#A61E21;color:#fff}
+.btn-line{border:1px solid var(--line2)}.btn-line:hover{border-color:#4A2226;color:#fff}
 .nav-links a:hover{color:#FF6B6F}
 .btn-outline{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border:1px solid var(--line2);
   border-radius:8px;font-weight:600}
@@ -494,7 +499,8 @@ table.autoindex td a{display:inline-flex;align-items:center;min-height:28px}
 .foot-legal{flex-basis:100%;display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;padding-top:24px;
   border-top:1px solid var(--soft);font-size:13px}
 .foot-legal a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
-@media(max-width:900px){.site-header .nav-links{display:none}.mobile-nav{display:block}.logo{height:40px}}
+@media(min-width:901px) and (max-width:1240px){.nav-links{gap:clamp(12px,1.6vw,22px);font-size:14px}}
+@media(max-width:1080px){.site-header .nav-links{display:none}.mobile-nav{display:block}.logo{height:40px}}
 @media(max-width:640px){.wrap,.pkg-shell{padding-left:20px;padding-right:20px}.pkg-hero{padding:48px 0 36px}
   .pkg-section{padding-top:48px}.snip>pre{padding-right:16px;padding-top:46px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -506,10 +512,16 @@ _GITHUB_URL = "https://github.com/pfBlockerNG/pfBlockerNG"
 def _nav_links(*, desktop: bool) -> str:
     github_cls = ' class="btn-outline"' if desktop else ""
     return (
+        # Same menu as pfblockerng.com (pages.py site_header), absolute links back to it; Packages is this site.
+        f'<a href="{MAIN_SITE_URL}/#features">Features</a>'
+        f'<a href="{MAIN_SITE_URL}/#install">Install</a>'
         f'<a href="{MAIN_SITE_URL}/guide/">Docs</a>'
-        f'<a href="{MAIN_SITE_URL}/guide/installation/">Install</a>'
         f'<a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
         f'<a href="{PKG_SITE_URL}/" aria-current="page">Packages</a>'
+        f'<a href="{MAIN_SITE_URL}/#news">News</a>'
+        f'<a href="{MAIN_SITE_URL}/#github">Open source</a>'
+        f'<a href="{MAIN_SITE_URL}/#team">Team</a>'
+        f'<a href="{MAIN_SITE_URL}/#community">Community</a>'
         f'<a{github_cls} href="{_GITHUB_URL}">GitHub</a>'
     )
 
@@ -555,7 +567,9 @@ def _head(title: str, root: str) -> str:
     return (
         '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="color-scheme" content="dark"><meta name="theme-color" content="#1F1F1F">'
-        f'<title>{_esc(title)}</title><link rel="icon" href="{root}assets/img/favicon-32.png" type="image/png">'
+        f'<title>{_esc(title)}</title><link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">'
+        f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">'
+        f'<link rel="apple-touch-icon" href="{root}assets/img/apple-touch-icon.png">'
         f"<style>{_FONT_FACES.format(root=root)}{_CSS}</style></head>"
     )
 
@@ -1221,7 +1235,9 @@ def render_page(
         "on your firewall as <code>root</code>.</p>"
         '<p class="hero-lede">Hosted on GitHub Pages from the public '
         '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository, so every '
-        "published file is in the open.</p></section>"
+        "published file is in the open.</p>"
+        f'<p class="hero-acts"><a class="btn btn-red" href="{MAIN_SITE_URL}/guide/installation/">Installation guide &rarr;</a>'
+        f'<a class="btn btn-line" href="{MAIN_SITE_URL}/">Back to pfblockerng.com</a></p></section>'
         f'<section class="pkg-section"><h2>Channels</h2><div class="cards">{cards}</div></section>'
         f'<section class="pkg-section"><h2>Published packages</h2>{_packages_html(pkgs, matrix)}</section>'
         f"{eol_section}"
