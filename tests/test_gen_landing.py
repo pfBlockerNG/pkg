@@ -17,6 +17,7 @@ import inspect
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import tarfile
@@ -1391,18 +1392,18 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
     nested_listing = gl._render_catalogue_browse_page(str(docs), "stable")
 
     for rendered in (page, listing, nested_listing):
-        assert '<link rel="stylesheet" href="https://pfblockerng.com/assets/site.css">' in rendered
-        assert '<link rel="icon" href="https://pfblockerng.com/assets/logo.svg" type="image/svg+xml">' in rendered
-        assert '<a class="skip-link" href="#main-content">Skip to content</a>' in rendered
+        assert 'rel="stylesheet"' not in rendered  # every rule ships inline (self-contained)
+        assert "assets/img/favicon-32.png\" type=\"image/png\">" in rendered
+        assert '<a class="skip" href="#main-content">Skip to content</a>' in rendered
         assert '<header class="site-header">' in rendered
         assert '<a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home">' in rendered
-        assert '<nav class="header-nav" aria-label="Primary">' in rendered
+        assert '<nav class="nav-links" aria-label="Primary">' in rendered
         assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in rendered
         assert '<main id="main-content" class="pkg-shell">' in rendered
-        assert '<footer class="site-footer">' in rendered
-        assert ".cards{display:grid;gap:1rem;grid-template-columns:1fr}" in rendered
-        assert "@media(max-width:820px){.pkg-shell{padding-bottom:4rem}}" in rendered
-        assert "@media(prefers-color-scheme:dark){.card{" in rendered
+        assert '<footer class="foot">' in rendered
+        assert ".cards{display:grid;gap:16px;grid-template-columns:1fr}" in rendered
+        assert "--page:#1F1F1F" in rendered
+        assert "@media(max-width:900px){.site-header .nav-links{display:none}.mobile-nav{display:block}" in rendered
 
     assert '<section class="pkg-hero">' in page
     assert '<p class="eyebrow">Official package repository</p>' in page
@@ -1415,9 +1416,9 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
     assert ".card.testing{--channel:var(--testing)}" in page
     assert ".card.edge{--channel:var(--edge)}" in page
     assert ".card.nightly{--channel:var(--nightly)}" in page
-    assert ".card h3{margin:0 0 .15rem;color:var(--ink)" in page
-    assert "border-color:var(--channel);color:var(--ink)" in page
-    assert ".warn{color:var(--ink);font-weight:700}" in page
+    assert "font-weight:800;font-size:1.5rem;color:var(--text)}" in page
+    assert ".badge{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--channel);" in page
+    assert ".warn{color:var(--text);font-weight:700}" in page
 
 
 def test_render_page_shows_latest_and_empty_stable() -> None:
@@ -1494,7 +1495,7 @@ def test_render_page_shows_latest_and_empty_stable() -> None:
     assert ".card.testing{--channel:var(--testing)}" in page
     assert ".card.edge{--channel:var(--edge)}" in page
     assert ".card.nightly{--channel:var(--nightly)}" in page
-    assert ".badge{display:inline-block" in page and "border-color:var(--channel);color:var(--ink)" in page
+    assert ".badge{display:inline-flex" in page and "border:1px solid var(--channel)" in page
     # The catalog-trees list is replaced by a SINGLE link to the folder-navigable browse page.
     assert '<a class="browse" href="./browse.html">' in page
     assert "Browse the repository" in page
@@ -3256,3 +3257,85 @@ def test_write_site_empty_tree_and_docs_renders_four_cards_no_crash(tmp_path: Pa
     assert n == 0
     index_html = (site / "index.html").read_text()
     assert index_html.count("not yet published") == 4
+
+
+# ── Self-contained pfblockerng.com look (local restyle) ───────────────────────
+# pfblockerng.com is moving off GitHub Pages, so the pkg pages may never load an
+# asset from it (or any other host): every stylesheet, font and image ships inside
+# the pkg site and is referenced relative to the page. Links back to the main site
+# stay absolute.
+
+_ASSET_REF_RE = re.compile(r'<(?:img|source|link|script)\b[^>]*?\b(?:src|srcset|href)="([^"]+)"')
+_CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
+
+
+def _restyle_site(tmp_path: Path, monkeypatch: Any) -> Path:
+    site = tmp_path / "site"
+    _touch(site / "stable" / "ce-2.8" / "FreeBSD:15:*" / f"{_CANON}-3.2.16.pkg")
+    manifest = {"name": _CANON, "version": "3.2.16", "abi": "FreeBSD:15:*"}
+    monkeypatch.setattr(gl, "read_compact_manifest", lambda p: manifest)
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
+    gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
+    return site
+
+
+def _rendered_pages(site: Path) -> list[Path]:
+    pages = sorted(p for p in site.rglob("*.html"))
+    assert site / "index.html" in pages
+    assert site / "browse.html" in pages
+    assert site / "browse" / "stable" / "ce-2.8" / "index.html" in pages
+    return pages
+
+
+def test_rendered_pages_load_every_asset_from_the_pkg_site_itself(tmp_path: Path, monkeypatch: Any) -> None:
+    """No rendered page loads anything from pfblockerng.com (or any other host):
+    every <img>/<source>/<link>/<script> asset and every CSS url() is a relative
+    path that resolves to a file the render itself wrote."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        assert "pfblockerng.com/assets" not in text, page
+        assert 'rel="stylesheet"' not in text, page
+        refs = _ASSET_REF_RE.findall(text) + _CSS_URL_RE.findall(text)
+        assert any(r.endswith(".woff2") for r in refs), page
+        assert any(r.endswith("logo-lockup.png") for r in refs), page
+        for ref in refs:
+            assert not ref.startswith(("http:", "https:", "//", "/", "data:")), (page, ref)
+            target = (page.parent / ref).resolve()
+            assert target.is_file(), (page, ref)
+            assert site.resolve() in target.parents, (page, ref)
+
+
+def test_shipped_binary_assets_are_copied_byte_identical(tmp_path: Path, monkeypatch: Any) -> None:
+    """The fonts and images under pkg-site/assets/ reach docs/assets/ unchanged."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    sources = sorted(p for p in (_PKG_SITE_DIR / "assets").rglob("*") if p.is_file())
+    suffixes = {p.suffix for p in sources}
+    assert {".woff2", ".png", ".webp"} <= suffixes
+    for src in sources:
+        rel = src.relative_to(_PKG_SITE_DIR)
+        assert (site / rel).read_bytes() == src.read_bytes(), rel
+
+
+def test_rendered_pages_use_the_main_site_header_and_footer(tmp_path: Path, monkeypatch: Any) -> None:
+    """Every page carries the pfblockerng.com header (lockup logo home link + the
+    Docs / Install / FAQ / Packages / GitHub nav) and the owner's footer lines."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    year = datetime.now(timezone.utc).year
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        assert '<header class="site-header">' in text, page
+        assert '<a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home">' in text, page
+        assert 'assets/img/logo-lockup.webp" type="image/webp">' in text, page
+        assert 'assets/img/logo-lockup.png" alt="pfBlockerNG"' in text, page
+        assert '<a href="https://pfblockerng.com/guide/">Docs</a>' in text, page
+        assert '<a href="https://pfblockerng.com/guide/installation/">Install</a>' in text, page
+        assert '<a href="https://pfblockerng.com/faq/">FAQ</a>' in text, page
+        assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in text, page
+        assert 'href="https://github.com/pfBlockerNG/pfBlockerNG">' in text, page
+        assert "/guide/introduction/" not in text, page
+        assert '<footer class="foot">' in text, page
+        assert f"© {year} pfBlockerNG. All rights reserved." in text, page
+        assert "pfSense is a trademark of its owner." in text, page
+        assert "Netgate" not in text, page
+        assert '<main id="main-content" class="pkg-shell">' in text, page

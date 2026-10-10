@@ -371,98 +371,190 @@ def _esc(s: object) -> str:
     return html.escape(str(s))
 
 
+# The pfblockerng.com look, SELF-CONTAINED: pfblockerng.com is moving off GitHub
+# Pages, so these pages load no asset from it (or from any other host — they are
+# served over plain HTTP for pkg(8)). Fonts and images ship in pkg-site/assets/ and
+# are referenced relative to the page (``root`` = the page's climb to the docs root),
+# so a fork or a path-prefixed Pages site resolves them too. Tokens mirror the main
+# site's site.css; links back to the main site stay absolute.
+_FONT_FACES = (
+    "@font-face{{font-family:'Archivo';font-style:normal;font-weight:700 800;font-stretch:100% 125%;"
+    "font-display:swap;src:url({root}assets/fonts/archivo.woff2) format('woff2')}}\n"
+    "@font-face{{font-family:'IBM Plex Sans';font-style:normal;font-weight:400 600;"
+    "font-display:swap;src:url({root}assets/fonts/ibm-plex-sans.woff2) format('woff2')}}\n"
+    "@font-face{{font-family:'JetBrains Mono';font-style:normal;font-weight:400 500;"
+    "font-display:swap;src:url({root}assets/fonts/jetbrains-mono.woff2) format('woff2')}}\n"
+)
+
 _CSS = """
-:root{--stable:#2f81f7;--testing:#d29922;--edge:#a371f7;--nightly:#f85149}
-.header-nav a[aria-current="page"]{color:var(--accent)}
-.pkg-shell{max-width:1200px;margin:0 auto;padding:0 clamp(1rem,4vw,3rem) 6rem}
-.pkg-hero{padding:clamp(3.5rem,8vw,6.5rem) 0 clamp(2.5rem,5vw,4rem);border-bottom:1px solid var(--line)}
-.pkg-hero h1{max-width:900px;margin:0;font-size:clamp(2.8rem,7vw,6rem);font-weight:690;
-  letter-spacing:-.055em;line-height:1}
-.pkg-hero .hero-lede{max-width:720px;margin:1.35rem 0 0;color:var(--muted);font-size:clamp(1.05rem,1.5vw,1.25rem)}
-.pkg-section{padding-top:clamp(2.8rem,6vw,5rem)}
-.pkg-section>h2{margin:0 0 1.6rem;font-size:clamp(1.9rem,4vw,3.2rem);letter-spacing:-.04em;line-height:1.05}
-.pkg-section h3{margin:2rem 0 .6rem;font-size:1.25rem}
-.pkg-section h4{margin:1.4rem 0 .45rem;color:var(--muted);font-size:.82rem;letter-spacing:.1em;text-transform:uppercase}
-.cards{display:grid;gap:1rem;grid-template-columns:1fr}
-.card{--channel:var(--line);min-width:0;padding:clamp(1.25rem,3vw,2rem);border:1px solid var(--line);
-  border-top:4px solid var(--channel);border-radius:var(--radius);background:var(--bg-elevated);
-  box-shadow:0 1px 0 rgb(255 255 255 / 70%) inset}
-.card h3{margin:0 0 .15rem;color:var(--ink);font-size:1.4rem;letter-spacing:-.025em}
-.card .ver{margin:0 0 .75rem;color:var(--muted);font-size:.9rem}
-.card .blurb,.blurb{color:var(--muted);font-size:.94rem}
-.card .blurb{margin:.2rem 0 .9rem}
-pre{border:1px solid var(--line);font-size:13px;line-height:1.5}
-table{width:100%;border-collapse:collapse;font-size:.92rem}
-.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-th,td{text-align:left;padding:.65rem .75rem;border-bottom:1px solid var(--line);white-space:nowrap}
-th{background:var(--bg-elevated);color:var(--muted);font-weight:720}
-td.num{color:var(--muted);font-variant-numeric:tabular-nums}
-.badge{display:inline-block;font-size:.72rem;padding:.05rem .45rem;border-radius:20px;
-  border:1px solid;border-color:var(--channel);color:var(--ink)}
-details summary{margin-top:.6rem;color:var(--muted);font-size:.87rem;cursor:pointer}
-a.browse{display:inline-flex;align-items:center;min-height:46px;padding:.65rem 1rem;border:1px solid var(--ink);
-  border-radius:999px;font-weight:740;text-decoration:none}
-a.browse:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
-table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
-table.autoindex td.num{white-space:nowrap}
-.entry-icon{display:inline-block;width:1.5em;margin-right:.25em;text-align:center}
-.listing-page .pkg-shell{min-height:calc(100vh - 68px)}
-.listing-hero{padding-bottom:2rem}
-.listing-hero h1{font-size:clamp(2.4rem,6vw,4.8rem)}
-.listing-hero p,.listing-note{color:var(--muted)}
-.listing-note{margin-top:2rem;font-size:.88rem}
-.empty{color:var(--muted);font-style:italic}
+:root{--red:#8B181A;--red-hi:#A51D20;--accent:#E5484D;--tint:#FF8A8D;--tint2:#FFB4B6;--charcoal:#2B2B2B;
+  --page:#1F1F1F;--panel:#232323;--text:#F2F2F2;--muted:#BDBDBD;--dim:#9A9A9A;--line:#3A3A3A;--line2:#4A4A4A;
+  --soft:#333333;--ok:#7FD4A8;--amber:#F5A524;--radius:14px;
+  --h:'Archivo',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --b:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --m:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --stable:#2f81f7;--testing:#d29922;--edge:#a371f7;--nightly:#f85149}
+*{box-sizing:border-box}
+html{color-scheme:dark;scroll-padding-top:88px}
+body{margin:0;background:var(--page);color:var(--text);font-family:var(--b);font-size:16px;line-height:1.6;
+  -webkit-text-size-adjust:100%}
+a{color:var(--text);text-decoration:none}
+main a{color:var(--tint)}
+main a:hover{color:var(--tint2)}
+img{max-width:100%;height:auto}
+:focus-visible{outline:2px solid var(--tint);outline-offset:2px}
+code,pre{font-family:var(--m)}
+code{font-size:.86em;padding:1px 6px;border-radius:5px;background:var(--soft);color:var(--tint);overflow-wrap:anywhere}
+.skip{position:absolute;left:-9999px;top:8px;z-index:100;padding:10px 16px;background:var(--red);color:#fff;border-radius:8px}
+.skip:focus{left:16px}
+.wrap{max-width:1200px;margin:0 auto;padding-left:32px;padding-right:32px}
+.site-header{position:sticky;top:0;z-index:50;border-bottom:1px solid var(--line);background:rgba(31,31,31,.92);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.site-header>.wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-top:12px;padding-bottom:12px}
+.brand{display:flex;align-items:center;min-height:44px}
+.logo{display:block;width:auto;height:46px;border-radius:8px}
+.nav-links{display:flex;align-items:center;gap:28px;font-size:15px;font-weight:500;white-space:nowrap}
+.nav-links a[aria-current="page"]{color:var(--tint)}
+.nav-links a:hover{color:#FF6B6F}
+.btn-outline{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border:1px solid var(--line2);
+  border-radius:8px;font-weight:600}
+.mobile-nav{display:none}
+.mobile-nav summary{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border:1px solid var(--line2);
+  border-radius:8px;font-weight:600;list-style:none;cursor:pointer}
+.mobile-nav summary::-webkit-details-marker{display:none}
+.mobile-nav nav{position:absolute;left:0;right:0;top:100%;display:flex;flex-direction:column;padding:4px 20px 12px;
+  border-bottom:1px solid var(--line);background:var(--page)}
+.mobile-nav nav a{display:flex;align-items:center;min-height:44px;font-weight:500}
+.mobile-nav nav a[aria-current="page"]{color:var(--tint)}
+.pkg-shell{max-width:1200px;margin:0 auto;padding:0 32px 96px}
+.pkg-hero{padding:72px 0 48px;border-bottom:1px solid var(--soft)}
+.eyebrow{margin:0;font-family:var(--m);font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--tint)}
+.pkg-hero h1{max-width:900px;margin:12px 0 0;font-family:var(--h);font-stretch:110%;font-weight:800;
+  font-size:clamp(2.4rem,6vw,4.25rem);line-height:1.05;letter-spacing:-.02em}
+.hero-lede{max-width:680px;margin:16px 0 0;color:var(--muted);font-size:clamp(1.02rem,1.5vw,1.2rem)}
+.pkg-section{padding-top:64px}
+.pkg-section>h2{margin:0 0 24px;font-family:var(--h);font-stretch:110%;font-weight:800;
+  font-size:clamp(1.75rem,3.5vw,2.5rem);line-height:1.1;letter-spacing:-.02em}
+.pkg-section h3{margin:32px 0 10px;font-family:var(--h);font-weight:700;font-size:1.3rem}
+.pkg-section h4{margin:22px 0 8px;font-family:var(--m);font-size:12.5px;font-weight:500;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted)}
+.cards{display:grid;gap:16px;grid-template-columns:1fr}
+.card{--channel:var(--line2);min-width:0;padding:clamp(20px,3vw,28px);border:1px solid var(--line);
+  border-top:3px solid var(--channel);border-radius:var(--radius);background:var(--charcoal)}
 .card.stable{--channel:var(--stable)}
 .card.testing{--channel:var(--testing)}
 .card.edge{--channel:var(--edge)}
 .card.nightly{--channel:var(--nightly)}
-.warn{color:var(--ink);font-weight:700}
+.card h3{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0;font-family:var(--h);font-stretch:110%;
+  font-weight:800;font-size:1.5rem;color:var(--text)}
+.card .ver{margin:4px 0 12px;color:var(--muted);font-size:.92rem}
+.blurb{color:var(--muted);font-size:.95rem}
+.card .blurb{margin:.2rem 0 .9rem}
+.badge{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--channel);
+  border-radius:999px;background:rgba(229,72,77,.1);color:var(--tint2);font-family:var(--b);font-stretch:100%;
+  font-size:12px;font-weight:600}
+.warn{color:var(--text);font-weight:700}
 .snip{position:relative}
-.snip>pre{padding-right:3.6rem}
-.copy{position:absolute;top:.45rem;right:.45rem;z-index:1;
-  font:600 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  color:#d2ccc7;background:#201f23;border:1px solid #575159;border-radius:6px;
-  padding:.3rem .5rem;cursor:pointer}
-.copy:hover{color:white;border-color:white}
-.copy.copied{color:#56d364;border-color:#56d364}
-@media(max-width:820px){.pkg-shell{padding-bottom:4rem}}
-@media(prefers-color-scheme:dark){.card{background:rgb(27 26 30 / 72%);box-shadow:none}}
+.snip{margin-top:10px}
+.snip>pre{margin:0;padding:14px 84px 14px 16px;border:1px solid var(--line2);border-radius:10px;background:#151515;
+  color:#E8E8E8;font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.copy{position:absolute;top:8px;right:8px;z-index:1;min-height:30px;padding:0 12px;border:0;border-radius:7px;
+  background:var(--amber);color:var(--page);font:700 12px/1 var(--b);cursor:pointer}
+.copy:hover{background:#FFB547}
+.copy.copied{background:var(--ok)}
+details{margin-top:12px}
+summary{padding:6px 0;color:var(--muted);font-size:.92rem;font-weight:500;cursor:pointer}
+summary:hover{color:var(--text)}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:12px;border:1px solid var(--line);border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{padding:10px 14px;text-align:left;white-space:nowrap}
+th{background:var(--charcoal);color:var(--text);font-weight:600}
+td{border-top:1px solid var(--line)}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+td.num{color:var(--muted);font-variant-numeric:tabular-nums}
+.empty{color:var(--dim);font-style:italic}
+a.browse{display:inline-flex;align-items:center;gap:8px;min-height:48px;padding:12px 22px;border-radius:10px;
+  background:var(--red);color:#fff;font-weight:600}
+a.browse:hover{background:var(--red-hi);color:#fff}
+table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
+table.autoindex td a{display:inline-flex;align-items:center;min-height:28px}
+.entry-icon{display:inline-block;width:1.5em;margin-right:.25em;text-align:center}
+.listing-hero{padding-bottom:32px}
+.listing-hero h1{font-size:clamp(2rem,5vw,3.5rem);overflow-wrap:anywhere}
+.listing-hero p{margin:16px 0 0;color:var(--muted)}
+.listing-note{margin-top:24px;color:var(--dim);font-size:.88rem}
+.foot{margin-top:32px;border-top:1px solid var(--soft)}
+.foot .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:24px;padding-top:40px;padding-bottom:56px;
+  color:var(--dim);font-size:14px}
+.foot-brand{display:flex;align-items:center;gap:10px}
+.foot-brand img{border-radius:6px}
+.foot-links{display:flex;flex-wrap:wrap;gap:4px 24px}
+.foot-links a{display:inline-flex;align-items:center;min-height:32px;color:var(--muted)}
+.foot-links a:hover{color:#FF6B6F}
+.foot-legal{flex-basis:100%;display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;padding-top:24px;
+  border-top:1px solid var(--soft);font-size:13px}
+.foot-legal a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+@media(max-width:900px){.site-header .nav-links{display:none}.mobile-nav{display:block}.logo{height:40px}}
+@media(max-width:640px){.wrap,.pkg-shell{padding-left:20px;padding-right:20px}.pkg-hero{padding:48px 0 36px}
+  .pkg-section{padding-top:48px}.snip>pre{padding-right:16px;padding-top:46px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
-_SITE_HEADER = (
-    '<a class="skip-link" href="#main-content">Skip to content</a>'
-    '<header class="site-header">'
-    f'<a class="brand" href="{MAIN_SITE_URL}/" aria-label="pfBlockerNG home">'
-    f'<img src="{MAIN_SITE_URL}/assets/logo.svg" alt="" width="34" height="34"><span>pfBlockerNG</span></a>'
-    '<nav class="header-nav" aria-label="Primary">'
-    f'<a href="{MAIN_SITE_URL}/guide/introduction/">Documentation</a>'
-    f'<a href="{PKG_SITE_URL}/" aria-current="page">Packages</a>'
-    '<a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a>'
-    '<a href="https://github.com/pfBlockerNG">Organization</a></nav>'
-    '<details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary>'
-    f'<nav aria-label="Mobile"><a href="{MAIN_SITE_URL}/guide/introduction/">Documentation</a>'
-    f'<a href="{PKG_SITE_URL}/" aria-current="page">Packages</a>'
-    '<a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a>'
-    '<a href="https://github.com/pfBlockerNG">Organization</a></nav></details></header>'
-)
-
-_SITE_FOOTER = (
-    '<footer class="site-footer"><div><strong>pfBlockerNG</strong>'
-    '<span>IP and DNS blocking for pfSense</span></div><nav aria-label="Footer">'
-    '<a href="https://www.reddit.com/r/pfBlockerNG/">Community</a>'
-    '<a href="https://github.com/pfBlockerNG/pfBlockerNG">Repository</a>'
-    '<a href="https://github.com/pfBlockerNG/pfBlockerNG/releases">Releases</a>'
-    '<a href="https://github.com/pfBlockerNG/pfBlockerNG/blob/devel/LICENSE">Apache 2.0</a>'
-    "</nav></footer>"
-)
+_GITHUB_URL = "https://github.com/pfBlockerNG/pfBlockerNG"
 
 
-def _head(title: str) -> str:
+def _nav_links(*, desktop: bool) -> str:
+    github_cls = ' class="btn-outline"' if desktop else ""
+    return (
+        f'<a href="{MAIN_SITE_URL}/guide/">Docs</a>'
+        f'<a href="{MAIN_SITE_URL}/guide/installation/">Install</a>'
+        f'<a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
+        f'<a href="{PKG_SITE_URL}/" aria-current="page">Packages</a>'
+        f'<a{github_cls} href="{_GITHUB_URL}">GitHub</a>'
+    )
+
+
+def _site_header(root: str) -> str:
+    """The main site's header: lockup logo home link + primary nav (a no-JS
+    <details> menu below 900px). *root* is the page's relative climb to docs/."""
+    return (
+        '<a class="skip" href="#main-content">Skip to content</a>'
+        '<header class="site-header"><div class="wrap">'
+        f'<a class="brand" href="{MAIN_SITE_URL}/" aria-label="pfBlockerNG home">'
+        f'<picture><source srcset="{root}assets/img/logo-lockup.webp" type="image/webp">'
+        f'<img class="logo" src="{root}assets/img/logo-lockup.png" alt="pfBlockerNG" width="737" height="229"></picture></a>'
+        f'<nav class="nav-links" aria-label="Primary">{_nav_links(desktop=True)}</nav>'
+        '<details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary>'
+        f'<nav aria-label="Mobile">{_nav_links(desktop=False)}</nav></details>'
+        "</div></header>"
+    )
+
+
+def _site_footer(root: str) -> str:
+    """The main site's footer. The year is the render year: the one render after
+    New Year changes the page, every other re-render stays byte-identical."""
+    year = datetime.now(timezone.utc).year
+    return (
+        '<footer class="foot"><div class="wrap">'
+        f'<div class="foot-brand"><img src="{root}assets/img/mark-144.webp" alt="" width="28" height="28">'
+        "<span>pfBlockerNG · Free and open-source software for pfSense</span></div>"
+        '<nav class="foot-links" aria-label="Footer">'
+        f'<a href="{MAIN_SITE_URL}/guide/">Docs</a><a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
+        f'<a href="{_GITHUB_URL}">GitHub</a><a href="{_GITHUB_URL}/releases">Releases</a>'
+        '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a></nav>'
+        f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
+        '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
+        "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span></div>"
+        "</div></footer>"
+    )
+
+
+def _head(title: str, root: str) -> str:
     return (
         '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<meta name="color-scheme" content="light dark"><meta name="theme-color" content="#151518">'
-        f'<title>{_esc(title)}</title><link rel="icon" href="{MAIN_SITE_URL}/assets/logo.svg" type="image/svg+xml">'
-        f'<link rel="stylesheet" href="{MAIN_SITE_URL}/assets/site.css"><style>{_CSS}</style></head>'
+        '<meta name="color-scheme" content="dark"><meta name="theme-color" content="#1F1F1F">'
+        f'<title>{_esc(title)}</title><link rel="icon" href="{root}assets/img/favicon-32.png" type="image/png">'
+        f"<style>{_FONT_FACES.format(root=root)}{_CSS}</style></head>"
     )
 
 
@@ -1119,8 +1211,8 @@ def render_page(
         f'<section class="pkg-section">{eol_block}</section>' if eol_block else ""
     )
     return (
-        f'<!doctype html><html lang="en">{_head("pfBlockerNG — self-hosted pkg repository")}<body>'
-        f'{_SITE_HEADER}<main id="main-content" class="pkg-shell">'
+        f'<!doctype html><html lang="en">{_head("pfBlockerNG — self-hosted pkg repository", "./")}<body>'
+        f'{_site_header("./")}<main id="main-content" class="pkg-shell">'
         '<section class="pkg-hero"><p class="eyebrow">Official package repository</p>'
         '<h1>Install pfBlockerNG.</h1><p class="hero-lede">Self-hosted FreeBSD <code>pkg</code> '
         "repository for pfSense&nbsp;CE &amp; pfSense&nbsp;Plus. Pick a channel and run its command "
@@ -1132,7 +1224,7 @@ def render_page(
         '<p class="blurb">Browse every channel, version and ABI &mdash; and the raw pkg(8) catalogs your '
         "firewall fetches &mdash; in a directory-style listing.</p>"
         '<p><a class="browse" href="./browse.html">&#128193; Browse the repository &rarr;</a></p></section>'
-        f"</main>{_SITE_FOOTER}<script>{_LOCAL_TIME_JS}{_COPY_JS}</script></body></html>\n"
+        f"</main>{_site_footer('./')}<script>{_LOCAL_TIME_JS}{_COPY_JS}</script></body></html>\n"
     )
 
 
@@ -1147,8 +1239,8 @@ def _render_listing_html(title: str, home_href: str, rows: list[str]) -> str:
     Name | Last modified | Size table, used by both browse.html and every
     browse/<ch>/… page."""
     return (
-        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}")}<body class="listing-page">'
-        f'{_SITE_HEADER}<main id="main-content" class="pkg-shell">'
+        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}", home_href)}<body class="listing-page">'
+        f'{_site_header(home_href)}<main id="main-content" class="pkg-shell">'
         f'<section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p>'
         f'<h1>Index of {_esc(title)}</h1><p><a href="{_esc(home_href)}">'
         "&larr; pfBlockerNG repository home</a></p></section>"
@@ -1157,7 +1249,7 @@ def _render_listing_html(title: str, home_href: str, rows: list[str]) -> str:
         f"<tbody>{''.join(rows)}</tbody></table></div>"
         '<p class="listing-note">Directory listing of the self-hosted pfBlockerNG pkg repository. '
         "pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p>"
-        f"</section></main>{_SITE_FOOTER}<script>{_LOCAL_TIME_JS}</script></body></html>\n"
+        f"</section></main>{_site_footer(home_href)}<script>{_LOCAL_TIME_JS}</script></body></html>\n"
     )
 
 
