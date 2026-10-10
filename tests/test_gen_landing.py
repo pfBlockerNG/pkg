@@ -3339,3 +3339,21 @@ def test_rendered_pages_use_the_main_site_header_and_footer(tmp_path: Path, monk
         assert "pfSense is a trademark of its owner." in text, page
         assert "Netgate" not in text, page
         assert '<main id="main-content" class="pkg-shell">' in text, page
+
+
+def test_rendered_pages_say_the_package_site_is_hosted_on_github(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: be clear that pkg.pfblockerng.com is hosted on GitHub (GitHub Pages,
+    pfBlockerNG/pkg) — every page says so in the footer, the landing page also up front."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    hosted = (
+        'pkg.pfblockerng.com is hosted on GitHub Pages from the public '
+        '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository.'
+    )
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        foot = text[text.index('<footer class="foot">'):]
+        assert hosted in foot, page
+    landing = (site / "index.html").read_text()
+    hero = landing[landing.index('<section class="pkg-hero">'):landing.index("</section>")]
+    assert "Hosted on GitHub Pages" in hero
+    assert 'href="https://github.com/pfBlockerNG/pkg"' in hero

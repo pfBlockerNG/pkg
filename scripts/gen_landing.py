@@ -544,7 +544,9 @@ def _site_footer(root: str) -> str:
         '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a></nav>'
         f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
         '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
-        "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span></div>"
+        "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span>"
+        '<span>pkg.pfblockerng.com is hosted on GitHub Pages from the public '
+        '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository.</span></div>'
         "</div></footer>"
     )
 
@@ -1216,7 +1218,10 @@ def render_page(
         '<section class="pkg-hero"><p class="eyebrow">Official package repository</p>'
         '<h1>Install pfBlockerNG.</h1><p class="hero-lede">Self-hosted FreeBSD <code>pkg</code> '
         "repository for pfSense&nbsp;CE &amp; pfSense&nbsp;Plus. Pick a channel and run its command "
-        "on your firewall as <code>root</code>.</p></section>"
+        "on your firewall as <code>root</code>.</p>"
+        '<p class="hero-lede">Hosted on GitHub Pages from the public '
+        '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository, so every '
+        "published file is in the open.</p></section>"
         f'<section class="pkg-section"><h2>Channels</h2><div class="cards">{cards}</div></section>'
         f'<section class="pkg-section"><h2>Published packages</h2>{_packages_html(pkgs, matrix)}</section>'
         f"{eol_section}"
