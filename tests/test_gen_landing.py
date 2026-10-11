@@ -3265,7 +3265,7 @@ def test_write_site_empty_tree_and_docs_renders_four_cards_no_crash(tmp_path: Pa
 # the pkg site and is referenced relative to the page. Links back to the main site
 # stay absolute.
 
-_ASSET_REF_RE = re.compile(r'<(?:img|source|link|script)\b[^>]*?\b(?:src|srcset|href)="([^"]+)"')
+_ASSET_REF_RE = re.compile(r'<(?:img|source|link|script)\b(?![^>]*rel="canonical")[^>]*?\b(?:src|srcset|href)="([^"]+)"')
 _CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
 
 
@@ -3422,3 +3422,57 @@ def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: 
     assert ico[:4] == b"\x00\x00\x01\x00" and ico[22:30] == b"\x89PNG\r\n\x1a\n"  # ICO wrapping a PNG image
     svg = (site / "assets/img/favicon.svg").read_text()
     assert "<svg" in svg[:200] and 'xmlns="http://www.w3.org/2000/svg"' in svg
+
+
+# ── SEO: description, canonical, robots.txt ───────────────────────────────────
+
+
+def test_landing_has_description_and_http_canonical() -> None:
+    page = gl.render_page("https://pkg.pfblockerng.com", [], _stub_conf, _fixture_site_tree("x"))
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/">' in page
+    m = re.search(r'<meta name="description" content="([^"]+)">', page)
+    assert m, "landing page needs a meta description"
+    for word in ("FreeBSD", "pfSense CE and Plus", "Stable", "Testing", "Edge", "Nightly"):
+        assert word in m.group(1)
+    assert "https://pfblockerng.com" in page  # existing link to the main site is kept
+
+
+def test_browse_pages_have_self_canonical_and_description(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    _touch(docs / "stable" / "ce-2.8" / "meta.conf")
+    root = gl.render_browse_root(str(docs), {})
+    chan = gl._render_catalogue_browse_page(str(docs), "stable/ce-2.8")
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse.html">' in root
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse/stable/ce-2.8/">' in chan
+    for out in (root, chan):
+        assert '<meta name="description" content="' in out
+
+
+def _robots_allows(rules: list[tuple[str, str]], path: str) -> bool:
+    """Minimal robots matcher: longest matching pattern wins, '*' and '$' supported."""
+
+    def hit(pat: str) -> bool:
+        rx = re.escape(pat).replace(r"\*", ".*")
+        rx = rx[:-2] + "$" if rx.endswith(r"\$") else rx
+        return re.match(rx, path) is not None
+
+    best = max(((len(p), kind == "Allow") for kind, p in rules if p and hit(p)), default=(0, True))
+    return best[1]
+
+
+def test_robots_txt_ships_and_blocks_binaries_only() -> None:
+    gen = gl.build_site_tree(str(_PKG_SITE_DIR), "https://pkg.pfblockerng.com")
+    assert "robots.txt" in gen
+    text = gen["robots.txt"][0].decode()
+    assert "Sitemap: https://pfblockerng.com/sitemap.xml" in text
+    rules = [tuple(x.strip() for x in ln.split(":", 1)) for ln in text.splitlines() if ln.startswith(("Allow", "Disallow"))]
+    for ok in ("/", "/browse.html", "/browse/stable/ce-2.8/", "/install.sh", "/recipes/stable.sh"):
+        assert _robots_allows(rules, ok), ok
+    for bad in (
+        "/stable/ce-2.8/pfSense-pkg-pfBlockerNG-3.3.11.pkg",
+        "/stable/ce-2.8/packagesite.pkg",
+        "/stable/ce-2.8/data.pkg",
+        "/stable/ce-2.8/meta.conf",
+        "/stable/ce-2.8/meta",
+    ):
+        assert not _robots_allows(rules, bad), bad

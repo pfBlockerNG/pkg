@@ -563,9 +563,21 @@ def _site_footer(root: str) -> str:
     )
 
 
-def _head(title: str, root: str) -> str:
+# pkg is plain HTTP by design (the catalogue signature is the trust anchor), so the
+# canonical URLs stay http:// whatever base the renderer was given.
+CANONICAL_BASE = "http://pkg.pfblockerng.com"
+_LANDING_DESC = (
+    "Official self-hosted FreeBSD pkg repository for pfBlockerNG on pfSense CE and Plus, "
+    "with Stable, Testing, Edge and Nightly channels."
+)
+_LISTING_DESC = "Directory listing of the self-hosted pfBlockerNG pkg repository."
+
+
+def _head(title: str, root: str, desc: str, canonical_path: str) -> str:
     return (
         '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<meta name="description" content="{_esc(desc)}">'
+        f'<link rel="canonical" href="{CANONICAL_BASE}/{canonical_path}">'
         '<meta name="color-scheme" content="dark"><meta name="theme-color" content="#1F1F1F">'
         f'<title>{_esc(title)}</title><link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">'
         f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">'
@@ -1227,7 +1239,7 @@ def render_page(
         f'<section class="pkg-section">{eol_block}</section>' if eol_block else ""
     )
     return (
-        f'<!doctype html><html lang="en">{_head("pfBlockerNG — self-hosted pkg repository", "./")}<body>'
+        f'<!doctype html><html lang="en">{_head("pfBlockerNG — self-hosted pkg repository", "./", _LANDING_DESC, "")}<body>'
         f'{_site_header("./")}<main id="main-content" class="pkg-shell">'
         '<section class="pkg-hero"><p class="eyebrow">Official package repository</p>'
         '<h1>Install pfBlockerNG.</h1><p class="hero-lede">Self-hosted FreeBSD <code>pkg</code> '
@@ -1255,12 +1267,12 @@ def _epoch_cell(epoch: float | None) -> str:
     return _time_html(epoch) if epoch is not None else _or_dash("")
 
 
-def _render_listing_html(title: str, home_href: str, rows: list[str]) -> str:
+def _render_listing_html(title: str, home_href: str, rows: list[str], canonical_path: str) -> str:
     """The shared directory-listing page shell — the landing/browse chrome around a
     Name | Last modified | Size table, used by both browse.html and every
     browse/<ch>/… page."""
     return (
-        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}", home_href)}<body class="listing-page">'
+        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}", home_href, _LISTING_DESC, canonical_path)}<body class="listing-page">'
         f'{_site_header(home_href)}<main id="main-content" class="pkg-shell">'
         f'<section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p>'
         f'<h1>Index of {_esc(title)}</h1><p><a href="{_esc(home_href)}">'
@@ -1311,7 +1323,7 @@ def render_browse_root(docs: str, built: dict[str, tuple[bytes, int]]) -> str:
             f'<td class="num">{_epoch_cell(None)}</td>'
             f'<td class="num">{_esc(human_size(len(data)))}</td></tr>'
         )
-    return _render_listing_html("/", "./", rows)
+    return _render_listing_html("/", "./", rows, "browse.html")
 
 
 def _catalogue_subdirs(docs: str, channel: str) -> list[str]:
@@ -1365,7 +1377,7 @@ def _render_catalogue_browse_page(docs: str, full_rel: str) -> str:
             f'<td class="num">{_epoch_cell(_display_epoch(path))}</td>'
             f'<td class="num">{_esc(human_size(os.path.getsize(path)))}</td></tr>'
         )
-    return _render_listing_html(f"/{full_rel}", climb, rows)
+    return _render_listing_html(f"/{full_rel}", climb, rows, f"browse/{full_rel}/")
 
 
 # The exact hardcoded PFB_BASE_URL default line install.sh's repository copy
