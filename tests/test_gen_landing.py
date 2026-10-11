@@ -21,6 +21,7 @@ import re
 import stat
 import subprocess
 import tarfile
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -199,6 +200,7 @@ def test_timestamp_html_keeps_utc_instant_and_localizes_in_the_browser(tmp_path:
 
     runner = (
         'var t={dateTime:"2026-08-14T19:32:17Z",textContent:"UTC fallback"};'
+        "global.window={requestIdleCallback:function(){}};"
         "global.document={querySelectorAll:function(){return [t];}};"
         f"{gl._LOCAL_TIME_JS}"
         "process.stdout.write(t.textContent);"
@@ -3441,14 +3443,19 @@ def _two_publish_site(tmp_path: Path, monkeypatch: Any) -> Path:
 
 def test_footer_site_updated_is_the_newest_publish_time(tmp_path: Path, monkeypatch: Any) -> None:
     """Issue #3485: every page's footer shows ' · Site updated <time class="site-updated">' with
-    the newest package publish time in the tree, in the landing table's own format."""
+    the newest package publish time in the tree, in the main site's footer format."""
     site = _two_publish_site(tmp_path, monkeypatch)
     want = (
-        '· Site updated <time class="site-updated" datetime="2025-10-09T08:53:20Z">'
-        "2025-10-09 08:53 UTC</time></span>"
+        '· Site updated <time class="site-updated" datetime="2025-10-09T08:53:20+00:00">'
+        "9 Oct 2025, 08:53 UTC</time></span>"
     )
     for page in _rendered_pages(site):
-        assert want in page.read_text(), page
+        text = page.read_text()
+        assert want in text, page
+        # N2: the in-browser rewrite keeps a zone label, like the main site's site.js,
+        # and the table-time rewrite leaves the footer alone.
+        assert "time.site-updated" in text and "timeZoneName:'short'" in text, page
+        assert "time[datetime]:not(.site-updated)" in text, page
 
 
 def test_rerender_of_an_unchanged_tree_is_byte_identical(tmp_path: Path, monkeypatch: Any) -> None:
@@ -3457,6 +3464,9 @@ def test_rerender_of_an_unchanged_tree_is_byte_identical(tmp_path: Path, monkeyp
     site = _two_publish_site(tmp_path, monkeypatch)
     first = {p: p.read_bytes() for p in _rendered_pages(site)}
     assert all(b"Site updated" in b for b in first.values())
+    # A clock-derived footer must differ: move the clock a year on between the two renders.
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now + 366 * 86400)
     gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
     assert {p: p.read_bytes() for p in _rendered_pages(site)} == first
 

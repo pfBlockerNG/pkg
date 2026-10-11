@@ -543,8 +543,12 @@ def _site_footer(root: str, updated: float | None = None) -> str:
     New Year changes the page, every other re-render stays byte-identical.
     ``updated`` is the newest package publish epoch in the tree (issue #3485), never the
     render clock, so a re-render without a publish stays byte-identical."""
+    # Same text and datetime format as the main site's footer (site/dist), so both sites match.
     site_updated = (
-        " · Site updated " + _time_html(updated).replace("<time ", '<time class="site-updated" ', 1)
+        " · Site updated "
+        + f'<time class="site-updated" datetime="{datetime.fromtimestamp(updated, tz=timezone.utc).isoformat()}">'
+        + datetime.fromtimestamp(updated, tz=timezone.utc).strftime("%-d %b %Y, %H:%M UTC")
+        + "</time>"
         if updated is not None
         else ""
     )
@@ -617,10 +621,16 @@ _COPY_JS = (
 
 _LOCAL_TIME_JS = (
     "(function(){function p(n){return String(n).padStart(2,'0');}"
-    "document.querySelectorAll('time[datetime]').forEach(function(t){"
+    "document.querySelectorAll('time[datetime]:not(.site-updated)').forEach(function(t){"
     "var d=new Date(t.dateTime);if(Number.isNaN(d.getTime()))return;"
     "t.textContent=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());"
     "});})();"
+    # Footer: identical to the main site's site.js handler, zone label included.
+    "(window.requestIdleCallback||function(f){setTimeout(f,200);})(function(){"
+    "document.querySelectorAll('time.site-updated').forEach(function(t){"
+    "var d=new Date(t.getAttribute('datetime'));"
+    "if(!isNaN(d))t.textContent=d.toLocaleString(undefined,{year:'numeric',month:'short',day:'numeric',"
+    "hour:'2-digit',minute:'2-digit',timeZoneName:'short'});});});"
 )
 
 
@@ -1662,7 +1672,9 @@ def write_site(
         return _render_conf(base, channel)
 
     epochs = [r["published_epoch"] for r in pkgs if r.get("published_epoch") is not None]
-    updated = max(epochs, default=None)  # newest publish, not the clock (issue #3485)
+    # Newest package build/source epoch (the same value as the "Published" column), not the
+    # clock; it can precede the actual publish by a few hours (issue #3485).
+    updated = max(epochs, default=None)
     desired = dict(built)
     # A rendered page always wins over a same-named site-tree file (H4, issue #2450).
     desired["index.html"] = (
