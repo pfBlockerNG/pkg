@@ -548,17 +548,17 @@ def _site_footer(root: str) -> str:
         '<nav class="foot-links" aria-label="Footer">'
         # Same links, order and labels as pfblockerng.com (pages.py footer()); its relative links are absolute here.
         f'<a href="{MAIN_SITE_URL}/guide/">Docs</a><a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
-        f'<a href="{PKG_SITE_URL}/">Packages</a><a href="{SOURCE_REPO_URL}">GitHub</a>'
-        '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a>'
-        '<a href="https://www.patreon.com/pfBlockerNG">Patreon</a>'
-        '<a href="https://x.com/bbcan177">X @bbcan177</a><a href="https://x.com/andrebrait">X @andrebrait</a>'
+        f'<a href="{PKG_SITE_URL}/">Packages</a><a href="{SOURCE_REPO_URL}" target="_blank" rel="noopener">GitHub</a>'
+        '<a href="https://www.reddit.com/r/pfBlockerNG/" target="_blank" rel="noopener">Reddit</a>'
+        '<a href="https://www.patreon.com/pfBlockerNG" target="_blank" rel="noopener">Patreon</a>'
+        '<a href="https://x.com/bbcan177" target="_blank" rel="noopener">X @bbcan177</a><a href="https://x.com/andrebrait" target="_blank" rel="noopener">X @andrebrait</a>'
         f'<a href="{MAIN_SITE_URL}/beta/">v4 beta</a><a href="{MAIN_SITE_URL}/rss/">RSS</a>'
         '<a href="mailto:contact@pfblockerng.com">contact@pfblockerng.com</a></nav>'
         f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
-        '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
+        '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>, provided "as is", '
         "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span>"
         '<span>pkg.pfblockerng.com is hosted on GitHub Pages from the public '
-        '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository.</span></div>'
+        '<a href="https://github.com/pfBlockerNG/pkg" target="_blank" rel="noopener">pfBlockerNG/pkg</a> repository.</span></div>'
         "</div></footer>"
     )
 

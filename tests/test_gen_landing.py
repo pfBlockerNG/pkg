@@ -21,6 +21,7 @@ import re
 import stat
 import subprocess
 import tarfile
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -3363,7 +3364,7 @@ def test_rendered_pages_say_the_package_site_is_hosted_on_github(tmp_path: Path,
     site = _restyle_site(tmp_path, monkeypatch)
     hosted = (
         'pkg.pfblockerng.com is hosted on GitHub Pages from the public '
-        '<a href="https://github.com/pfBlockerNG/pkg">pfBlockerNG/pkg</a> repository.'
+        '<a href="https://github.com/pfBlockerNG/pkg" target="_blank" rel="noopener">pfBlockerNG/pkg</a> repository.'
     )
     for page in _rendered_pages(site):
         text = page.read_text()
@@ -3392,6 +3393,14 @@ MAIN_FOOTER_LINKS = [
 ]
 
 
+def _footer_new_tab_attrs(href: str) -> str:
+    """pfblockerng.com build.py new_tab rule: http(s) links off pfblockerng.com / pkg.pfblockerng.com
+    open in a new tab; on-site links and mailto stay same-tab."""
+    host = urllib.parse.urlsplit(href).hostname if href.startswith("http") else None
+    off = host is not None and host not in ("pfblockerng.com", "pkg.pfblockerng.com")
+    return ' target="_blank" rel="noopener"' if off else ""
+
+
 def test_rendered_footer_matches_the_main_site_footer(tmp_path: Path, monkeypatch: Any) -> None:
     """Owner 2026-10-11: same footer on both sites — same link labels in the same order,
     same brand and legal text lines (pkg adds only its GitHub Pages note)."""
@@ -3401,11 +3410,14 @@ def test_rendered_footer_matches_the_main_site_footer(tmp_path: Path, monkeypatc
         text = page.read_text()
         foot = text[text.index('<footer class="foot">'):]
         links = foot[foot.index('class="foot-links"'):foot.index('class="foot-legal"')]
-        assert re.findall(r'<a href="([^"]*)">([^<]*)</a>', links) == [(h, l) for l, h in MAIN_FOOTER_LINKS], page
+        found = re.findall(r'<a href="([^"]*)"([^>]*)>([^<]*)</a>', links)
+        assert [(h, l) for h, _, l in found] == [(h, l) for l, h in MAIN_FOOTER_LINKS], page
+        for href, attrs, label in found + re.findall(r'<a href="([^"]*)"([^>]*)>([^<]*)</a>', foot[foot.index('class="foot-legal"'):]):
+            assert attrs == _footer_new_tab_attrs(href), (page, label, attrs)
         assert "pfBlockerNG · Free and open-source software for pfSense" in foot, page
         assert f"© {year} pfBlockerNG. All rights reserved." in foot, page
         assert (
-            'Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
+            'Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>, provided "as is", '
             "without warranties or conditions of any kind. pfSense is a trademark of its owner."
         ) in foot, page
 
