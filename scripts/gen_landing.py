@@ -24,7 +24,8 @@
 # record's `source_date_epoch`, else an em dash — never a filesystem timestamp — so
 # a second render of the same inputs is byte-identical (a NOOP republish never
 # manufactures a commit) — except that the page footer carries the render year, so
-# the first render of each new year rewrites every page once.
+# the first render of each new year rewrites every page once. The footer's
+# `Site updated` time is the newest package Published epoch, so it moves only on a publish.
 #
 # Stdlib only + the `zstd` binary (to read a .pkg's +COMPACT_MANIFEST). Dev-only
 # tooling — not shipped in release archives (those contain only src/).
@@ -537,9 +538,16 @@ def _site_header(root: str) -> str:
     )
 
 
-def _site_footer(root: str) -> str:
+def _site_footer(root: str, updated: float | None = None) -> str:
     """The main site's footer. The year is the render year: the one render after
-    New Year changes the page, every other re-render stays byte-identical."""
+    New Year changes the page, every other re-render stays byte-identical.
+    ``updated`` is the newest package publish epoch in the tree (issue #3485), never the
+    render clock, so a re-render without a publish stays byte-identical."""
+    site_updated = (
+        " · Site updated " + _time_html(updated).replace("<time ", '<time class="site-updated" ', 1)
+        if updated is not None
+        else ""
+    )
     year = datetime.now(timezone.utc).year
     return (
         '<footer class="foot"><div class="wrap">'
@@ -554,7 +562,7 @@ def _site_footer(root: str) -> str:
         '<a href="https://x.com/bbcan177" target="_blank" rel="noopener">X @bbcan177</a><a href="https://x.com/andrebrait" target="_blank" rel="noopener">X @andrebrait</a>'
         f'<a href="{MAIN_SITE_URL}/beta/">v4 beta</a><a href="{MAIN_SITE_URL}/rss/">RSS</a>'
         '<a href="mailto:contact@pfblockerng.com">contact@pfblockerng.com</a></nav>'
-        f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
+        f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.{site_updated}</span>'
         '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>, provided "as is", '
         "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span>"
         '<span>pkg.pfblockerng.com is hosted on GitHub Pages from the public '
@@ -1229,6 +1237,7 @@ def render_page(
     conf_fn: Callable[[str], str],
     site_tree: dict[str, tuple[bytes, int]],
     matrix: list[dict] | None = None,
+    updated: float | None = None,
 ) -> str:
     """Render the root landing page. ``site_tree`` is the BUILT site tree (issue
     #2450) — the source of each published channel's recipe text."""
@@ -1257,7 +1266,7 @@ def render_page(
         '<p class="blurb">Browse every channel, version and ABI &mdash; and the raw pkg(8) catalogs your '
         "firewall fetches &mdash; in a directory-style listing.</p>"
         '<p><a class="browse" href="./browse.html">&#128193; Browse the repository &rarr;</a></p></section>'
-        f"</main>{_site_footer('./')}<script>{_LOCAL_TIME_JS}{_COPY_JS}</script></body></html>\n"
+        f"</main>{_site_footer('./', updated)}<script>{_LOCAL_TIME_JS}{_COPY_JS}</script></body></html>\n"
     )
 
 
@@ -1267,7 +1276,9 @@ def _epoch_cell(epoch: float | None) -> str:
     return _time_html(epoch) if epoch is not None else _or_dash("")
 
 
-def _render_listing_html(title: str, home_href: str, rows: list[str], canonical_path: str) -> str:
+def _render_listing_html(
+    title: str, home_href: str, rows: list[str], canonical_path: str, updated: float | None = None
+) -> str:
     """The shared directory-listing page shell — the landing/browse chrome around a
     Name | Last modified | Size table, used by both browse.html and every
     browse/<ch>/… page."""
@@ -1282,7 +1293,7 @@ def _render_listing_html(title: str, home_href: str, rows: list[str], canonical_
         f"<tbody>{''.join(rows)}</tbody></table></div>"
         f'<p class="listing-note">{_LISTING_DESC} '
         "pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p>"
-        f"</section></main>{_site_footer(home_href)}<script>{_LOCAL_TIME_JS}</script></body></html>\n"
+        f"</section></main>{_site_footer(home_href, updated)}<script>{_LOCAL_TIME_JS}</script></body></html>\n"
     )
 
 
@@ -1304,7 +1315,7 @@ def _root_files(built: dict[str, tuple[bytes, int]]) -> list[str]:
     return sorted(name for name in built if "/" not in name and name not in hidden)
 
 
-def render_browse_root(docs: str, built: dict[str, tuple[bytes, int]]) -> str:
+def render_browse_root(docs: str, built: dict[str, tuple[bytes, int]], updated: float | None = None) -> str:
     """docs/browse.html — the top-level entry point: one row per present catalogue
     channel (CH_ORDER order; ``staging`` is never listed, issue #2389) linking into
     its own browse/<ch>/ page, then every root-level site-tree file linking directly.
@@ -1323,7 +1334,7 @@ def render_browse_root(docs: str, built: dict[str, tuple[bytes, int]]) -> str:
             f'<td class="num">{_epoch_cell(None)}</td>'
             f'<td class="num">{_esc(human_size(len(data)))}</td></tr>'
         )
-    return _render_listing_html("/", "./", rows, "browse.html")
+    return _render_listing_html("/", "./", rows, "browse.html", updated)
 
 
 def _catalogue_subdirs(docs: str, channel: str) -> list[str]:
@@ -1338,7 +1349,7 @@ def _catalogue_subdirs(docs: str, channel: str) -> list[str]:
     return sorted(out)
 
 
-def _render_catalogue_browse_page(docs: str, full_rel: str) -> str:
+def _render_catalogue_browse_page(docs: str, full_rel: str, updated: float | None = None) -> str:
     """One ``browse/<full_rel>/index.html`` page — ``full_rel`` is ``"<channel>"``
     or ``"<channel>/<sub>/…"``, a real directory under docs/. Subdirs link within
     the browse mirror (``./<name>/``); files link OUT into the real catalogue tree
@@ -1377,7 +1388,7 @@ def _render_catalogue_browse_page(docs: str, full_rel: str) -> str:
             f'<td class="num">{_epoch_cell(_display_epoch(path))}</td>'
             f'<td class="num">{_esc(human_size(os.path.getsize(path)))}</td></tr>'
         )
-    return _render_listing_html(f"/{full_rel}", climb, rows, f"browse/{full_rel}/")
+    return _render_listing_html(f"/{full_rel}", climb, rows, f"browse/{full_rel}/", updated)
 
 
 # The exact hardcoded PFB_BASE_URL default line install.sh's repository copy
@@ -1650,18 +1661,20 @@ def write_site(
     def conf_fn(channel: str) -> str:
         return _render_conf(base, channel)
 
+    epochs = [r["published_epoch"] for r in pkgs if r.get("published_epoch") is not None]
+    updated = max(epochs, default=None)  # newest publish, not the clock (issue #3485)
     desired = dict(built)
     # A rendered page always wins over a same-named site-tree file (H4, issue #2450).
     desired["index.html"] = (
-        render_page(base, pkgs, conf_fn, built, matrix).encode(),
+        render_page(base, pkgs, conf_fn, built, matrix, updated).encode(),
         0o644,
     )
-    desired["browse.html"] = (render_browse_root(site, built).encode(), 0o644)
+    desired["browse.html"] = (render_browse_root(site, built, updated).encode(), 0o644)
     for ch in CH_ORDER:
         if not os.path.isdir(os.path.join(site, ch)):
             continue
         for full_rel in _catalogue_subdirs(site, ch):
-            page = _render_catalogue_browse_page(site, full_rel)
+            page = _render_catalogue_browse_page(site, full_rel, updated)
             desired[f"browse/{full_rel}/index.html"] = (page.encode(), 0o644)
 
     written, deleted = sync_site(site, desired)

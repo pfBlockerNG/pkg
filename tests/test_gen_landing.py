@@ -3422,6 +3422,45 @@ def test_rendered_footer_matches_the_main_site_footer(tmp_path: Path, monkeypatc
         ) in foot, page
 
 
+def _two_publish_site(tmp_path: Path, monkeypatch: Any) -> Path:
+    """A stable + a testing package whose manifests carry different `created` epochs."""
+    site = tmp_path / "site"
+    epochs = {"stable": 1_700_000_000, "testing": 1_760_000_000}  # newest: 2025-10-09 08:53:20 UTC
+    for ch in epochs:
+        _touch(site / ch / "ce-2.8" / "FreeBSD:15:*" / f"{_CANON}-3.2.16.pkg")
+
+    def manifest(path: str) -> dict:
+        ch = "testing" if "/testing/" in str(path) else "stable"
+        return {"name": _CANON, "version": "3.2.16", "abi": "FreeBSD:15:*", "annotations": {"created": str(epochs[ch])}}
+
+    monkeypatch.setattr(gl, "read_compact_manifest", manifest)
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
+    gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
+    return site
+
+
+def test_footer_site_updated_is_the_newest_publish_time(tmp_path: Path, monkeypatch: Any) -> None:
+    """Issue #3485: every page's footer shows ' · Site updated <time class="site-updated">' with
+    the newest package publish time in the tree, in the landing table's own format."""
+    site = _two_publish_site(tmp_path, monkeypatch)
+    want = (
+        '· Site updated <time class="site-updated" datetime="2025-10-09T08:53:20Z">'
+        "2025-10-09 08:53 UTC</time></span>"
+    )
+    for page in _rendered_pages(site):
+        assert want in page.read_text(), page
+
+
+def test_rerender_of_an_unchanged_tree_is_byte_identical(tmp_path: Path, monkeypatch: Any) -> None:
+    """Issue #3485: the footer time comes from the data, never the clock, so a re-render
+    of the same tree rewrites nothing."""
+    site = _two_publish_site(tmp_path, monkeypatch)
+    first = {p: p.read_bytes() for p in _rendered_pages(site)}
+    assert all(b"Site updated" in b for b in first.values())
+    gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
+    assert {p: p.read_bytes() for p in _rendered_pages(site)} == first
+
+
 MAIN_MENU = [
     ("Features", "https://pfblockerng.com/#features"),
     ("Install", "https://pfblockerng.com/#install"),
