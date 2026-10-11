@@ -3317,6 +3317,18 @@ def test_shipped_binary_assets_are_copied_byte_identical(tmp_path: Path, monkeyp
         assert (site / rel).read_bytes() == src.read_bytes(), rel
 
 
+def test_ofl_licences_ship_next_to_the_self_hosted_fonts(tmp_path: Path, monkeypatch: Any) -> None:
+    """Each self-hosted font ships with its SIL OFL text in the built site tree."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for name, holder in (("archivo", "Archivo"), ("ibm-plex-sans", "IBM"), ("jetbrains-mono", "JetBrains")):
+        assert (site / "assets/fonts" / f"{name}.woff2").is_file(), name
+        lic = site / "assets/fonts" / f"OFL-{name}.txt"
+        assert lic.is_file(), lic
+        text = lic.read_text(encoding="utf-8")
+        assert text.startswith("Copyright") and holder in text.splitlines()[0], lic
+        assert "SIL OPEN FONT LICENSE Version 1.1" in text, lic
+
+
 def test_rendered_pages_use_the_main_site_header_and_footer(tmp_path: Path, monkeypatch: Any) -> None:
     """Every page carries the pfblockerng.com header (lockup logo home link + the
     Docs / Install / FAQ / Packages / GitHub nav) and the owner's footer lines."""
