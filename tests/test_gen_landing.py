@@ -3375,6 +3375,41 @@ def test_rendered_pages_say_the_package_site_is_hosted_on_github(tmp_path: Path,
     assert 'href="https://github.com/pfBlockerNG/pkg"' in hero
 
 
+# Copied from the pfblockerng.com footer (site/pages.py footer(), dist/index.html, 2026-10-11):
+# "same footer on both sites" — owner. Main-site-relative links are absolute here.
+MAIN_FOOTER_LINKS = [
+    ("Docs", "https://pfblockerng.com/guide/"),
+    ("FAQ", "https://pfblockerng.com/faq/"),
+    ("Packages", "https://pkg.pfblockerng.com/"),
+    ("GitHub", "https://github.com/pfBlockerNG/pfBlockerNG"),
+    ("Reddit", "https://www.reddit.com/r/pfBlockerNG/"),
+    ("Patreon", "https://www.patreon.com/pfBlockerNG"),
+    ("X @bbcan177", "https://x.com/bbcan177"),
+    ("X @andrebrait", "https://x.com/andrebrait"),
+    ("v4 beta", "https://pfblockerng.com/beta/"),
+    ("RSS", "https://pfblockerng.com/rss/"),
+    ("contact@pfblockerng.com", "mailto:contact@pfblockerng.com"),
+]
+
+
+def test_rendered_footer_matches_the_main_site_footer(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-11: same footer on both sites — same link labels in the same order,
+    same brand and legal text lines (pkg adds only its GitHub Pages note)."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    year = datetime.now(timezone.utc).year
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        foot = text[text.index('<footer class="foot">'):]
+        links = foot[foot.index('class="foot-links"'):foot.index('class="foot-legal"')]
+        assert re.findall(r'<a href="([^"]*)">([^<]*)</a>', links) == [(h, l) for l, h in MAIN_FOOTER_LINKS], page
+        assert "pfBlockerNG · Free and open-source software for pfSense" in foot, page
+        assert f"© {year} pfBlockerNG. All rights reserved." in foot, page
+        assert (
+            'Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
+            "without warranties or conditions of any kind. pfSense is a trademark of its owner."
+        ) in foot, page
+
+
 MAIN_MENU = [
     ("Features", "https://pfblockerng.com/#features"),
     ("Install", "https://pfblockerng.com/#install"),

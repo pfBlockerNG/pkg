@@ -546,9 +546,14 @@ def _site_footer(root: str) -> str:
         f'<div class="foot-brand"><img src="{root}assets/img/mark-144.webp" alt="" width="28" height="28">'
         "<span>pfBlockerNG · Free and open-source software for pfSense</span></div>"
         '<nav class="foot-links" aria-label="Footer">'
+        # Same links, order and labels as pfblockerng.com (pages.py footer()); its relative links are absolute here.
         f'<a href="{MAIN_SITE_URL}/guide/">Docs</a><a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
-        f'<a href="{SOURCE_REPO_URL}">GitHub</a><a href="{SOURCE_REPO_URL}/releases">Releases</a>'
-        '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a></nav>'
+        f'<a href="{PKG_SITE_URL}/">Packages</a><a href="{SOURCE_REPO_URL}">GitHub</a>'
+        '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a>'
+        '<a href="https://www.patreon.com/pfBlockerNG">Patreon</a>'
+        '<a href="https://x.com/bbcan177">X @bbcan177</a><a href="https://x.com/andrebrait">X @andrebrait</a>'
+        f'<a href="{MAIN_SITE_URL}/beta/">v4 beta</a><a href="{MAIN_SITE_URL}/rss/">RSS</a>'
+        '<a href="mailto:contact@pfblockerng.com">contact@pfblockerng.com</a></nav>'
         f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
         '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
         "without warranties or conditions of any kind. pfSense is a trademark of its owner.</span>"
