@@ -17,9 +17,11 @@ import inspect
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import tarfile
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1391,18 +1393,18 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
     nested_listing = gl._render_catalogue_browse_page(str(docs), "stable")
 
     for rendered in (page, listing, nested_listing):
-        assert '<link rel="stylesheet" href="https://pfblockerng.com/assets/site.css">' in rendered
-        assert '<link rel="icon" href="https://pfblockerng.com/assets/logo.svg" type="image/svg+xml">' in rendered
-        assert '<a class="skip-link" href="#main-content">Skip to content</a>' in rendered
+        assert 'rel="stylesheet"' not in rendered  # every rule ships inline (self-contained)
+        assert "assets/img/favicon-32.png\" sizes=\"32x32\" type=\"image/png\">" in rendered
+        assert '<a class="skip" href="#main-content">Skip to content</a>' in rendered
         assert '<header class="site-header">' in rendered
         assert '<a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home">' in rendered
-        assert '<nav class="header-nav" aria-label="Primary">' in rendered
+        assert '<nav class="nav-links" aria-label="Primary">' in rendered
         assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in rendered
         assert '<main id="main-content" class="pkg-shell">' in rendered
-        assert '<footer class="site-footer">' in rendered
-        assert ".cards{display:grid;gap:1rem;grid-template-columns:1fr}" in rendered
-        assert "@media(max-width:820px){.pkg-shell{padding-bottom:4rem}}" in rendered
-        assert "@media(prefers-color-scheme:dark){.card{" in rendered
+        assert '<footer class="foot">' in rendered
+        assert ".cards{display:grid;gap:16px;grid-template-columns:1fr}" in rendered
+        assert "--page:#1F1F1F" in rendered
+        assert "@media(max-width:1080px){.site-header .nav-links{display:none}.mobile-nav{display:block}" in rendered
 
     assert '<section class="pkg-hero">' in page
     assert '<p class="eyebrow">Official package repository</p>' in page
@@ -1415,9 +1417,9 @@ def test_generated_pages_share_the_main_site_chrome_and_keep_channel_accents(tmp
     assert ".card.testing{--channel:var(--testing)}" in page
     assert ".card.edge{--channel:var(--edge)}" in page
     assert ".card.nightly{--channel:var(--nightly)}" in page
-    assert ".card h3{margin:0 0 .15rem;color:var(--ink)" in page
-    assert "border-color:var(--channel);color:var(--ink)" in page
-    assert ".warn{color:var(--ink);font-weight:700}" in page
+    assert "font-weight:800;font-size:1.5rem;color:var(--text)}" in page
+    assert ".badge{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--channel);" in page
+    assert ".warn{color:var(--text);font-weight:700}" in page
 
 
 def test_render_page_shows_latest_and_empty_stable() -> None:
@@ -1494,7 +1496,7 @@ def test_render_page_shows_latest_and_empty_stable() -> None:
     assert ".card.testing{--channel:var(--testing)}" in page
     assert ".card.edge{--channel:var(--edge)}" in page
     assert ".card.nightly{--channel:var(--nightly)}" in page
-    assert ".badge{display:inline-block" in page and "border-color:var(--channel);color:var(--ink)" in page
+    assert ".badge{display:inline-flex" in page and "border:1px solid var(--channel)" in page
     # The catalog-trees list is replaced by a SINGLE link to the folder-navigable browse page.
     assert '<a class="browse" href="./browse.html">' in page
     assert "Browse the repository" in page
@@ -3256,3 +3258,297 @@ def test_write_site_empty_tree_and_docs_renders_four_cards_no_crash(tmp_path: Pa
     assert n == 0
     index_html = (site / "index.html").read_text()
     assert index_html.count("not yet published") == 4
+
+
+# ── Self-contained pfblockerng.com look (local restyle) ───────────────────────
+# pfblockerng.com is moving off GitHub Pages, so the pkg pages may never load an
+# asset from it (or any other host): every stylesheet, font and image ships inside
+# the pkg site and is referenced relative to the page. Links back to the main site
+# stay absolute.
+
+# Only the bare self-reference <link rel="canonical" href="..."> is not an asset; a
+# canonical tag carrying anything else (type=, as=, a second rel token) is scanned.
+_ASSET_REF_RE = re.compile(
+    r'<(?:img|source|link|script)\b(?!\s+rel="canonical"\s+href="[^"]*">)[^>]*?\b(?:src|srcset|href)="([^"]+)"'
+)
+_CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
+
+
+def _restyle_site(tmp_path: Path, monkeypatch: Any) -> Path:
+    site = tmp_path / "site"
+    _touch(site / "stable" / "ce-2.8" / "FreeBSD:15:*" / f"{_CANON}-3.2.16.pkg")
+    manifest = {"name": _CANON, "version": "3.2.16", "abi": "FreeBSD:15:*"}
+    monkeypatch.setattr(gl, "read_compact_manifest", lambda p: manifest)
+    monkeypatch.setattr(gl, "_render_conf", lambda base, ch: f"{ch}-conf")
+    gl.write_site(str(site), "https://pkg.pfblockerng.com/", str(_PKG_SITE_DIR))
+    return site
+
+
+def _rendered_pages(site: Path) -> list[Path]:
+    pages = sorted(p for p in site.rglob("*.html"))
+    assert site / "index.html" in pages
+    assert site / "browse.html" in pages
+    assert site / "browse" / "stable" / "ce-2.8" / "index.html" in pages
+    return pages
+
+
+def test_rendered_pages_load_every_asset_from_the_pkg_site_itself(tmp_path: Path, monkeypatch: Any) -> None:
+    """No rendered page loads anything from pfblockerng.com (or any other host):
+    every <img>/<source>/<link>/<script> asset and every CSS url() is a relative
+    path that resolves to a file the render itself wrote."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        assert "pfblockerng.com/assets" not in text, page
+        assert 'rel="stylesheet"' not in text, page
+        refs = _ASSET_REF_RE.findall(text) + _CSS_URL_RE.findall(text)
+        assert any(r.endswith(".woff2") for r in refs), page
+        assert any(r.endswith("logo-lockup.png") for r in refs), page
+        for ref in refs:
+            assert not ref.startswith(("http:", "https:", "//", "/", "data:")), (page, ref)
+            target = (page.parent / ref).resolve()
+            assert target.is_file(), (page, ref)
+            assert site.resolve() in target.parents, (page, ref)
+
+
+def test_shipped_binary_assets_are_copied_byte_identical(tmp_path: Path, monkeypatch: Any) -> None:
+    """The fonts and images under pkg-site/assets/ reach docs/assets/ unchanged."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    sources = sorted(p for p in (_PKG_SITE_DIR / "assets").rglob("*") if p.is_file())
+    suffixes = {p.suffix for p in sources}
+    assert {".woff2", ".png", ".webp"} <= suffixes
+    for src in sources:
+        rel = src.relative_to(_PKG_SITE_DIR)
+        assert (site / rel).read_bytes() == src.read_bytes(), rel
+
+
+def test_ofl_licences_ship_next_to_the_self_hosted_fonts(tmp_path: Path, monkeypatch: Any) -> None:
+    """Each self-hosted font ships with its SIL OFL text in the built site tree."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for name, holder in (("archivo", "The Archivo Project Authors"), ("ibm-plex-sans", "IBM Corp."), ("jetbrains-mono", "The JetBrains Mono Project Authors")):
+        assert (site / "assets/fonts" / f"{name}.woff2").is_file(), name
+        lic = site / "assets/fonts" / f"OFL-{name}.txt"
+        assert lic.is_file(), lic
+        text = lic.read_text(encoding="utf-8")
+        assert text.startswith("Copyright") and holder in text.splitlines()[0], lic
+        assert "SIL OPEN FONT LICENSE Version 1.1" in text, lic
+
+
+def test_rendered_pages_use_the_main_site_header_and_footer(tmp_path: Path, monkeypatch: Any) -> None:
+    """Every page carries the pfblockerng.com header (lockup logo home link + the
+    Docs / Install / FAQ / Packages / GitHub nav) and the owner's footer lines."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    year = datetime.now(timezone.utc).year
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        assert '<header class="site-header">' in text, page
+        assert '<a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home">' in text, page
+        assert 'assets/img/logo-lockup.webp" type="image/webp">' in text, page
+        assert 'assets/img/logo-lockup.png" alt="pfBlockerNG"' in text, page
+        assert '<a href="https://pfblockerng.com/guide/">Docs</a>' in text, page
+        assert '<a href="https://pfblockerng.com/#install">Install</a>' in text, page
+        assert '<a href="https://pfblockerng.com/faq/">FAQ</a>' in text, page
+        assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in text, page
+        assert 'href="https://github.com/pfBlockerNG/pfBlockerNG">' in text, page
+        assert "/guide/introduction/" not in text, page
+        assert '<footer class="foot">' in text, page
+        assert f"© {year} pfBlockerNG. All rights reserved." in text, page
+        assert "pfSense is a trademark of its owner." in text, page
+        assert "Netgate" not in text, page
+        assert '<main id="main-content" class="pkg-shell">' in text, page
+
+
+def test_rendered_pages_say_the_package_site_is_hosted_on_github(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: be clear that pkg.pfblockerng.com is hosted on GitHub (GitHub Pages,
+    pfBlockerNG/pkg) — every page says so in the footer, the landing page also up front."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    hosted = (
+        'pkg.pfblockerng.com is hosted on GitHub Pages from the public '
+        '<a href="https://github.com/pfBlockerNG/pkg" target="_blank" rel="noopener">pfBlockerNG/pkg</a> repository.'
+    )
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        foot = text[text.index('<footer class="foot">'):]
+        assert hosted in foot, page
+    landing = (site / "index.html").read_text()
+    hero = landing[landing.index('<section class="pkg-hero">'):landing.index("</section>")]
+    assert "Hosted on GitHub Pages" in hero
+    assert 'href="https://github.com/pfBlockerNG/pkg"' in hero
+
+
+# Copied from the pfblockerng.com footer (site/pages.py footer(), dist/index.html, 2026-10-11):
+# "same footer on both sites" — owner. Main-site-relative links are absolute here.
+MAIN_FOOTER_LINKS = [
+    ("Docs", "https://pfblockerng.com/guide/"),
+    ("FAQ", "https://pfblockerng.com/faq/"),
+    ("Packages", "https://pkg.pfblockerng.com/"),
+    ("GitHub", "https://github.com/pfBlockerNG/pfBlockerNG"),
+    ("Reddit", "https://www.reddit.com/r/pfBlockerNG/"),
+    ("Patreon", "https://www.patreon.com/pfBlockerNG"),
+    ("X @bbcan177", "https://x.com/bbcan177"),
+    ("X @andrebrait", "https://x.com/andrebrait"),
+    ("v4 beta", "https://pfblockerng.com/beta/"),
+    ("RSS", "https://pfblockerng.com/rss/"),
+    ("contact@pfblockerng.com", "mailto:contact@pfblockerng.com"),
+]
+
+
+def _footer_new_tab_attrs(href: str) -> str:
+    """pfblockerng.com build.py new_tab rule: http(s) links off pfblockerng.com / pkg.pfblockerng.com
+    open in a new tab; on-site links and mailto stay same-tab."""
+    host = urllib.parse.urlsplit(href).hostname if href.startswith("http") else None
+    off = host is not None and host not in ("pfblockerng.com", "pkg.pfblockerng.com")
+    return ' target="_blank" rel="noopener"' if off else ""
+
+
+def test_rendered_footer_matches_the_main_site_footer(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-11: same footer on both sites — same link labels in the same order,
+    same brand and legal text lines (pkg adds only its GitHub Pages note)."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    year = datetime.now(timezone.utc).year
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        foot = text[text.index('<footer class="foot">'):]
+        links = foot[foot.index('class="foot-links"'):foot.index('class="foot-legal"')]
+        found = re.findall(r'<a href="([^"]*)"([^>]*)>([^<]*)</a>', links)
+        assert [(h, l) for h, _, l in found] == [(h, l) for l, h in MAIN_FOOTER_LINKS], page
+        for href, attrs, label in found + re.findall(r'<a href="([^"]*)"([^>]*)>([^<]*)</a>', foot[foot.index('class="foot-legal"'):]):
+            assert attrs == _footer_new_tab_attrs(href), (page, label, attrs)
+        assert "pfBlockerNG · Free and open-source software for pfSense" in foot, page
+        assert f"© {year} pfBlockerNG. All rights reserved." in foot, page
+        assert (
+            'Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>, provided "as is", '
+            "without warranties or conditions of any kind. pfSense is a trademark of its owner."
+        ) in foot, page
+
+
+MAIN_MENU = [
+    ("Features", "https://pfblockerng.com/#features"),
+    ("Install", "https://pfblockerng.com/#install"),
+    ("Docs", "https://pfblockerng.com/guide/"),
+    ("FAQ", "https://pfblockerng.com/faq/"),
+    ("Packages", "https://pkg.pfblockerng.com/"),
+    ("News", "https://pfblockerng.com/#news"),
+    ("Open source", "https://pfblockerng.com/#github"),
+    ("Team", "https://pfblockerng.com/#team"),
+    ("Community", "https://pfblockerng.com/#community"),
+    ("GitHub", "https://github.com/pfBlockerNG/pfBlockerNG"),
+]
+
+
+def test_pkg_menu_matches_the_main_site_menu_and_hero_links_back(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: same menu as pfblockerng.com (absolute links back to it, Packages
+    marked current) on every page, desktop and mobile; landing hero has buttons to the main site."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        for nav_open in ('<nav class="nav-links" aria-label="Primary">', '<nav aria-label="Mobile">'):
+            nav = text[text.index(nav_open):]
+            nav = nav[:nav.index("</nav>")]
+            got = re.findall(r'<a[^>]* href="([^"]+)"[^>]*>([^<]+)</a>', nav)
+            assert [(label, href) for href, label in got] == MAIN_MENU, (page, nav_open, got)
+            assert '<a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a>' in nav, page
+    landing = (site / "index.html").read_text()
+    hero = landing[landing.index('<section class="pkg-hero">'):]
+    hero = hero[:hero.index("</section>")]
+    assert re.search(r'<a class="btn btn-red" href="https://pfblockerng\.com/guide/installation/">[^<]*Installation guide', hero)
+    assert re.search(r'<a class="btn btn-line" href="https://pfblockerng\.com/">[^<]*pfblockerng\.com', hero)
+
+
+def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: Any) -> None:
+    """Owner 2026-10-10: the pkg site needs a favicon — the same set as pfblockerng.com
+    (SVG + 32px PNG + apple-touch icon) on every page, plus /favicon.ico at the site root
+    for clients that ask for it without reading the page."""
+    site = _restyle_site(tmp_path, monkeypatch)
+    for page in _rendered_pages(site):
+        text = page.read_text()
+        head = text[:text.index("</head>")]
+        root = "./" if page.parent == site else "../" * len(page.parent.relative_to(site).parts)
+        assert f'<link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">' in head, page
+        assert f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">' in head, page
+        assert f'<link rel="apple-touch-icon" href="{root}assets/img/apple-touch-icon.png">' in head, page
+    assert (site / "favicon.ico").read_bytes() == (_PKG_SITE_DIR / "favicon.ico").read_bytes()  # assets/ copies: see byte-identical test
+    ico = (site / "favicon.ico").read_bytes()
+    assert ico[:4] == b"\x00\x00\x01\x00" and ico[22:30] == b"\x89PNG\r\n\x1a\n"  # ICO wrapping a PNG image
+    svg = (site / "assets/img/favicon.svg").read_text()
+    assert "<svg" in svg[:200] and 'xmlns="http://www.w3.org/2000/svg"' in svg
+
+
+# ── SEO: description, canonical, robots.txt ───────────────────────────────────
+
+
+def test_landing_has_description_and_http_canonical() -> None:
+    page = gl.render_page("https://pkg.pfblockerng.com", [], _stub_conf, _fixture_site_tree("x"))
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/">' in page
+    assert page.count('rel="canonical"') == 1  # exactly one, and it is the bare self-reference
+    m = re.search(r'<meta name="description" content="([^"]+)">', page)
+    assert m, "landing page needs a meta description"
+    for word in ("FreeBSD", "pfSense CE and Plus", "Stable", "Testing", "Edge", "Nightly"):
+        assert word in m.group(1)
+    assert "https://pfblockerng.com" in page  # existing link to the main site is kept
+
+
+def test_canonical_href_of_a_hostile_directory_name_leaks_no_markup(tmp_path: Path) -> None:
+    """The canonical href is built from an on-disk directory name: it is URL-quoted and
+    attribute-escaped like every other tree-derived string."""
+    docs = tmp_path / "docs"
+    _touch(docs / "stable" / 'ce-2.8"><script>' / "meta.conf")
+    out = gl._render_catalogue_browse_page(str(docs), 'stable/ce-2.8"><script>')
+    head = out[: out.index("</head>")]
+    assert "<script>" not in head
+    assert 'href="http://pkg.pfblockerng.com/browse/stable/ce-2.8%22%3E%3Cscript%3E/">' in head
+
+
+def test_asset_scan_does_not_exempt_a_canonical_link_that_carries_other_attributes() -> None:
+    """Guards the asset scan itself: only a bare self-referencing canonical is exempt."""
+    bare = '<link rel="canonical" href="http://pkg.pfblockerng.com/">'
+    assert _ASSET_REF_RE.findall(bare) == []
+    for evil in (
+        '<link rel="canonical" href="https://evil.example.com/site.css" type="text/css">',
+        '<link rel="canonical stylesheet" href="https://evil.example.com/site.css">',
+        '<link rel="preload canonical" href="https://evil.example.com/x.woff2" as="font">',
+        '<link rel="canonical icon" href="https://evil.example.com/i.png">',
+    ):
+        assert _ASSET_REF_RE.findall(evil), evil
+
+
+def test_browse_pages_have_self_canonical_and_description(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    _touch(docs / "stable" / "ce-2.8" / "meta.conf")
+    root = gl.render_browse_root(str(docs), {})
+    chan = gl._render_catalogue_browse_page(str(docs), "stable/ce-2.8")
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse.html">' in root
+    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse/stable/ce-2.8/">' in chan
+    for out in (root, chan):
+        assert out.count('rel="canonical"') == 1
+        assert '<meta name="description" content="' in out
+
+
+def _robots_allows(rules: list[tuple[str, str]], path: str) -> bool:
+    """Minimal robots matcher: longest matching pattern wins, '*' and '$' supported."""
+
+    def hit(pat: str) -> bool:
+        rx = re.escape(pat).replace(r"\*", ".*")
+        rx = rx[:-2] + "$" if rx.endswith(r"\$") else rx
+        return re.match(rx, path) is not None
+
+    best = max(((len(p), kind == "Allow") for kind, p in rules if p and hit(p)), default=(0, True))
+    return best[1]
+
+
+def test_robots_txt_ships_and_blocks_binaries_only() -> None:
+    gen = gl.build_site_tree(str(_PKG_SITE_DIR), "https://pkg.pfblockerng.com")
+    assert "robots.txt" in gen
+    text = gen["robots.txt"][0].decode()
+    assert "Sitemap: https://pfblockerng.com/sitemap.xml" in text
+    rules = [tuple(x.strip() for x in ln.split(":", 1)) for ln in text.splitlines() if ln.startswith(("Allow", "Disallow"))]
+    for ok in ("/", "/browse.html", "/browse/stable/ce-2.8/", "/install.sh", "/recipes/stable.sh"):
+        assert _robots_allows(rules, ok), ok
+    for bad in (
+        "/stable/ce-2.8/pfSense-pkg-pfBlockerNG-3.3.11.pkg",
+        "/stable/ce-2.8/packagesite.pkg",
+        "/stable/ce-2.8/data.pkg",
+        "/stable/ce-2.8/meta.conf",
+        "/stable/ce-2.8/meta",
+    ):
+        assert not _robots_allows(rules, bad), bad
