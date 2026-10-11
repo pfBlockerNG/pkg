@@ -23,7 +23,8 @@
 # modified cell is its manifest `created` annotation, else the embedded build
 # record's `source_date_epoch`, else an em dash — never a filesystem timestamp — so
 # a second render of the same inputs is byte-identical (a NOOP republish never
-# manufactures a commit).
+# manufactures a commit) — except that the page footer carries the render year, so
+# the first render of each new year rewrites every page once.
 #
 # Stdlib only + the `zstd` binary (to read a .pkg's +COMPACT_MANIFEST). Dev-only
 # tooling — not shipped in release archives (those contain only src/).
@@ -37,6 +38,7 @@ import json
 import os
 import re
 import stat
+import urllib.parse
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
@@ -387,8 +389,8 @@ _FONT_FACES = (
 )
 
 _CSS = """
-:root{--red:#8B181A;--red-hi:#A51D20;--accent:#E5484D;--tint:#FF8A8D;--tint2:#FFB4B6;--charcoal:#2B2B2B;
-  --page:#1F1F1F;--panel:#232323;--text:#F2F2F2;--muted:#BDBDBD;--dim:#9A9A9A;--line:#3A3A3A;--line2:#4A4A4A;
+:root{--red:#8B181A;--red-hi:#A51D20;--tint:#FF8A8D;--tint2:#FFB4B6;--charcoal:#2B2B2B;
+  --page:#1F1F1F;--text:#F2F2F2;--muted:#BDBDBD;--dim:#9A9A9A;--line:#3A3A3A;--line2:#4A4A4A;
   --soft:#333333;--ok:#7FD4A8;--amber:#F5A524;--radius:14px;
   --h:'Archivo',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --b:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
@@ -415,13 +417,13 @@ code{font-size:.86em;padding:1px 6px;border-radius:5px;background:var(--soft);co
 .logo{display:block;width:auto;height:46px;border-radius:8px}
 .nav-links{display:flex;align-items:center;gap:28px;font-size:15px;font-weight:500;white-space:nowrap}
 .nav-links a{display:inline-flex;align-items:center;min-height:44px}
-.nav-links a[aria-current="page"]{color:var(--tint)}
+.nav-links a[aria-current="page"],.mobile-nav nav a[aria-current="page"]{color:var(--tint)}
 .hero-acts{display:flex;flex-wrap:wrap;gap:14px;margin:28px 0 0}
 .btn{display:inline-flex;align-items:center;gap:10px;min-height:48px;padding:14px 22px;border-radius:10px;font-weight:600}
-.btn-red{background:#8B181A;color:#fff}.btn-red:hover{background:#A61E21;color:#fff}
+.btn-red{background:var(--red);color:#fff}.btn-red:hover{background:#A61E21;color:#fff}
 .btn-line{border:1px solid var(--line2)}.btn-line:hover{border-color:#4A2226;color:#fff}
-.nav-links a:hover{color:#FF6B6F}
-.btn-outline{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border:1px solid var(--line2);
+.nav-links a:hover,.foot-links a:hover{color:#FF6B6F}
+.nav-links a:last-child{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border:1px solid var(--line2);
   border-radius:8px;font-weight:600}
 .mobile-nav{display:none}
 .mobile-nav summary{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border:1px solid var(--line2);
@@ -430,7 +432,6 @@ code{font-size:.86em;padding:1px 6px;border-radius:5px;background:var(--soft);co
 .mobile-nav nav{position:absolute;left:0;right:0;top:100%;display:flex;flex-direction:column;padding:4px 20px 12px;
   border-bottom:1px solid var(--line);background:var(--page)}
 .mobile-nav nav a{display:flex;align-items:center;min-height:44px;font-weight:500}
-.mobile-nav nav a[aria-current="page"]{color:var(--tint)}
 .pkg-shell{max-width:1200px;margin:0 auto;padding:0 32px 96px}
 .pkg-hero{padding:72px 0 48px;border-bottom:1px solid var(--soft)}
 .eyebrow{margin:0;font-family:var(--m);font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--tint)}
@@ -495,22 +496,16 @@ table.autoindex td a{display:inline-flex;align-items:center;min-height:28px}
 .foot-brand img{border-radius:6px}
 .foot-links{display:flex;flex-wrap:wrap;gap:4px 24px}
 .foot-links a{display:inline-flex;align-items:center;min-height:32px;color:var(--muted)}
-.foot-links a:hover{color:#FF6B6F}
 .foot-legal{flex-basis:100%;display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;padding-top:24px;
   border-top:1px solid var(--soft);font-size:13px}
 .foot-legal a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
-@media(min-width:901px) and (max-width:1240px){.nav-links{gap:clamp(12px,1.6vw,22px);font-size:14px}}
+@media(max-width:1240px){.nav-links{gap:clamp(12px,1.6vw,22px);font-size:14px}}
 @media(max-width:1080px){.site-header .nav-links{display:none}.mobile-nav{display:block}.logo{height:40px}}
 @media(max-width:640px){.wrap,.pkg-shell{padding-left:20px;padding-right:20px}.pkg-hero{padding:48px 0 36px}
   .pkg-section{padding-top:48px}.snip>pre{padding-right:16px;padding-top:46px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
-_GITHUB_URL = "https://github.com/pfBlockerNG/pfBlockerNG"
-
-
-def _nav_links(*, desktop: bool) -> str:
-    github_cls = ' class="btn-outline"' if desktop else ""
+def _nav_links() -> str:
     return (
         # Same menu as pfblockerng.com (pages.py site_header), absolute links back to it; Packages is this site.
         f'<a href="{MAIN_SITE_URL}/#features">Features</a>'
@@ -522,22 +517,22 @@ def _nav_links(*, desktop: bool) -> str:
         f'<a href="{MAIN_SITE_URL}/#github">Open source</a>'
         f'<a href="{MAIN_SITE_URL}/#team">Team</a>'
         f'<a href="{MAIN_SITE_URL}/#community">Community</a>'
-        f'<a{github_cls} href="{_GITHUB_URL}">GitHub</a>'
+        f'<a href="{SOURCE_REPO_URL}">GitHub</a>'
     )
 
 
 def _site_header(root: str) -> str:
     """The main site's header: lockup logo home link + primary nav (a no-JS
-    <details> menu below 900px). *root* is the page's relative climb to docs/."""
+    <details> menu below 1080px). *root* is the page's relative climb to docs/."""
     return (
         '<a class="skip" href="#main-content">Skip to content</a>'
         '<header class="site-header"><div class="wrap">'
         f'<a class="brand" href="{MAIN_SITE_URL}/" aria-label="pfBlockerNG home">'
         f'<picture><source srcset="{root}assets/img/logo-lockup.webp" type="image/webp">'
         f'<img class="logo" src="{root}assets/img/logo-lockup.png" alt="pfBlockerNG" width="737" height="229"></picture></a>'
-        f'<nav class="nav-links" aria-label="Primary">{_nav_links(desktop=True)}</nav>'
+        f'<nav class="nav-links" aria-label="Primary">{_nav_links()}</nav>'
         '<details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary>'
-        f'<nav aria-label="Mobile">{_nav_links(desktop=False)}</nav></details>'
+        f'<nav aria-label="Mobile">{_nav_links()}</nav></details>'
         "</div></header>"
     )
 
@@ -552,7 +547,7 @@ def _site_footer(root: str) -> str:
         "<span>pfBlockerNG · Free and open-source software for pfSense</span></div>"
         '<nav class="foot-links" aria-label="Footer">'
         f'<a href="{MAIN_SITE_URL}/guide/">Docs</a><a href="{MAIN_SITE_URL}/faq/">FAQ</a>'
-        f'<a href="{_GITHUB_URL}">GitHub</a><a href="{_GITHUB_URL}/releases">Releases</a>'
+        f'<a href="{SOURCE_REPO_URL}">GitHub</a><a href="{SOURCE_REPO_URL}/releases">Releases</a>'
         '<a href="https://www.reddit.com/r/pfBlockerNG/">Reddit</a></nav>'
         f'<div class="foot-legal"><span>© {year} pfBlockerNG. All rights reserved.</span>'
         '<span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache 2.0</a>, provided "as is", '
@@ -577,8 +572,8 @@ def _head(title: str, root: str, desc: str, canonical_path: str) -> str:
     return (
         '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<meta name="description" content="{_esc(desc)}">'
-        f'<link rel="canonical" href="{CANONICAL_BASE}/{canonical_path}">'
-        '<meta name="color-scheme" content="dark"><meta name="theme-color" content="#1F1F1F">'
+        f'<link rel="canonical" href="{CANONICAL_BASE}/{_esc(urllib.parse.quote(canonical_path, safe="/."))}">'
+        '<meta name="theme-color" content="#1F1F1F">'
         f'<title>{_esc(title)}</title><link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">'
         f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">'
         f'<link rel="apple-touch-icon" href="{root}assets/img/apple-touch-icon.png">'
@@ -1272,7 +1267,7 @@ def _render_listing_html(title: str, home_href: str, rows: list[str], canonical_
     Name | Last modified | Size table, used by both browse.html and every
     browse/<ch>/… page."""
     return (
-        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}", home_href, _LISTING_DESC, canonical_path)}<body class="listing-page">'
+        f'<!doctype html><html lang="en">{_head(f"pfBlockerNG pkg — Index of {title}", home_href, _LISTING_DESC, canonical_path)}<body>'
         f'{_site_header(home_href)}<main id="main-content" class="pkg-shell">'
         f'<section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p>'
         f'<h1>Index of {_esc(title)}</h1><p><a href="{_esc(home_href)}">'
@@ -1280,7 +1275,7 @@ def _render_listing_html(title: str, home_href: str, rows: list[str], canonical_
         '<section class="pkg-section"><div class="tablewrap"><table class="autoindex"><thead><tr>'
         "<th>Name</th><th>Last modified</th><th>Size</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
-        '<p class="listing-note">Directory listing of the self-hosted pfBlockerNG pkg repository. '
+        f'<p class="listing-note">{_LISTING_DESC} '
         "pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p>"
         f"</section></main>{_site_footer(home_href)}<script>{_LOCAL_TIME_JS}</script></body></html>\n"
     )

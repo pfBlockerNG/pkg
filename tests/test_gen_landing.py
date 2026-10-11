@@ -3265,7 +3265,11 @@ def test_write_site_empty_tree_and_docs_renders_four_cards_no_crash(tmp_path: Pa
 # the pkg site and is referenced relative to the page. Links back to the main site
 # stay absolute.
 
-_ASSET_REF_RE = re.compile(r'<(?:img|source|link|script)\b(?![^>]*rel="canonical")[^>]*?\b(?:src|srcset|href)="([^"]+)"')
+# Only the bare self-reference <link rel="canonical" href="..."> is not an asset; a
+# canonical tag carrying anything else (type=, as=, a second rel token) is scanned.
+_ASSET_REF_RE = re.compile(
+    r'<(?:img|source|link|script)\b(?!\s+rel="canonical"\s+href="[^"]*">)[^>]*?\b(?:src|srcset|href)="([^"]+)"'
+)
 _CSS_URL_RE = re.compile(r"url\(([^)]+)\)")
 
 
@@ -3320,7 +3324,7 @@ def test_shipped_binary_assets_are_copied_byte_identical(tmp_path: Path, monkeyp
 def test_ofl_licences_ship_next_to_the_self_hosted_fonts(tmp_path: Path, monkeypatch: Any) -> None:
     """Each self-hosted font ships with its SIL OFL text in the built site tree."""
     site = _restyle_site(tmp_path, monkeypatch)
-    for name, holder in (("archivo", "Archivo"), ("ibm-plex-sans", "IBM"), ("jetbrains-mono", "JetBrains")):
+    for name, holder in (("archivo", "The Archivo Project Authors"), ("ibm-plex-sans", "IBM Corp."), ("jetbrains-mono", "The JetBrains Mono Project Authors")):
         assert (site / "assets/fonts" / f"{name}.woff2").is_file(), name
         lic = site / "assets/fonts" / f"OFL-{name}.txt"
         assert lic.is_file(), lic
@@ -3416,8 +3420,7 @@ def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: 
         assert f'<link rel="icon" href="{root}assets/img/favicon.svg" type="image/svg+xml">' in head, page
         assert f'<link rel="icon" href="{root}assets/img/favicon-32.png" sizes="32x32" type="image/png">' in head, page
         assert f'<link rel="apple-touch-icon" href="{root}assets/img/apple-touch-icon.png">' in head, page
-    for rel in ("assets/img/favicon.svg", "assets/img/favicon-32.png", "assets/img/apple-touch-icon.png", "favicon.ico"):
-        assert (site / rel).read_bytes() == (_PKG_SITE_DIR / rel).read_bytes(), rel
+    assert (site / "favicon.ico").read_bytes() == (_PKG_SITE_DIR / "favicon.ico").read_bytes()  # assets/ copies: see byte-identical test
     ico = (site / "favicon.ico").read_bytes()
     assert ico[:4] == b"\x00\x00\x01\x00" and ico[22:30] == b"\x89PNG\r\n\x1a\n"  # ICO wrapping a PNG image
     svg = (site / "assets/img/favicon.svg").read_text()
@@ -3430,11 +3433,36 @@ def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: 
 def test_landing_has_description_and_http_canonical() -> None:
     page = gl.render_page("https://pkg.pfblockerng.com", [], _stub_conf, _fixture_site_tree("x"))
     assert '<link rel="canonical" href="http://pkg.pfblockerng.com/">' in page
+    assert page.count('rel="canonical"') == 1  # exactly one, and it is the bare self-reference
     m = re.search(r'<meta name="description" content="([^"]+)">', page)
     assert m, "landing page needs a meta description"
     for word in ("FreeBSD", "pfSense CE and Plus", "Stable", "Testing", "Edge", "Nightly"):
         assert word in m.group(1)
     assert "https://pfblockerng.com" in page  # existing link to the main site is kept
+
+
+def test_canonical_href_of_a_hostile_directory_name_leaks_no_markup(tmp_path: Path) -> None:
+    """The canonical href is built from an on-disk directory name: it is URL-quoted and
+    attribute-escaped like every other tree-derived string."""
+    docs = tmp_path / "docs"
+    _touch(docs / "stable" / 'ce-2.8"><script>' / "meta.conf")
+    out = gl._render_catalogue_browse_page(str(docs), 'stable/ce-2.8"><script>')
+    head = out[: out.index("</head>")]
+    assert "<script>" not in head
+    assert 'href="http://pkg.pfblockerng.com/browse/stable/ce-2.8%22%3E%3Cscript%3E/">' in head
+
+
+def test_asset_scan_does_not_exempt_a_canonical_link_that_carries_other_attributes() -> None:
+    """Guards the asset scan itself: only a bare self-referencing canonical is exempt."""
+    bare = '<link rel="canonical" href="http://pkg.pfblockerng.com/">'
+    assert _ASSET_REF_RE.findall(bare) == []
+    for evil in (
+        '<link rel="canonical" href="https://evil.example.com/site.css" type="text/css">',
+        '<link rel="canonical stylesheet" href="https://evil.example.com/site.css">',
+        '<link rel="preload canonical" href="https://evil.example.com/x.woff2" as="font">',
+        '<link rel="canonical icon" href="https://evil.example.com/i.png">',
+    ):
+        assert _ASSET_REF_RE.findall(evil), evil
 
 
 def test_browse_pages_have_self_canonical_and_description(tmp_path: Path) -> None:
@@ -3445,6 +3473,7 @@ def test_browse_pages_have_self_canonical_and_description(tmp_path: Path) -> Non
     assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse.html">' in root
     assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse/stable/ce-2.8/">' in chan
     for out in (root, chan):
+        assert out.count('rel="canonical"') == 1
         assert '<meta name="description" content="' in out
 
 
