@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /*.pkg$
+Disallow: /*/meta.*
+Disallow: /*/meta$
+Sitemap: https://pfblockerng.com/sitemap.xml

@@ -1,57 +1,119 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="theme-color" content="#151518"><title>pfBlockerNG pkg — Index of /stable/plus-25.11</title><link rel="icon" href="https://pfblockerng.com/assets/logo.svg" type="image/svg+xml"><link rel="stylesheet" href="https://pfblockerng.com/assets/site.css"><style>
-:root{--stable:#2f81f7;--testing:#d29922;--edge:#a371f7;--nightly:#f85149}
-.header-nav a[aria-current="page"]{color:var(--accent)}
-.pkg-shell{max-width:1200px;margin:0 auto;padding:0 clamp(1rem,4vw,3rem) 6rem}
-.pkg-hero{padding:clamp(3.5rem,8vw,6.5rem) 0 clamp(2.5rem,5vw,4rem);border-bottom:1px solid var(--line)}
-.pkg-hero h1{max-width:900px;margin:0;font-size:clamp(2.8rem,7vw,6rem);font-weight:690;
-  letter-spacing:-.055em;line-height:1}
-.pkg-hero .hero-lede{max-width:720px;margin:1.35rem 0 0;color:var(--muted);font-size:clamp(1.05rem,1.5vw,1.25rem)}
-.pkg-section{padding-top:clamp(2.8rem,6vw,5rem)}
-.pkg-section>h2{margin:0 0 1.6rem;font-size:clamp(1.9rem,4vw,3.2rem);letter-spacing:-.04em;line-height:1.05}
-.pkg-section h3{margin:2rem 0 .6rem;font-size:1.25rem}
-.pkg-section h4{margin:1.4rem 0 .45rem;color:var(--muted);font-size:.82rem;letter-spacing:.1em;text-transform:uppercase}
-.cards{display:grid;gap:1rem;grid-template-columns:1fr}
-.card{--channel:var(--line);min-width:0;padding:clamp(1.25rem,3vw,2rem);border:1px solid var(--line);
-  border-top:4px solid var(--channel);border-radius:var(--radius);background:var(--bg-elevated);
-  box-shadow:0 1px 0 rgb(255 255 255 / 70%) inset}
-.card h3{margin:0 0 .15rem;color:var(--ink);font-size:1.4rem;letter-spacing:-.025em}
-.card .ver{margin:0 0 .75rem;color:var(--muted);font-size:.9rem}
-.card .blurb,.blurb{color:var(--muted);font-size:.94rem}
-.card .blurb{margin:.2rem 0 .9rem}
-pre{border:1px solid var(--line);font-size:13px;line-height:1.5}
-table{width:100%;border-collapse:collapse;font-size:.92rem}
-.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-th,td{text-align:left;padding:.65rem .75rem;border-bottom:1px solid var(--line);white-space:nowrap}
-th{background:var(--bg-elevated);color:var(--muted);font-weight:720}
-td.num{color:var(--muted);font-variant-numeric:tabular-nums}
-.badge{display:inline-block;font-size:.72rem;padding:.05rem .45rem;border-radius:20px;
-  border:1px solid;border-color:var(--channel);color:var(--ink)}
-details summary{margin-top:.6rem;color:var(--muted);font-size:.87rem;cursor:pointer}
-a.browse{display:inline-flex;align-items:center;min-height:46px;padding:.65rem 1rem;border:1px solid var(--ink);
-  border-radius:999px;font-weight:740;text-decoration:none}
-a.browse:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
-table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
-table.autoindex td.num{white-space:nowrap}
-.entry-icon{display:inline-block;width:1.5em;margin-right:.25em;text-align:center}
-.listing-page .pkg-shell{min-height:calc(100vh - 68px)}
-.listing-hero{padding-bottom:2rem}
-.listing-hero h1{font-size:clamp(2.4rem,6vw,4.8rem)}
-.listing-hero p,.listing-note{color:var(--muted)}
-.listing-note{margin-top:2rem;font-size:.88rem}
-.empty{color:var(--muted);font-style:italic}
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="Directory listing of the self-hosted pfBlockerNG pkg repository."><link rel="canonical" href="http://pkg.pfblockerng.com/browse/stable/plus-25.11/"><meta name="theme-color" content="#1F1F1F"><title>pfBlockerNG pkg — Index of /stable/plus-25.11</title><link rel="icon" href="../../../assets/img/favicon.svg" type="image/svg+xml"><link rel="icon" href="../../../assets/img/favicon-32.png" sizes="32x32" type="image/png"><link rel="apple-touch-icon" href="../../../assets/img/apple-touch-icon.png"><style>@font-face{font-family:'Archivo';font-style:normal;font-weight:700 800;font-stretch:100% 125%;font-display:swap;src:url(../../../assets/fonts/archivo.woff2) format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400 600;font-display:swap;src:url(../../../assets/fonts/ibm-plex-sans.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400 500;font-display:swap;src:url(../../../assets/fonts/jetbrains-mono.woff2) format('woff2')}
+
+:root{--red:#8B181A;--red-hi:#A51D20;--tint:#FF8A8D;--tint2:#FFB4B6;--charcoal:#2B2B2B;
+  --page:#1F1F1F;--text:#F2F2F2;--muted:#BDBDBD;--dim:#9A9A9A;--line:#3A3A3A;--line2:#4A4A4A;
+  --soft:#333333;--ok:#7FD4A8;--amber:#F5A524;--radius:14px;
+  --h:'Archivo',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --b:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --m:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --stable:#2f81f7;--testing:#d29922;--edge:#a371f7;--nightly:#f85149}
+*{box-sizing:border-box}
+html{color-scheme:dark;scroll-padding-top:88px}
+body{margin:0;background:var(--page);color:var(--text);font-family:var(--b);font-size:16px;line-height:1.6;
+  -webkit-text-size-adjust:100%}
+a{color:var(--text);text-decoration:none}
+main a{color:var(--tint)}
+main a:hover{color:var(--tint2)}
+img{max-width:100%;height:auto}
+:focus-visible{outline:2px solid var(--tint);outline-offset:2px}
+code,pre{font-family:var(--m)}
+code{font-size:.86em;padding:1px 6px;border-radius:5px;background:var(--soft);color:var(--tint);overflow-wrap:anywhere}
+.skip{position:absolute;left:-9999px;top:8px;z-index:100;padding:10px 16px;background:var(--red);color:#fff;border-radius:8px}
+.skip:focus{left:16px}
+.wrap{max-width:1200px;margin:0 auto;padding-left:32px;padding-right:32px}
+.site-header{position:sticky;top:0;z-index:50;border-bottom:1px solid var(--line);background:rgba(31,31,31,.92);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.site-header>.wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-top:12px;padding-bottom:12px}
+.brand{display:flex;align-items:center;min-height:44px}
+.logo{display:block;width:auto;height:46px;border-radius:8px}
+.nav-links{display:flex;align-items:center;gap:28px;font-size:15px;font-weight:500;white-space:nowrap}
+.nav-links a{display:inline-flex;align-items:center;min-height:44px}
+.nav-links a[aria-current="page"],.mobile-nav nav a[aria-current="page"]{color:var(--tint)}
+.hero-acts{display:flex;flex-wrap:wrap;gap:14px;margin:28px 0 0}
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:48px;padding:14px 22px;border-radius:10px;font-weight:600}
+.btn-red{background:var(--red);color:#fff}.btn-red:hover{background:#A61E21;color:#fff}
+.btn-line{border:1px solid var(--line2)}.btn-line:hover{border-color:#4A2226;color:#fff}
+.nav-links a:hover,.foot-links a:hover{color:#FF6B6F}
+.nav-links a:last-child{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 16px;border:1px solid var(--line2);
+  border-radius:8px;font-weight:600}
+.mobile-nav{display:none}
+.mobile-nav summary{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border:1px solid var(--line2);
+  border-radius:8px;font-weight:600;list-style:none;cursor:pointer}
+.mobile-nav summary::-webkit-details-marker{display:none}
+.mobile-nav nav{position:absolute;left:0;right:0;top:100%;display:flex;flex-direction:column;padding:4px 20px 12px;
+  border-bottom:1px solid var(--line);background:var(--page)}
+.mobile-nav nav a{display:flex;align-items:center;min-height:44px;font-weight:500}
+.pkg-shell{max-width:1200px;margin:0 auto;padding:0 32px 96px}
+.pkg-hero{padding:72px 0 48px;border-bottom:1px solid var(--soft)}
+.eyebrow{margin:0;font-family:var(--m);font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--tint)}
+.pkg-hero h1{max-width:900px;margin:12px 0 0;font-family:var(--h);font-stretch:110%;font-weight:800;
+  font-size:clamp(2.4rem,6vw,4.25rem);line-height:1.05;letter-spacing:-.02em}
+.hero-lede{max-width:680px;margin:16px 0 0;color:var(--muted);font-size:clamp(1.02rem,1.5vw,1.2rem)}
+.pkg-section{padding-top:64px}
+.pkg-section>h2{margin:0 0 24px;font-family:var(--h);font-stretch:110%;font-weight:800;
+  font-size:clamp(1.75rem,3.5vw,2.5rem);line-height:1.1;letter-spacing:-.02em}
+.pkg-section h3{margin:32px 0 10px;font-family:var(--h);font-weight:700;font-size:1.3rem}
+.pkg-section h4{margin:22px 0 8px;font-family:var(--m);font-size:12.5px;font-weight:500;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted)}
+.cards{display:grid;gap:16px;grid-template-columns:1fr}
+.card{--channel:var(--line2);min-width:0;padding:clamp(20px,3vw,28px);border:1px solid var(--line);
+  border-top:3px solid var(--channel);border-radius:var(--radius);background:var(--charcoal)}
 .card.stable{--channel:var(--stable)}
 .card.testing{--channel:var(--testing)}
 .card.edge{--channel:var(--edge)}
 .card.nightly{--channel:var(--nightly)}
-.warn{color:var(--ink);font-weight:700}
+.card h3{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0;font-family:var(--h);font-stretch:110%;
+  font-weight:800;font-size:1.5rem;color:var(--text)}
+.card .ver{margin:4px 0 12px;color:var(--muted);font-size:.92rem}
+.blurb{color:var(--muted);font-size:.95rem}
+.card .blurb{margin:.2rem 0 .9rem}
+.badge{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--channel);
+  border-radius:999px;background:rgba(229,72,77,.1);color:var(--tint2);font-family:var(--b);font-stretch:100%;
+  font-size:12px;font-weight:600}
+.warn{color:var(--text);font-weight:700}
 .snip{position:relative}
-.snip>pre{padding-right:3.6rem}
-.copy{position:absolute;top:.45rem;right:.45rem;z-index:1;
-  font:600 11px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  color:#d2ccc7;background:#201f23;border:1px solid #575159;border-radius:6px;
-  padding:.3rem .5rem;cursor:pointer}
-.copy:hover{color:white;border-color:white}
-.copy.copied{color:#56d364;border-color:#56d364}
-@media(max-width:820px){.pkg-shell{padding-bottom:4rem}}
-@media(prefers-color-scheme:dark){.card{background:rgb(27 26 30 / 72%);box-shadow:none}}
-</style></head><body class="listing-page"><a class="skip-link" href="#main-content">Skip to content</a><header class="site-header"><a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home"><img src="https://pfblockerng.com/assets/logo.svg" alt="" width="34" height="34"><span>pfBlockerNG</span></a><nav class="header-nav" aria-label="Primary"><a href="https://pfblockerng.com/guide/introduction/">Documentation</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a><a href="https://github.com/pfBlockerNG">Organization</a></nav><details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary><nav aria-label="Mobile"><a href="https://pfblockerng.com/guide/introduction/">Documentation</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a><a href="https://github.com/pfBlockerNG">Organization</a></nav></details></header><main id="main-content" class="pkg-shell"><section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p><h1>Index of /stable/plus-25.11</h1><p><a href="../../../">&larr; pfBlockerNG repository home</a></p></section><section class="pkg-section"><div class="tablewrap"><table class="autoindex"><thead><tr><th>Name</th><th>Last modified</th><th>Size</th></tr></thead><tbody><tr><td><a href="../"><span class="entry-icon" aria-hidden="true">&#128193;</span>../</a></td><td class="num">&mdash;</td><td class="num">Parent Directory</td></tr><tr><td><a href="../../../stable/plus-25.11/data.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>data.pkg</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">1.7 KiB</td></tr><tr><td><a href="../../../stable/plus-25.11/meta"><span class="entry-icon" aria-hidden="true">&#128196;</span>meta</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">168 B</td></tr><tr><td><a href="../../../stable/plus-25.11/meta.conf"><span class="entry-icon" aria-hidden="true">&#128196;</span>meta.conf</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">168 B</td></tr><tr><td><a href="../../../stable/plus-25.11/packagesite.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>packagesite.pkg</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">1.7 KiB</td></tr><tr><td><a href="../../../stable/plus-25.11/pfSense-pkg-pfBlockerNG-3.3.11.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>pfSense-pkg-pfBlockerNG-3.3.11.pkg</a></td><td class="num"><time datetime="2026-10-05T12:07:01Z">2026-10-05 12:07 UTC</time></td><td class="num">1.7 MiB</td></tr></tbody></table></div><p class="listing-note">Directory listing of the self-hosted pfBlockerNG pkg repository. pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p></section></main><footer class="site-footer"><div><strong>pfBlockerNG</strong><span>IP and DNS blocking for pfSense</span></div><nav aria-label="Footer"><a href="https://www.reddit.com/r/pfBlockerNG/">Community</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">Repository</a><a href="https://github.com/pfBlockerNG/pfBlockerNG/releases">Releases</a><a href="https://github.com/pfBlockerNG/pfBlockerNG/blob/devel/LICENSE">Apache 2.0</a></nav></footer><script>(function(){function p(n){return String(n).padStart(2,'0');}document.querySelectorAll('time[datetime]').forEach(function(t){var d=new Date(t.dateTime);if(Number.isNaN(d.getTime()))return;t.textContent=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());});})();</script></body></html>
+.snip{margin-top:10px}
+.snip>pre{margin:0;padding:14px 84px 14px 16px;border:1px solid var(--line2);border-radius:10px;background:#151515;
+  color:#E8E8E8;font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.copy{position:absolute;top:8px;right:8px;z-index:1;min-height:30px;padding:0 12px;border:0;border-radius:7px;
+  background:var(--amber);color:var(--page);font:700 12px/1 var(--b);cursor:pointer}
+.copy:hover{background:#FFB547}
+.copy.copied{background:var(--ok)}
+details{margin-top:12px}
+summary{padding:6px 0;color:var(--muted);font-size:.92rem;font-weight:500;cursor:pointer}
+summary:hover{color:var(--text)}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:12px;border:1px solid var(--line);border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{padding:10px 14px;text-align:left;white-space:nowrap}
+th{background:var(--charcoal);color:var(--text);font-weight:600}
+td{border-top:1px solid var(--line)}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+td.num{color:var(--muted);font-variant-numeric:tabular-nums}
+.empty{color:var(--dim);font-style:italic}
+a.browse{display:inline-flex;align-items:center;gap:8px;min-height:48px;padding:12px 22px;border-radius:10px;
+  background:var(--red);color:#fff;font-weight:600}
+a.browse:hover{background:var(--red-hi);color:#fff}
+table.autoindex td:first-child{white-space:normal;overflow-wrap:anywhere}
+table.autoindex td a{display:inline-flex;align-items:center;min-height:28px}
+.entry-icon{display:inline-block;width:1.5em;margin-right:.25em;text-align:center}
+.listing-hero{padding-bottom:32px}
+.listing-hero h1{font-size:clamp(2rem,5vw,3.5rem);overflow-wrap:anywhere}
+.listing-hero p{margin:16px 0 0;color:var(--muted)}
+.listing-note{margin-top:24px;color:var(--dim);font-size:.88rem}
+.foot{margin-top:32px;border-top:1px solid var(--soft)}
+.foot .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:24px;padding-top:40px;padding-bottom:56px;
+  color:var(--dim);font-size:14px}
+.foot-brand{display:flex;align-items:center;gap:10px}
+.foot-brand img{border-radius:6px}
+.foot-links{display:flex;flex-wrap:wrap;gap:4px 24px}
+.foot-links a{display:inline-flex;align-items:center;min-height:32px;color:var(--muted)}
+.foot-legal{flex-basis:100%;display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;padding-top:24px;
+  border-top:1px solid var(--soft);font-size:13px}
+.foot-legal a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+@media(max-width:1240px){.nav-links{gap:clamp(12px,1.6vw,22px);font-size:14px}}
+@media(max-width:1080px){.site-header .nav-links{display:none}.mobile-nav{display:block}.logo{height:40px}}
+@media(max-width:640px){.wrap,.pkg-shell{padding-left:20px;padding-right:20px}.pkg-hero{padding:48px 0 36px}
+  .pkg-section{padding-top:48px}.snip>pre{padding-right:16px;padding-top:46px}}
+</style></head><body><a class="skip" href="#main-content">Skip to content</a><header class="site-header"><div class="wrap"><a class="brand" href="https://pfblockerng.com/" aria-label="pfBlockerNG home"><picture><source srcset="../../../assets/img/logo-lockup.webp" type="image/webp"><img class="logo" src="../../../assets/img/logo-lockup.png" alt="pfBlockerNG" width="737" height="229"></picture></a><nav class="nav-links" aria-label="Primary"><a href="https://pfblockerng.com/#features">Features</a><a href="https://pfblockerng.com/#install">Install</a><a href="https://pfblockerng.com/guide/">Docs</a><a href="https://pfblockerng.com/faq/">FAQ</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://pfblockerng.com/#news">News</a><a href="https://pfblockerng.com/#github">Open source</a><a href="https://pfblockerng.com/#team">Team</a><a href="https://pfblockerng.com/#community">Community</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a></nav><details class="mobile-nav"><summary aria-label="Open navigation">Menu</summary><nav aria-label="Mobile"><a href="https://pfblockerng.com/#features">Features</a><a href="https://pfblockerng.com/#install">Install</a><a href="https://pfblockerng.com/guide/">Docs</a><a href="https://pfblockerng.com/faq/">FAQ</a><a href="https://pkg.pfblockerng.com/" aria-current="page">Packages</a><a href="https://pfblockerng.com/#news">News</a><a href="https://pfblockerng.com/#github">Open source</a><a href="https://pfblockerng.com/#team">Team</a><a href="https://pfblockerng.com/#community">Community</a><a href="https://github.com/pfBlockerNG/pfBlockerNG">GitHub</a></nav></details></div></header><main id="main-content" class="pkg-shell"><section class="pkg-hero listing-hero"><p class="eyebrow">Repository files</p><h1>Index of /stable/plus-25.11</h1><p><a href="../../../">&larr; pfBlockerNG repository home</a></p></section><section class="pkg-section"><div class="tablewrap"><table class="autoindex"><thead><tr><th>Name</th><th>Last modified</th><th>Size</th></tr></thead><tbody><tr><td><a href="../"><span class="entry-icon" aria-hidden="true">&#128193;</span>../</a></td><td class="num">&mdash;</td><td class="num">Parent Directory</td></tr><tr><td><a href="../../../stable/plus-25.11/data.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>data.pkg</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">1.7 KiB</td></tr><tr><td><a href="../../../stable/plus-25.11/meta"><span class="entry-icon" aria-hidden="true">&#128196;</span>meta</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">168 B</td></tr><tr><td><a href="../../../stable/plus-25.11/meta.conf"><span class="entry-icon" aria-hidden="true">&#128196;</span>meta.conf</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">168 B</td></tr><tr><td><a href="../../../stable/plus-25.11/packagesite.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>packagesite.pkg</a></td><td class="num"><span class="empty">&mdash;</span></td><td class="num">1.7 KiB</td></tr><tr><td><a href="../../../stable/plus-25.11/pfSense-pkg-pfBlockerNG-3.3.11.pkg"><span class="entry-icon" aria-hidden="true">&#128196;</span>pfSense-pkg-pfBlockerNG-3.3.11.pkg</a></td><td class="num"><time datetime="2026-10-05T12:07:01Z">2026-10-05 12:07 UTC</time></td><td class="num">1.7 MiB</td></tr></tbody></table></div><p class="listing-note">Directory listing of the self-hosted pfBlockerNG pkg repository. pkg(8) fetches the catalog files (<code>meta.conf</code>, <code>packagesite.pkg</code>, …) directly.</p></section></main><footer class="foot"><div class="wrap"><div class="foot-brand"><img src="../../../assets/img/mark-144.webp" alt="" width="28" height="28"><span>pfBlockerNG · Free and open-source software for pfSense</span></div><nav class="foot-links" aria-label="Footer"><a href="https://pfblockerng.com/guide/">Docs</a><a href="https://pfblockerng.com/faq/">FAQ</a><a href="https://pkg.pfblockerng.com/">Packages</a><a href="https://github.com/pfBlockerNG/pfBlockerNG" target="_blank" rel="noopener">GitHub</a><a href="https://www.reddit.com/r/pfBlockerNG/" target="_blank" rel="noopener">Reddit</a><a href="https://www.patreon.com/pfBlockerNG" target="_blank" rel="noopener">Patreon</a><a href="https://x.com/bbcan177" target="_blank" rel="noopener">X @bbcan177</a><a href="https://x.com/andrebrait" target="_blank" rel="noopener">X @andrebrait</a><a href="https://pfblockerng.com/beta/">v4 beta</a><a href="https://pfblockerng.com/rss/">RSS</a><a href="mailto:contact@pfblockerng.com">contact@pfblockerng.com</a></nav><div class="foot-legal"><span>© 2026 pfBlockerNG. All rights reserved.</span><span>Licensed under <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache 2.0</a>, provided "as is", without warranties or conditions of any kind. pfSense is a trademark of its owner.</span><span>pkg.pfblockerng.com is hosted on GitHub Pages from the public <a href="https://github.com/pfBlockerNG/pkg" target="_blank" rel="noopener">pfBlockerNG/pkg</a> repository.</span></div></div></footer><script>(function(){function p(n){return String(n).padStart(2,'0');}document.querySelectorAll('time[datetime]').forEach(function(t){var d=new Date(t.dateTime);if(Number.isNaN(d.getTime()))return;t.textContent=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());});})();</script></body></html>
