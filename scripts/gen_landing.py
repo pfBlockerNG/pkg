@@ -575,9 +575,10 @@ def _site_footer(root: str, updated: float | None = None) -> str:
     )
 
 
-# pkg is plain HTTP by design (the catalogue signature is the trust anchor), so the
-# canonical URLs stay http:// whatever base the renderer was given.
-CANONICAL_BASE = "http://pkg.pfblockerng.com"
+# pkg fetches stay plain HTTP by design (the catalogue signature is the trust anchor), but the
+# HTML pages are served on both schemes and search engines pick https, so the canonical is
+# always https:// whatever base the renderer was given.
+CANONICAL_BASE = "https://pkg.pfblockerng.com"
 _LANDING_DESC = (
     "Official self-hosted FreeBSD pkg repository for pfBlockerNG on pfSense CE and Plus, "
     "with Stable, Testing, Edge and Nightly channels."

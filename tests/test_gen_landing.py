@@ -3526,9 +3526,9 @@ def test_rendered_pages_declare_a_full_favicon_set(tmp_path: Path, monkeypatch: 
 # ── SEO: description, canonical, robots.txt ───────────────────────────────────
 
 
-def test_landing_has_description_and_http_canonical() -> None:
-    page = gl.render_page("https://pkg.pfblockerng.com", [], _stub_conf, _fixture_site_tree("x"))
-    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/">' in page
+def test_landing_has_description_and_https_canonical() -> None:
+    page = gl.render_page("http://pkg.pfblockerng.com", [], _stub_conf, _fixture_site_tree("x"))
+    assert '<link rel="canonical" href="https://pkg.pfblockerng.com/">' in page
     assert page.count('rel="canonical"') == 1  # exactly one, and it is the bare self-reference
     m = re.search(r'<meta name="description" content="([^"]+)">', page)
     assert m, "landing page needs a meta description"
@@ -3545,12 +3545,12 @@ def test_canonical_href_of_a_hostile_directory_name_leaks_no_markup(tmp_path: Pa
     out = gl._render_catalogue_browse_page(str(docs), 'stable/ce-2.8"><script>')
     head = out[: out.index("</head>")]
     assert "<script>" not in head
-    assert 'href="http://pkg.pfblockerng.com/browse/stable/ce-2.8%22%3E%3Cscript%3E/">' in head
+    assert 'href="https://pkg.pfblockerng.com/browse/stable/ce-2.8%22%3E%3Cscript%3E/">' in head
 
 
 def test_asset_scan_does_not_exempt_a_canonical_link_that_carries_other_attributes() -> None:
     """Guards the asset scan itself: only a bare self-referencing canonical is exempt."""
-    bare = '<link rel="canonical" href="http://pkg.pfblockerng.com/">'
+    bare = '<link rel="canonical" href="https://pkg.pfblockerng.com/">'
     assert _ASSET_REF_RE.findall(bare) == []
     for evil in (
         '<link rel="canonical" href="https://evil.example.com/site.css" type="text/css">',
@@ -3566,8 +3566,8 @@ def test_browse_pages_have_self_canonical_and_description(tmp_path: Path) -> Non
     _touch(docs / "stable" / "ce-2.8" / "meta.conf")
     root = gl.render_browse_root(str(docs), {})
     chan = gl._render_catalogue_browse_page(str(docs), "stable/ce-2.8")
-    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse.html">' in root
-    assert '<link rel="canonical" href="http://pkg.pfblockerng.com/browse/stable/ce-2.8/">' in chan
+    assert '<link rel="canonical" href="https://pkg.pfblockerng.com/browse.html">' in root
+    assert '<link rel="canonical" href="https://pkg.pfblockerng.com/browse/stable/ce-2.8/">' in chan
     for out in (root, chan):
         assert out.count('rel="canonical"') == 1
         assert '<meta name="description" content="' in out
