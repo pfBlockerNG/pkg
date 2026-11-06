@@ -302,8 +302,9 @@ def _files_identical(a: Path, b: Path) -> bool:
 def _evict_undeclared_deps(dest_dir: Path, *, row: Mapping[str, object]) -> bool:
     """Unlink non-catalog, non-canonical .pkg files this dest row does not declare.
 
-    issue #2402: prune_retained never touches dependency .pkg files, so a stray
-    extra already on an undeclaring dest survives attach and is re-indexed.
+    issue #2402: prune_retained only drops superseded versions of a dependency a
+    kept build declares, so a stray extra already on an undeclaring dest would
+    survive attach and be re-indexed.
     Scoped to this dest directory only. A declared leftover is kept even when
     this run did not re-attach it.
     """
