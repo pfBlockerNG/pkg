@@ -296,18 +296,20 @@ def prune_retained(
     """Delete every CANONICAL ``.pkg`` in ``site_root/channel/varver`` beyond the
     newest generations kept, newest-first by ``pfb_pkg.pkg_version_sort_key``:
     ``TAGGED_RETENTION_KEEP`` on stable/testing/edge, ``NIGHTLY_RETENTION_KEEP`` on
-    nightly. Returns the deleted paths.
+    nightly. Returns every deleted path: canonical builds, then superseded dependencies.
 
     Only this catalogue's own files count. A slower channel serving an older build
     does NOT keep it here: that would leave a stale second version, which pkg may
     pick over the newest (#3390). A newer slower build becomes this catalogue's
     newest through ``backfill_from_slower_channels``, which runs first.
 
-    Scoped to the canonical package only (manifest ``name`` ==
-    ``pfb_pkg.CANONICAL_EMITTED_IDENTITY``): a dependency ``.pkg`` sitting in the
-    same directory (e.g. ``py311-charset-normalizer-3.4.0.pkg``) has no
-    independent retention count of its own and is never touched here, and
-    neither is the catalog's own ``data.pkg``/``packagesite.pkg``. Call this
+    Canonical retention counts only canonical builds (manifest ``name`` ==
+    ``pfb_pkg.CANONICAL_EMITTED_IDENTITY``). A dependency ``.pkg`` is removed only when
+    a kept build declares its name at a different version, that version is in the
+    catalogue, and no kept build declares the dependency's own version
+    (pfBlockerNG/pfBlockerNG#3718: a superseded version would otherwise sit beside
+    the current one, and pkg reports a duplicate dependency listing). The
+    catalog's own ``data.pkg``/``packagesite.pkg`` are never touched. Call this
     BEFORE ``regenerate_catalogue`` so an evicted generation never reaches the
     rebuilt catalog; never mutates ``.pkg`` bytes, only removes whole files.
     """
@@ -322,7 +324,39 @@ def prune_retained(
     evicted = tuple(path for path, _version in canonical[keep:])
     for path in evicted:
         path.unlink()
-    return evicted
+    declared: set[tuple[str, str]] = set()
+    for path, _version in canonical[:keep]:
+        deps = pfb_pkg.read_compact_manifest(path).get("deps")
+        if not isinstance(deps, dict):
+            continue
+        for name, dep in deps.items():
+            if isinstance(dep, dict) and isinstance(dep.get("version"), str):
+                declared.add((name, dep["version"]))
+    dependencies: list[tuple[Path, str, str]] = []
+    for path in sorted(catalogue_dir.glob("*.pkg")):
+        if not path.is_file() or path.name in catalogue_engine._CATALOG_PKG_FILES:
+            continue
+        manifest = pfb_pkg.read_compact_manifest(path)
+        name, version = manifest.get("name"), manifest.get("version")
+        if (
+            name == pfb_pkg.CANONICAL_EMITTED_IDENTITY
+            or not isinstance(name, str)
+            or not isinstance(version, str)
+        ):
+            continue
+        dependencies.append((path, name, version))
+    # Supersede only when a kept build's declared version is on disk: otherwise the
+    # old copy may be the only one a kept build can install from.
+    installed = {(name, version) for _path, name, version in dependencies}
+    current_names = {name for name, _version in declared & installed}
+    superseded = [
+        path
+        for path, name, version in dependencies
+        if name in current_names and (name, version) not in declared
+    ]
+    for path in superseded:
+        path.unlink()
+    return (*evicted, *superseded)
 
 
 def verify_multi_destination_identity(
