@@ -852,6 +852,84 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(remaining), ca.NIGHTLY_RETENTION_KEEP)
         self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
 
+    def _seed_declaring(self, catalogue_dir: Path, builds: dict[str, str]) -> None:
+        """One canonical build per ``version -> declared charset-normalizer version``."""
+        for version, dep_version in builds.items():
+            _drop(
+                catalogue_dir,
+                _canonical_pkg(
+                    self.tmp,
+                    version=version,
+                    deps={
+                        "py311-charset-normalizer": {
+                            "origin": "textproc/py-charset-normalizer",
+                            "version": dep_version,
+                        }
+                    },
+                    local_name=f"pfSense-pkg-pfBlockerNG-{version}.pkg",
+                ),
+            )
+
+    def _drop_charset(self, catalogue_dir: Path, *versions: str) -> None:
+        for version in versions:
+            _drop(
+                catalogue_dir,
+                _dep_pkg(
+                    self.tmp,
+                    version=version,
+                    origin="textproc/py-charset-normalizer",
+                    local_name=f"py311-charset-normalizer-{version}.pkg",
+                ),
+            )
+
+    def test_dependency_version_no_kept_build_declares_is_evicted(self) -> None:
+        """pfBlockerNG/pfBlockerNG#3718: once the last build declaring an older
+        dependency version ages out, that version leaves the catalogue, so pkg
+        never sees two packages with the dependency's name."""
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        builds = {"1.0.0": "3.4.4"}
+        builds.update({f"1.0.{i}": "3.4.7" for i in range(1, ca.NIGHTLY_RETENTION_KEEP + 1)})
+        self._seed_declaring(catalogue_dir, builds)
+        self._drop_charset(catalogue_dir, "3.4.4", "3.4.7")
+
+        evicted = ca.prune_retained(out, "nightly", "ce-2.8")
+        ca.regenerate_catalogue(out, "nightly", "ce-2.8")
+
+        self.assertEqual(
+            sorted(p.name for p in evicted),
+            ["pfSense-pkg-pfBlockerNG-1.0.0.pkg", "py311-charset-normalizer-3.4.4.pkg"],
+        )
+        for archive, rows in _descriptor_entries(catalogue_dir).items():
+            with self.subTest(archive=archive):
+                self.assertEqual(
+                    [r for r in rows if r.startswith("py311-charset-normalizer-")],
+                    ["py311-charset-normalizer-3.4.7"],
+                )
+
+    def test_dependency_version_a_kept_build_declares_survives(self) -> None:
+        """While a retained build still declares the older version, it stays
+        installable: both dependency versions are kept."""
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        self._seed_declaring(catalogue_dir, {"1.0.0": "3.4.4", "1.0.1": "3.4.7"})
+        self._drop_charset(catalogue_dir, "3.4.4", "3.4.7")
+
+        self.assertEqual(ca.prune_retained(out, "nightly", "ce-2.8"), ())
+        self.assertIn("py311-charset-normalizer-3.4.4.pkg", _pkg_names(catalogue_dir))
+        self.assertIn("py311-charset-normalizer-3.4.7.pkg", _pkg_names(catalogue_dir))
+
+    def test_only_copy_of_a_dependency_survives_a_version_mismatch(self) -> None:
+        """A kept build declaring a version the catalogue lacks still resolves the
+        dependency by name, so the sole on-disk copy is never removed."""
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        self._seed_declaring(catalogue_dir, {"1.0.0": "3.4.7"})
+        self._drop_charset(catalogue_dir, "3.4.4")
+
+        self.assertEqual(ca.prune_retained(out, "nightly", "ce-2.8"), ())
+        self.assertIn("py311-charset-normalizer-3.4.4.pkg", _pkg_names(catalogue_dir))
+
 
 def _descriptor_entries(catalogue_dir: Path) -> dict[str, list[str]]:
     """``name-version`` of every package row in the catalogue's two descriptor
