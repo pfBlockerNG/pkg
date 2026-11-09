@@ -45,8 +45,8 @@ _MAX_VARVER_LENGTH = 255
 
 # pkg picks the FIRST candidate a repository lists, not the newest (#3390): "3.3.10" <
 # "3.3.9" as strings, so a tagged catalogue lists exactly one version. Nightly is out
-# of scope for #3390 and keeps its five newest builds.
-NIGHTLY_RETENTION_KEEP = 5
+# of scope for #3390 and keeps only its newest build, to keep the Pages site small.
+NIGHTLY_RETENTION_KEEP = 1
 TAGGED_RETENTION_KEEP = 1
 
 # Containment order (slower -> faster): a faster channel may list any slower channel's

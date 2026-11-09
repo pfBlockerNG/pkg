@@ -729,7 +729,7 @@ def _pkg(channel: str, name: str, version: str, abi: str, rel: str, size: int = 
 
 
 def test_build_table_keeps_only_latest_nightly_per_abi() -> None:
-    """Scenario: retention keeps several nightlies; the table shows only the newest.
+    """Scenario: a catalogue holds several nightlies; the table shows only the newest.
 
     Given two nightly builds (old + new) for one ABI plus a testing build,
     When the table is built,
@@ -1025,7 +1025,7 @@ def test_build_edition_sections_sorted_by_pkg_version_then_pfsense_version_desc(
 
 
 def test_older_nightlies_one_row_per_nightly_version_per_pfsense_version() -> None:
-    """Retention keeps several nightlies, so the disclosure lists one row per retained
+    """Two retained nightly versions (one per lagging varver): the disclosure lists one row per
     nightly version per pfSense version it was built for — same order rule as the main
     table: pfBlockerNG version desc, then pfSense version desc (issue #1863).
 

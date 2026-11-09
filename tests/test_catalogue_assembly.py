@@ -724,8 +724,8 @@ class ReplaceInPlaceTests(_TempDirTestCase):
 # so pkg's first-candidate selection already lands on the newest). Every tagged
 # channel keeps exactly ONE (pfBlockerNG/pfBlockerNG#3390: pkg takes the first
 # candidate a repository lists, not the newest, and "3.3.10" < "3.3.9" as strings).
-# Covered here: below/at/above keep, two varvers pruning independently,
-# dependency packages never counted.
+# Covered here: two builds keep only the newer, at/above keep, two varvers pruning
+# independently, dependency packages never counted.
 # --------------------------------------------------------------------------- #
 
 
@@ -737,14 +737,6 @@ class RetentionTests(_TempDirTestCase):
         # holds build_repo's own canonical <name>-<version>.pkg output; prune_retained
         # never renames anything, it only deletes whole files.
         _seed_canonical(self.tmp, catalogue_dir, versions)
-
-    def test_below_keep_all_survive(self) -> None:
-        out = self.tmp / "out"
-        catalogue_dir = out / "nightly" / "ce-2.8"
-        self._seed(catalogue_dir, ["1.0.0", "2.0.0"])
-        evicted = ca.prune_retained(out, "nightly", "ce-2.8")
-        self.assertEqual(evicted, ())
-        self.assertEqual(len(_pkg_names(catalogue_dir)), 2)
 
     def test_exactly_at_keep_all_survive(self) -> None:
         out = self.tmp / "out"
@@ -768,12 +760,28 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(remaining), ca.NIGHTLY_RETENTION_KEEP)
         self.assertNotIn("pfSense-pkg-pfBlockerNG-1.0.0.pkg", remaining)
 
+    def test_two_builds_keep_only_the_newer(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        self._seed(catalogue_dir, ["1.0.0", "2.0.0"])
+        evicted = ca.prune_retained(out, "nightly", "ce-2.8")
+        self.assertEqual([p.name for p in evicted], ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
+        ca.regenerate_catalogue(out, "nightly", "ce-2.8")
+        self.assertEqual(_pkg_names(catalogue_dir), ["pfSense-pkg-pfBlockerNG-2.0.0.pkg"])
+        self.assertEqual(
+            _descriptor_entries(catalogue_dir),
+            {
+                "packagesite": ["pfSense-pkg-pfBlockerNG-2.0.0"],
+                "data": ["pfSense-pkg-pfBlockerNG-2.0.0"],
+            },
+        )
+
     def test_two_varvers_prune_independently(self) -> None:
         out = self.tmp / "out"
         dir_a = out / "nightly" / "ce-2.8"
         dir_b = out / "nightly" / "plus-26.03"
         self._seed(dir_a, [f"1.0.{i}" for i in range(ca.NIGHTLY_RETENTION_KEEP + 1)])
-        for version in ["1.0.0", "2.0.0"]:
+        for version in ["1.0.0"]:
             _drop(
                 dir_b,
                 _canonical_pkg(
@@ -789,7 +797,7 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(evicted_a), 1)
         self.assertEqual(evicted_b, ())
         self.assertEqual(len(_pkg_names(dir_a)), ca.NIGHTLY_RETENTION_KEEP)
-        self.assertEqual(len(_pkg_names(dir_b)), 2)
+        self.assertEqual(len(_pkg_names(dir_b)), 1)
 
     def test_dependency_pkg_never_counted_or_touched(self) -> None:
         out = self.tmp / "out"
@@ -908,16 +916,15 @@ class RetentionTests(_TempDirTestCase):
                 )
 
     def test_dependency_version_a_kept_build_declares_survives(self) -> None:
-        """While a retained build still declares the older version, it stays
-        installable: both dependency versions are kept."""
+        """While a retained build still declares an older version, it stays
+        installable: that dependency version is kept."""
         out = self.tmp / "out"
         catalogue_dir = out / "nightly" / "ce-2.8"
-        self._seed_declaring(catalogue_dir, {"1.0.0": "3.4.4", "1.0.1": "3.4.7"})
-        self._drop_charset(catalogue_dir, "3.4.4", "3.4.7")
+        self._seed_declaring(catalogue_dir, {"1.0.0": "3.4.4"})
+        self._drop_charset(catalogue_dir, "3.4.4")
 
         self.assertEqual(ca.prune_retained(out, "nightly", "ce-2.8"), ())
         self.assertIn("py311-charset-normalizer-3.4.4.pkg", _pkg_names(catalogue_dir))
-        self.assertIn("py311-charset-normalizer-3.4.7.pkg", _pkg_names(catalogue_dir))
 
     def test_only_copy_of_a_dependency_survives_a_version_mismatch(self) -> None:
         """A kept build declaring a version the catalogue lacks still resolves the
@@ -1029,19 +1036,19 @@ class TaggedSingleVersionTests(_TempDirTestCase):
         self.assertEqual(evicted, ())
         self.assertEqual(_pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-1.0.0.pkg"])
 
-    def test_nightly_keeps_its_history_while_tagged_channels_collapse(self) -> None:
+    def test_nightly_and_tagged_channels_each_keep_one_build(self) -> None:
         out = self.tmp / "out"
         nightly_dir = out / "nightly" / "ce-2.8"
         edge_dir = out / "edge" / "ce-2.8"
-        versions = [f"1.0.{i}" for i in range(ca.NIGHTLY_RETENTION_KEEP)]
+        versions = ["1.0.0", "1.0.1"]
         _seed_canonical(self.tmp, nightly_dir, versions)
         _seed_canonical(self.tmp, edge_dir, versions)
 
-        self.assertEqual(ca.prune_retained(out, "nightly", "ce-2.8"), ())
-        ca.prune_retained(out, "edge", "ce-2.8")
+        self.assertEqual(len(ca.prune_retained(out, "nightly", "ce-2.8")), 1)
+        self.assertEqual(len(ca.prune_retained(out, "edge", "ce-2.8")), 1)
 
-        self.assertEqual(len(_pkg_names(nightly_dir)), ca.NIGHTLY_RETENTION_KEEP)
-        self.assertEqual(len(_pkg_names(edge_dir)), 1)
+        self.assertEqual(_pkg_names(nightly_dir), ["pfSense-pkg-pfBlockerNG-1.0.1.pkg"])
+        self.assertEqual(_pkg_names(edge_dir), ["pfSense-pkg-pfBlockerNG-1.0.1.pkg"])
 
 
 class NewestEligibleVersionTests(_TempDirTestCase):

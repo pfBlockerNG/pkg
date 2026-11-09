@@ -1024,8 +1024,8 @@ def older_nightlies(pkgs: list[dict]) -> list[dict]:
     """The retained nightly builds OTHER than the newest (newest-first, ABI-grouped).
 
     The per-edition tables surface only the latest nightly (the "install now" view);
-    retention (ADR-18) keeps several older nightlies in the catalog, reachable here
-    rather than only via the raw catalog-tree links. Empty when none are retained.
+    retention (ADR-18) keeps only each catalogue's newest nightly, so an older one shows
+    here only while another varver still serves it. Empty when none are retained.
     """
     latest = latest_versions(pkgs).get("nightly")
     rows = [p for p in pkgs if p["channel"] == "nightly" and p["version"] != latest]
@@ -1040,8 +1040,8 @@ def _older_nightlies_by_edition(
     """The retained older nightlies grouped by edition key (matrix-joined by ABI), so each
     edition's disclosure folds in directly under that edition's table. Empty when none.
 
-    Retention keeps several nightly versions, so an edition lists one row per retained
-    version per pfSense version it was built for, in the shared table order (issue #1863).
+    Each varver retains its own newest nightly, so an edition lists one row per retained
+    older version per pfSense version it was built for, in the shared table order (issue #1863).
     """
     by_edition: dict[str, list[dict]] = {}
     for ekey, row in _join_matrix(older_nightlies(pkgs), matrix):
