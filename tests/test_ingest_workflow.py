@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 INGEST = WORKFLOWS / "ingest.yml"
 RENDER = WORKFLOWS / "render-site.yml"
+DEPLOY = WORKFLOWS / "deploy-pages.yml"
+DEPLOY_CALL = "./.github/workflows/deploy-pages.yml"
+PAGES_PERMISSIONS = {"contents": "read", "pages": "write", "id-token": "write"}
 SIGNING_STEP = "Configure pfblockerng-bot signing"
 # A step is a writer when it runs any repo shell script (the two writers today,
 # and whatever joins them) or reaches a git verb that writes history itself,
@@ -261,6 +264,104 @@ class IngestionWorkflowContractTests(unittest.TestCase):
         for path in _workflows() + sorted((ROOT / "scripts").glob("*.sh")):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("github-actions[bot]", text, f"generic Actions identity in {path.name}")
+
+
+def _spec(workflow: Path) -> dict[str, object]:
+    return yaml.safe_load(workflow.read_text(encoding="utf-8"))
+
+
+def _triggers(spec: dict[str, object]) -> dict[str, object]:
+    # YAML 1.1 (PyYAML) reads the bare key `on` as the boolean True.
+    return spec.get("on", spec.get(True)) or {}
+
+
+class PagesDeployWorkflowContractTests(unittest.TestCase):
+    """Pages publishes from Actions, inside the run that committed docs/.
+
+    deploy-pages caps one attempt at 10 minutes (the same cap that fails the legacy
+    branch build), so a timed-out deploy is retried once, and the ingest run (which
+    the caller waits on) must not end before the site is live.
+    """
+
+    def _deploy_steps(self) -> list[dict[str, object]]:
+        return _steps(DEPLOY, "deploy")
+
+    def test_deploy_workflow_triggers_are_call_dispatch_and_docs_push(self) -> None:
+        self.assertTrue(DEPLOY.is_file(), "deploy-pages.yml is missing")
+        triggers = _triggers(_spec(DEPLOY))
+        self.assertIn("workflow_call", triggers)
+        self.assertIn("workflow_dispatch", triggers)
+        self.assertEqual(triggers["push"], {"branches": ["main"], "paths": ["docs/**"]})
+
+    def test_deploy_job_is_the_github_pages_environment_with_least_privilege(self) -> None:
+        spec = _spec(DEPLOY)
+        self.assertEqual(list(spec["jobs"]), ["deploy"])
+        job = spec["jobs"]["deploy"]
+        self.assertEqual(job["environment"]["name"], "github-pages")
+        self.assertIn("page_url", job["environment"]["url"])
+        self.assertEqual(job["permissions"], PAGES_PERMISSIONS)
+        # Never cancel a deployment that is mid-flight: queue behind it. Job level, so it also
+        # binds when ingest/render call this workflow.
+        self.assertEqual(job["concurrency"], {"group": "pages-deploy", "cancel-in-progress": False})
+        self.assertNotIn("concurrency", spec)
+
+    def test_deploy_uploads_the_main_tip_docs_and_retries_the_deploy_once(self) -> None:
+        steps = self._deploy_steps()
+        uses = [str(step.get("uses", "")) for step in steps]
+        for action in uses:
+            self.assertRegex(action, r"^actions/[\w-]+@v\d+$", "pin a major tag like the other workflows")
+
+        checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@"))
+        self.assertEqual(
+            checkout["with"], {"ref": "main", "fetch-depth": 1, "persist-credentials": False}
+        )
+        upload = next(s for s in steps if str(s.get("uses", "")).startswith("actions/upload-pages-artifact@"))
+        self.assertEqual(upload["with"]["path"], "docs")
+
+        deploys = [s for s in steps if str(s.get("uses", "")).startswith("actions/deploy-pages@")]
+        self.assertEqual(len(deploys), 2, "exactly one retry after the first deploy attempt")
+        first, retry = deploys
+        self.assertIs(first.get("continue-on-error"), True)
+        self.assertTrue(first.get("id"))
+        self.assertEqual(retry.get("if"), f"steps.{first['id']}.outcome == 'failure'")
+        self.assertNotIn("continue-on-error", retry, "the last attempt must fail the job")
+        for attempt in deploys:
+            # deploy-pages clamps larger values to its 600000 ms maximum.
+            self.assertEqual(int(attempt["with"]["timeout"]), 600_000)
+        order = [steps.index(s) for s in (checkout, upload, first, retry)]
+        self.assertEqual(order, sorted(order))
+
+    def test_ingest_deploys_only_after_an_ingest_that_committed(self) -> None:
+        spec = _spec(INGEST)
+        self.assertEqual(
+            spec["jobs"]["ingest"]["outputs"], {"noop": "${{ steps.publish.outputs.noop }}"}
+        )
+        deploy = spec["jobs"]["deploy"]
+        self.assertEqual(deploy["needs"], "ingest")
+        self.assertEqual(deploy["uses"], DEPLOY_CALL)
+        self.assertEqual(deploy["permissions"], PAGES_PERMISSIONS)
+        self.assertEqual(
+            deploy["if"],
+            "needs.ingest.result == 'success' && inputs.operation != 'nightly-cleanup'"
+            " && needs.ingest.outputs.noop != 'true'",
+        )
+        # A run now lasts as long as its deploy: queue every mutation instead of letting a
+        # newer pending run replace an older one the caller is still watching.
+        self.assertEqual(
+            spec["concurrency"],
+            {"group": "pkg-repository-mutation", "cancel-in-progress": False, "queue": "max"},
+        )
+
+    def test_render_deploys_after_a_successful_render(self) -> None:
+        deploy = _spec(RENDER)["jobs"]["deploy"]
+        self.assertEqual(deploy["needs"], "render")
+        self.assertEqual(deploy["uses"], DEPLOY_CALL)
+        self.assertEqual(deploy["permissions"], PAGES_PERMISSIONS)
+        self.assertEqual(deploy["if"], "needs.render.result == 'success'")
+        self.assertEqual(
+            _spec(RENDER)["concurrency"],
+            {"group": "pkg-repository-mutation", "cancel-in-progress": False, "queue": "max"},
+        )
 
 
 def _tagged_intake_script() -> str:

@@ -66,9 +66,13 @@ permissions:
 concurrency:
   group: pkg-repository-mutation
   cancel-in-progress: false
+  # A run lasts as long as its Pages deploy; queue rather than replace pending runs.
+  queue: max
 
 jobs:
   ingest:
+    outputs:
+      noop: ${{ steps.publish.outputs.noop }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -304,3 +308,13 @@ jobs:
           path: ${{ runner.temp }}/publication-result/result.json
           if-no-files-found: error
           retention-days: 14
+
+  # Publish only what this run committed: the commit used GITHUB_TOKEN, so no push trigger fires.
+  deploy:
+    needs: ingest
+    if: needs.ingest.result == 'success' && inputs.operation != 'nightly-cleanup' && needs.ingest.outputs.noop != 'true'
+    uses: ./.github/workflows/deploy-pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

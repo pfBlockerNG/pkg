@@ -1,0 +1,52 @@
+name: Deploy pkg Pages
+
+# Called by ingest.yml and render-site.yml: their commits use GITHUB_TOKEN, which never
+# triggers workflows, so the push trigger below only fires for human/App pushes.
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Queue behind an in-flight deployment; job level so it also binds when called.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy-retry.outputs.page_url || steps.deploy.outputs.page_url }}
+    steps:
+      # The tip the ingest/render run just pushed, not the SHA this run was started at.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs
+
+      # deploy-pages caps one attempt at 10 minutes, which the legacy build also hits; retry once.
+      - name: Deploy to GitHub Pages
+        id: deploy
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+        with:
+          timeout: 600000
+
+      - name: Retry the deploy once
+        id: deploy-retry
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        with:
+          timeout: 600000
