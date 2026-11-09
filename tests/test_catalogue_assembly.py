@@ -781,7 +781,7 @@ class RetentionTests(_TempDirTestCase):
         dir_a = out / "nightly" / "ce-2.8"
         dir_b = out / "nightly" / "plus-26.03"
         self._seed(dir_a, [f"1.0.{i}" for i in range(ca.NIGHTLY_RETENTION_KEEP + 1)])
-        for version in ["1.0.0"]:
+        for version in ["1.0.0", "2.0.0"]:
             _drop(
                 dir_b,
                 _canonical_pkg(
@@ -793,11 +793,12 @@ class RetentionTests(_TempDirTestCase):
             )
 
         evicted_a = ca.prune_retained(out, "nightly", "ce-2.8")
+        self.assertEqual(_pkg_names(dir_b), ["b1.0.0.pkg", "b2.0.0.pkg"])
         evicted_b = ca.prune_retained(out, "nightly", "plus-26.03")
         self.assertEqual(len(evicted_a), 1)
-        self.assertEqual(evicted_b, ())
+        self.assertEqual([p.name for p in evicted_b], ["b1.0.0.pkg"])
         self.assertEqual(len(_pkg_names(dir_a)), ca.NIGHTLY_RETENTION_KEEP)
-        self.assertEqual(len(_pkg_names(dir_b)), 1)
+        self.assertEqual(_pkg_names(dir_b), ["b2.0.0.pkg"])
 
     def test_dependency_pkg_never_counted_or_touched(self) -> None:
         out = self.tmp / "out"
