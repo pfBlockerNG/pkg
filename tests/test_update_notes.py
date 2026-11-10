@@ -135,6 +135,21 @@ class ReleaseItemsTests(unittest.TestCase):
         self.assertEqual(un.release_items(""), [])
         self.assertEqual(un.release_items("## Notes\n\nJust a paragraph.\n"), [])
 
+    def test_thematic_breaks_are_not_bullets(self) -> None:
+        body = "\n".join(
+            [
+                "* * *",
+                "- - -",
+                "-  -  -  -",
+                "* _ -",
+                "- Real bullet",
+                "* * *",
+                "- - -",
+                "- -- is a flag",
+            ]
+        )
+        self.assertEqual(un.release_items(body), ["Real bullet", "-- is a flag"])
+
     def test_hostile_bullets(self) -> None:
         body = "\n".join(
             [
@@ -335,6 +350,16 @@ class FetchCompareTests(unittest.TestCase):
         result, err = self._call()
         self.assertIsNone(result)
         self.assertEqual(len(err.splitlines()), 1, err)
+
+    def test_deeply_nested_json_returns_none_with_one_warning_line(self) -> None:
+        # json.loads raises RecursionError, not ValueError, on this; a Nightly
+        # publication must not abort over a hostile or broken gh response.
+        self._fake_gh("head -c 200000 /dev/zero | tr '\\0' '['\n")
+        result, err = self._call()
+        self.assertIsNone(result)
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertTrue(err.startswith("::warning::"), err)
+        self.assertNotIn("Traceback", err)
 
     def test_missing_gh_returns_none_with_one_warning_line(self) -> None:
         with mock.patch.dict(os.environ, {"PATH": str(self.bin)}):

@@ -31,6 +31,8 @@ _URL = r"\((?:[^()]|\([^()]*\))*\)"
 _IMAGE = re.compile(r"!\[[^\]]*\]" + _URL)
 _LINK = re.compile(r"\[([^\]]*)\]" + _URL)
 _UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
+# What is left of a Markdown thematic break (`* * *`, `- - -`) used as a bullet.
+_RULE = re.compile(r"[*_ -]+")
 _PUNCTUATION = str.maketrans(
     {
         "\u2192": "->",
@@ -63,11 +65,15 @@ def release_items(body: str) -> list[str]:
     """The cleaned text of every top-level Markdown bullet in a Release body.
 
     Indented (nested) bullets, headings, paragraphs and the changelog line are not
-    bullets; a bullet that cleans down to nothing is dropped.
+    bullets; a bullet that cleans down to nothing, or to a thematic break (`* * *`),
+    is dropped.
     """
     items = []
     for line in body.replace("\r\n", "\n").split("\n"):
-        if line.startswith(("- ", "* ")) and (item := clean_item(line[2:])):
+        if not line.startswith(("- ", "* ")):
+            continue
+        item = clean_item(line[2:])
+        if item and not _RULE.fullmatch(item):
             items.append(item)
     return items
 
@@ -152,7 +158,7 @@ def fetch_compare(prev_sha: str, new_sha: str) -> dict | None:
             return data
         else:
             reason = "response is not a JSON object"
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
     print(
         f"::warning::update_notes: no notes for {prev_sha}...{new_sha} "
