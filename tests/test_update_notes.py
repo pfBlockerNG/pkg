@@ -236,6 +236,40 @@ class CommitSubjectsTests(unittest.TestCase):
             (["kept"], 3),
         )
 
+    def test_graph_refresh_ci_and_docs_commits_are_neither_listed_nor_counted(self) -> None:
+        self.assertEqual(
+            un.commit_subjects(
+                _compare(
+                    "build: refresh graph after rebasing onto devel",
+                    "dns: fix reload race",
+                    "graph: refresh endpoint extraction on progressive Stats base",
+                    "build: refresh the graph from a clean tree",
+                    "build: refresh graph for the DNS > General fold\n\nbody",
+                    "tests: pin the PSL arm and refresh the graph from a clean tree",
+                    "ci: bump actions/checkout to v7",
+                    "docs: explain notes.json",
+                    "ci(nightly): pin the runner image",
+                    "docsite: render the landing page",
+                    "build: bump checkout",
+                )
+            ),
+            (
+                [
+                    "build: bump checkout",
+                    "docsite: render the landing page",
+                    "tests: pin the PSL arm and refresh the graph from a clean tree",
+                    "dns: fix reload race",
+                ],
+                4,
+            ),
+        )
+
+    def test_only_filtered_commits_leave_nothing_to_list(self) -> None:
+        self.assertEqual(
+            un.commit_subjects(_compare("build: refresh graph from clean extraction", "ci: retry", "docs: typo")),
+            ([], 0),
+        )
+
     def test_malformed_responses_raise_value_error(self) -> None:
         bad = {
             "not a dict": [],

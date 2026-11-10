@@ -33,6 +33,8 @@ _LINK = re.compile(r"\[([^\]]*)\]" + _URL)
 _UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
 # What is left of a Markdown thematic break (`* * *`, `- - -`) used as a bullet.
 _RULE = re.compile(r"[*_ -]+")
+# Commits a box owner gains nothing from: graph rebuilds, CI and docs-only changes.
+_HIDDEN_COMMIT = re.compile(r"(?:ci|docs|graph)(?:\([^)]*\))?:|build: refresh (?:the )?graph\b")
 _PUNCTUATION = str.maketrans(
     {
         "\u2192": "->",
@@ -80,8 +82,9 @@ def release_items(body: str) -> list[str]:
 
 
 def commit_subjects(compare_json: dict) -> tuple[list[str], int]:
-    """(cleaned commit subjects newest first, total commit count) from a GitHub
-    compare response. ``ValueError`` on any shape the publisher cannot trust,
+    """(cleaned commit subjects newest first, their count) from a GitHub compare
+    response, leaving out graph-rebuild, CI and docs commits.
+    ``ValueError`` on any shape the publisher cannot trust,
     including a response that lists fewer commits than ``total_commits`` (the listed
     ones would not be the newest)."""
     try:
@@ -102,7 +105,10 @@ def commit_subjects(compare_json: dict) -> tuple[list[str], int]:
         message = commit.get("message") if isinstance(commit, dict) else None
         if not isinstance(message, str):
             raise ValueError("compare response commit lacks a string message")
-        if subject := clean_item(message.split("\n", 1)[0]):
+        subject = clean_item(message.split("\n", 1)[0])
+        if _HIDDEN_COMMIT.match(subject):
+            total -= 1
+        elif subject:
             subjects.append(subject)
     return subjects, total
 

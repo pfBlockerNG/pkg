@@ -69,7 +69,8 @@ only when it has something to say; without it the notice stays one line. Fetch i
   notes, with `link` `{"kind":"release","tag":"<tag>"}`. A catalogue that was filled
   from a slower channel's build, or a publish without release notes, gets no file.
 - Nightly: the commit subjects between the previous published Nightly and this one,
-  newest first, with `link` `{"kind":"compare","from":"<previous sha>","to":"<sha>"}`.
+  newest first, leaving out graph-rebuild, `ci:` and `docs:` commits, with `link`
+  `{"kind":"compare","from":"<previous sha>","to":"<sha>"}`.
   The first Nightly of a catalogue, or one where GitHub could not supply the
   comparison, gets no file.
 - The file has no timestamps, so republishing unchanged notes leaves git with no diff.
