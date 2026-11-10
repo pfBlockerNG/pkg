@@ -153,6 +153,8 @@ jobs:
             printf '%s' "$PKG_ASSETS" | jq 'map({(.name): (.digest | ltrimstr("sha256:"))}) | add' \
               > "${RUNNER_TEMP}/release-assets/digests.json"
             gh release download "$RELEASE_TAG" -R "$SOURCE_REPOSITORY" --pattern '*.pkg' --dir "${RUNNER_TEMP}/release-assets"
+            printf '%s' "$META" | jq -r '.body // ""' > "${RUNNER_TEMP}/release-assets/release-notes.md"
+            printf 'RELEASE_NOTES_FILE=%s\n' "${RUNNER_TEMP}/release-assets/release-notes.md" >> "$GITHUB_ENV"
           fi
 
       - name: Set up ORAS
@@ -240,6 +242,8 @@ jobs:
           NIGHTLY_ARTIFACT_REF: ${{ inputs.artifact_ref }}
           STAGING_PREFIX: ${{ inputs.staging_prefix }}
           BASE_URL: https://pkg.pfblockerng.com
+          # The Nightly publisher asks the GitHub compare API for notes.json; the repo is public.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           export PFB_SRC="$GITHUB_WORKSPACE"

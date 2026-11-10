@@ -57,6 +57,13 @@ reads that from a ``digests.json`` sidecar inside ``--assets-dir`` — ``{"<file
 "<sha256 hex>", ...}`` — that the caller (the release workflow) is expected to populate
 from the GitHub Releases API's own per-asset ``digest`` field before downloading.
 
+Update notes (pfBlockerNG/pfBlockerNG#3816): ``--notes-file`` names the Release body
+(Markdown). Each touched catalogue that ends up serving this run's build gets a
+``notes.json`` with the body's top-level bullets (``update_notes``), written AFTER the
+rebuild. No file, no readable body, or no bullets writes none; a ``notes.json`` that
+still describes the catalogue's newest version survives the rebuild
+(``catalogue_assembly.regenerate_catalogue``), any other is dropped.
+
 All verification code is imported from this pkg checkout.
 """
 
@@ -87,6 +94,7 @@ import catalogue_sig_only as cso
 import pfb_pkg
 import publish_catalogues as pc
 import tagged_release_handoff as trh
+import update_notes
 
 _SITE_SUBDIR = "docs"
 _DIGESTS_FILENAME = "digests.json"
@@ -585,6 +593,7 @@ def publish(
     pkg_repo: str | Path,
     *,
     sign_key: Path | None = None,
+    notes_body: str | None = None,
 ) -> PublishReport:
     intake = run_result.intake
     site_root = Path(pkg_repo) / _SITE_SUBDIR
@@ -596,6 +605,7 @@ def publish(
                 site_root / channel / varver, root=site_root
             )
 
+    notes_items = update_notes.release_items(notes_body or "")
     expected_public = _expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
     skipped: list[tuple[str, str, str, str]] = []
@@ -658,6 +668,22 @@ def publish(
             if changed or evicted:
                 ca.regenerate_catalogue(site_root, channel, varver, sign_key=sign_key)
                 touched.append((channel, varver))
+                # Fresh notes describe THIS build, so a destination that ended on
+                # another one (a newer slower-channel build lifted in) gets none, and
+                # the rebuild has already dropped any file left for a different version.
+                notes = (
+                    update_notes.render(
+                        incoming,
+                        notes_items,
+                        len(notes_items),
+                        {"kind": "release", "tag": intake.release_tag},
+                    )
+                    if ca.newest_eligible_version(site_root, channel, varver)
+                    == incoming
+                    else None
+                )
+                if notes is not None:
+                    (dest_dir / update_notes.NOTES_FILENAME).write_bytes(notes)
 
     if source_index:
         ca.verify_multi_destination_identity(site_root, source_index)
@@ -686,6 +712,16 @@ def _load_compatibility_route_matrix(
     return trh._route_matrix(raw)
 
 
+def _read_notes_body(path: str | Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"::warning::update_notes: cannot read {path}: {exc}", file=sys.stderr)
+        return None
+
+
 def run(
     *,
     source_repository: str,
@@ -699,6 +735,7 @@ def run(
     handoff_file: str | Path | None,
     compatibility_route_matrix_file: str | Path | None = None,
     sign_key: Path | None = None,
+    notes_file: str | Path | None = None,
 ) -> PublishReport:
     intake = pc.parse_intake(
         source_repository, release_id, release_tag, destinations, source_run_id
@@ -769,7 +806,12 @@ def run(
         _build_targets(run_result)
         if handoff is not None:
             trh.validate_packages(handoff, [path for _name, path in assets])
-        return publish(run_result, pkg_repo, sign_key=sign_key)
+        return publish(
+            run_result,
+            pkg_repo,
+            sign_key=sign_key,
+            notes_body=_read_notes_body(notes_file),
+        )
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -812,6 +854,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "Omitted = unsigned, today's behaviour."
         ),
     )
+    parser.add_argument(
+        "--notes-file",
+        default="",
+        help=(
+            "the Release body (Markdown); its top-level bullets become each touched "
+            "catalogue's notes.json (pfBlockerNG/pfBlockerNG#3816). Omitted or "
+            "unreadable = no notes.json."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -835,6 +886,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else None
             ),
             sign_key=Path(args.sign_key) if args.sign_key else None,
+            notes_file=Path(args.notes_file) if args.notes_file else None,
         )
     except (
         PublishReleaseError,

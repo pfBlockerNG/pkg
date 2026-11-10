@@ -53,7 +53,9 @@ import hashlib
 import io
 import itertools
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -564,6 +566,195 @@ class SigningTests(_TempDirTestCase):
 
         self.assertEqual(tbrp._sig_members(catalogue_dir / "packagesite.pkg"), {})
         self.assertEqual(tbrp._sig_members(catalogue_dir / "data.pkg"), {})
+
+
+# --------------------------------------------------------------------------- #
+# pfBlockerNG/pfBlockerNG#3816 — notes.json survives a rebuild that does not
+# re-derive it. emit_catalog wipes the directory, so regenerate_catalogue puts the
+# file back byte-identical, and only while it still describes the newest canonical
+# version the rebuilt catalogue lists.
+# --------------------------------------------------------------------------- #
+
+
+def _notes_bytes(version: str) -> bytes:
+    return (
+        f'{{"items":["a change"],"link":{{"kind":"release","tag":"v{version}"}},'
+        f'"schema":1,"total":1,"version":"{version}"}}\n'
+    ).encode()
+
+
+class NotesKeptAcrossRegenerateTests(_TempDirTestCase):
+    def _catalogue(self, versions: list[str]) -> tuple[Path, Path]:
+        out = self.tmp / "out"
+        shutil.rmtree(out, ignore_errors=True)
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        _seed_canonical(self.tmp, catalogue_dir, versions)
+        _drop(catalogue_dir, _dep_pkg(self.tmp, local_name="dep-3.4.0.pkg"))
+        return out, catalogue_dir
+
+    def _regenerate(self, out: Path, catalogue_dir: Path) -> None:
+        ca.regenerate_catalogue(out, "nightly", "ce-2.8")
+        self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
+        self.assertTrue((catalogue_dir / "meta.conf").is_file())
+
+    def test_notes_for_the_newest_version_are_restored_byte_identical(self) -> None:
+        # "3.3.10" is newest by pkg_version_sort_key although "3.3.9" sorts above it
+        # as a string.
+        notes = {
+            "canonical": _notes_bytes("3.3.10"),
+            "formatting and non-ASCII kept verbatim": (
+                b'{\n  "version": "3.3.10",\n  "x": "\xc3\xa9"\n}'
+            ),
+        }
+        for label, raw in notes.items():
+            with self.subTest(label):
+                out, catalogue_dir = self._catalogue(["3.3.9", "3.3.10"])
+                (catalogue_dir / "notes.json").write_bytes(raw)
+
+                self._regenerate(out, catalogue_dir)
+
+                self.assertEqual((catalogue_dir / "notes.json").read_bytes(), raw)
+
+    def test_notes_for_any_other_version_are_dropped(self) -> None:
+        for label, version in (
+            ("an older version still in the pool", "3.3.9"),
+            ("a version the pool does not hold", "3.3.11"),
+            ("a dependency's version", "3.4.0"),
+        ):
+            with self.subTest(label):
+                out, catalogue_dir = self._catalogue(["3.3.9", "3.3.10"])
+                (catalogue_dir / "notes.json").write_bytes(_notes_bytes(version))
+
+                self._regenerate(out, catalogue_dir)
+
+                self.assertFalse((catalogue_dir / "notes.json").exists())
+
+    def test_malformed_notes_are_dropped_and_the_rebuild_still_succeeds(self) -> None:
+        bad: dict[str, bytes] = {
+            "not JSON": b"not json at all",
+            "empty": b"",
+            "invalid UTF-8": b'{"version":"3.3.10"}\xff\xfe',
+            "JSON array": b'[{"version":"3.3.10"}]',
+            "JSON string": b'"3.3.10"',
+            "no version": b'{"schema":1}',
+            "version is a number": b'{"version":3}',
+            "version is null": b'{"version":null}',
+            "absurdly deep nesting": b"[" * 200_000,
+        }
+        for label, raw in bad.items():
+            with self.subTest(label):
+                out, catalogue_dir = self._catalogue(["3.3.9", "3.3.10"])
+                (catalogue_dir / "notes.json").write_bytes(raw)
+
+                self._regenerate(out, catalogue_dir)
+
+                self.assertFalse((catalogue_dir / "notes.json").exists())
+
+    def test_a_notes_json_directory_is_not_read_and_the_rebuild_succeeds(self) -> None:
+        out, catalogue_dir = self._catalogue(["3.3.10"])
+        (catalogue_dir / "notes.json").mkdir()
+
+        self._regenerate(out, catalogue_dir)
+
+        self.assertFalse((catalogue_dir / "notes.json").exists())
+
+    def test_notes_are_dropped_when_the_pool_has_no_canonical_package(self) -> None:
+        out = self.tmp / "out"
+        catalogue_dir = out / "nightly" / "ce-2.8"
+        _drop(catalogue_dir, _dep_pkg(self.tmp, local_name="dep-3.4.0.pkg"))
+        (catalogue_dir / "notes.json").write_bytes(_notes_bytes("3.4.0"))
+
+        self._regenerate(out, catalogue_dir)
+
+        self.assertFalse((catalogue_dir / "notes.json").exists())
+
+    def test_versionless_notes_are_dropped_when_the_pool_has_no_canonical_package(
+        self,
+    ) -> None:
+        # No newest version is None, and None must not equal a missing or null version.
+        for label, raw in (
+            ("no version", b'{"schema":1}'),
+            ("null version", b'{"version":null}'),
+        ):
+            with self.subTest(label):
+                out = self.tmp / "out"
+                shutil.rmtree(out, ignore_errors=True)
+                catalogue_dir = out / "nightly" / "ce-2.8"
+                _drop(catalogue_dir, _dep_pkg(self.tmp, local_name="dep-3.4.0.pkg"))
+                (catalogue_dir / "notes.json").write_bytes(raw)
+
+                self._regenerate(out, catalogue_dir)
+
+                self.assertFalse((catalogue_dir / "notes.json").exists())
+
+    def test_a_catalogue_without_notes_stays_without(self) -> None:
+        out, catalogue_dir = self._catalogue(["3.3.10"])
+
+        self._regenerate(out, catalogue_dir)
+
+        self.assertFalse((catalogue_dir / "notes.json").exists())
+
+
+class SignatureOnlyRepublishWithNotesTests(_TempDirTestCase):
+    """A re-signed but otherwise unchanged catalogue differs from git HEAD in its two
+    archives only; publish-pkg-repo.sh's filter_signature_only_touched drops such a
+    target as a NOOP, but only when git reports nothing else — a deleted notes.json
+    would show as ` D` and turn the NOOP into a publication."""
+
+    def _git(self, repo: Path, *args: str) -> bytes:
+        env = {
+            **os.environ,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+        }
+        identity = ("-c", "user.name=t", "-c", "user.email=t@example.com")
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *identity, "-c", "commit.gpgsign=false", *args],
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+        return proc.stdout
+
+    def test_resigning_a_catalogue_with_current_notes_changes_only_the_archives(
+        self,
+    ) -> None:
+        site = self.tmp / "site"
+        catalogue_dir = site / "nightly" / "ce-2.8"
+        _drop(catalogue_dir, _canonical_pkg(self.tmp, version="3.3.10"))
+        key = tbrp._gen_key(self.tmp / "repo.key")
+        ca.regenerate_catalogue(site, "nightly", "ce-2.8", sign_key=key)
+        raw = _notes_bytes("3.3.10")
+        (catalogue_dir / "notes.json").write_bytes(raw)
+        self._git(site, "init", "-q")
+        self._git(site, "add", "-A")
+        self._git(site, "commit", "-q", "-m", "seed")
+
+        ca.regenerate_catalogue(site, "nightly", "ce-2.8", sign_key=key)
+
+        status = self._git(site, "status", "--porcelain", "--", "nightly/ce-2.8")
+        self.assertEqual(
+            status.decode().splitlines(),
+            [" M nightly/ce-2.8/data.pkg", " M nightly/ce-2.8/packagesite.pkg"],
+        )
+        self.assertEqual((catalogue_dir / "notes.json").read_bytes(), raw)
+        script = Path(__file__).resolve().parent.parent / "scripts"
+        for name in ("data.pkg", "packagesite.pkg"):
+            old = self.tmp / f"old-{name}"
+            old.write_bytes(self._git(site, "show", f"HEAD:nightly/ce-2.8/{name}"))
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(script / "catalogue_sig_only.py"),
+                    "--require-valid-old-signature",
+                    str(old),
+                    str(catalogue_dir / name),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"{name}: {proc.stdout}{proc.stderr}")
 
 
 # --------------------------------------------------------------------------- #

@@ -457,6 +457,11 @@ def _mutate(handoff: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(handoff))
 
 
+def _no_compare(prev_sha: str, new_sha: str) -> None:
+    """Default fetcher for every test: the real one shells out to ``gh``."""
+    return None
+
+
 def _run(
     *,
     handoff: dict[str, Any],
@@ -464,6 +469,7 @@ def _run(
     pkg_repo: Path,
     source_run_id: str = _RUN_ID,
     sign_key: Path | None = None,
+    compare_fetcher: Any = _no_compare,
 ) -> pr.PublishReport:
     handoff_path = results_dir.parent / f"handoff-{next(_pkg_counter)}.json"
     handoff_path.write_text(json.dumps(handoff), encoding="utf-8")
@@ -473,6 +479,7 @@ def _run(
         pkg_repo=pkg_repo,
         source_run_id=source_run_id,
         sign_key=sign_key,
+        compare_fetcher=compare_fetcher,
     )
 
 
@@ -1033,6 +1040,301 @@ class RetentionTests(_TempDirTestCase):
         self.assertEqual(len(remaining), keep)
         self.assertNotIn(f"pfSense-pkg-pfBlockerNG-{first_version}.pkg", remaining)
         self.assertTrue((catalogue_dir / dep_name).is_file())
+
+
+# --------------------------------------------------------------------------- #
+# pfBlockerNG/pfBlockerNG#3816 — notes.json: commit subjects since the previous
+# published Nightly, written next to packagesite.pkg after the catalogue is rebuilt.
+# --------------------------------------------------------------------------- #
+
+_SHA_A = "a" * 40
+_SHA_C = "c" * 40
+_SHA_D = "d" * 40
+
+_TWO_COMMITS = {
+    "total_commits": 2,
+    # GitHub's compare API lists commits oldest first.
+    "commits": [
+        {"commit": {"message": "first change\n\nlong body"}},
+        {"commit": {"message": "second change"}},
+    ],
+}
+
+
+class _StubCompare:
+    def __init__(self, response: dict[str, Any] | None) -> None:
+        self.response = response
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, prev_sha: str, new_sha: str) -> dict[str, Any] | None:
+        self.calls.append((prev_sha, new_sha))
+        return self.response
+
+
+def _expected_notes(version: str, prev_sha: str, new_sha: str) -> bytes:
+    return (
+        '{"items":["second change","first change"],'
+        f'"link":{{"from":"{prev_sha}","kind":"compare","to":"{new_sha}"}},'
+        f'"schema":1,"total":2,"version":"{version}"}}\n'
+    ).encode()
+
+
+class UpdateNotesTests(_TempDirTestCase):
+    VARVERS = ("ce-2.8", "ce-2.9")
+    ROUTES = (ROW_CE15, ROW_CE15_29)  # two varvers fed by one build leg
+
+    def _prepare(
+        self,
+        build_date: date,
+        source_sha: str,
+        *,
+        routes: Sequence[dict[str, object]] | None = None,
+    ) -> tuple[dict[str, Any], Path, _Snapshot]:
+        results_dir = self.new_results_dir()
+        snapshot = _snapshot(build_date=build_date, source_sha=source_sha)
+        handoff = _build_handoff(
+            snapshot,
+            legs=[_LegSpec(row=ROW_CE15)],
+            route_rows=list(routes or self.ROUTES),
+            assets_root=results_dir,
+            source_sha=source_sha,
+        )
+        return handoff, results_dir, snapshot
+
+    def _publish(
+        self,
+        build_date: date,
+        source_sha: str,
+        fetcher: Any = _no_compare,
+        *,
+        routes: Sequence[dict[str, object]] | None = None,
+    ) -> tuple[pr.PublishReport, _Snapshot]:
+        handoff, results_dir, snapshot = self._prepare(
+            build_date, source_sha, routes=routes
+        )
+        report = _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            compare_fetcher=fetcher,
+        )
+        return report, snapshot
+
+    def _notes(self, varver: str) -> Path:
+        return self.pkg_repo / "docs" / "nightly" / varver / "notes.json"
+
+    def _assert_published_without_notes(
+        self, report: pr.PublishReport, snapshot: _Snapshot, label: str
+    ) -> None:
+        self.assertEqual(
+            set(report.touched), {("nightly", v) for v in self.VARVERS}, label
+        )
+        for varver in self.VARVERS:
+            catalogue_dir = self.pkg_repo / "docs" / "nightly" / varver
+            self.assertTrue(
+                (
+                    catalogue_dir
+                    / f"pfSense-pkg-pfBlockerNG-{snapshot.pkg_version}.pkg"
+                ).is_file(),
+                f"{label}/{varver}",
+            )
+            self.assertTrue((catalogue_dir / "packagesite.pkg").is_file())
+            self.assertFalse(self._notes(varver).exists(), f"{label}/{varver}")
+
+    def test_next_nightly_gets_compare_notes_in_every_varver_with_one_api_call(
+        self,
+    ) -> None:
+        self._publish(date(2026, 8, 4), _SHA_A)
+        stub = _StubCompare(_TWO_COMMITS)
+
+        report, snapshot = self._publish(date(2026, 8, 5), _SHA_C, stub)
+
+        self.assertEqual(
+            set(report.touched), {("nightly", v) for v in self.VARVERS}
+        )
+        self.assertEqual(stub.calls, [(_SHA_A, _SHA_C)])
+        for varver in self.VARVERS:
+            # present only because it is written AFTER the catalogue is rebuilt
+            self.assertEqual(
+                self._notes(varver).read_bytes(),
+                _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C),
+                varver,
+            )
+            self.assertTrue((self._notes(varver).parent / "meta.conf").is_file())
+
+    def test_notes_compare_against_the_previous_nightly_each_time(self) -> None:
+        self._publish(date(2026, 8, 4), _SHA_A)
+        self._publish(date(2026, 8, 5), _SHA_C, _StubCompare(_TWO_COMMITS))
+        stub = _StubCompare(_TWO_COMMITS)
+
+        _report, snapshot = self._publish(date(2026, 8, 6), _SHA_D, stub)
+
+        self.assertEqual(stub.calls, [(_SHA_C, _SHA_D)])
+        self.assertEqual(
+            self._notes("ce-2.8").read_bytes(),
+            _expected_notes(snapshot.pkg_version, _SHA_C, _SHA_D),
+        )
+
+    def test_first_publish_has_no_notes_and_never_asks_for_a_comparison(self) -> None:
+        stub = _StubCompare(_TWO_COMMITS)
+
+        report, snapshot = self._publish(date(2026, 8, 4), _SHA_A, stub)
+
+        self._assert_published_without_notes(report, snapshot, "first publish")
+        self.assertEqual(stub.calls, [])
+
+    def test_previous_build_with_an_unloadable_record_publishes_without_notes(
+        self,
+    ) -> None:
+        # A published canonical package whose provenance annotation cannot be loaded
+        # must cost the notes, never the publication.
+        previous = _snapshot(build_date=date(2026, 8, 4), source_sha=_SHA_A)
+        cases: dict[str, object] = {
+            "truncated JSON": "{",
+            "valid JSON, invalid record": '{"schema":1}',
+            "not JSON text": "not json",
+            "not a string": 5,
+        }
+        for index, (label, annotation) in enumerate(cases.items()):
+            with self.subTest(label):
+                self.pkg_repo = self.tmp / f"repo-unloadable-{index}"
+                manifest = {
+                    "name": pfb_pkg.CANONICAL_EMITTED_IDENTITY,
+                    "version": previous.pkg_version,
+                    "abi": "FreeBSD:15:*",
+                    "origin": "net/pfSense-pkg-pfBlockerNG",
+                    "annotations": {pfb_pkg.PFB_BUILD_RECORD_KEY: annotation},
+                }
+                for varver in self.VARVERS:
+                    seeded = self.pkg_repo / "docs" / "nightly" / varver
+                    seeded.mkdir(parents=True)
+                    _write_tar_pkg(
+                        seeded
+                        / f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{previous.pkg_version}.pkg",
+                        [("+COMPACT_MANIFEST", json.dumps(manifest).encode(), 0o644, 0)],
+                    )
+                stub = _StubCompare(_TWO_COMMITS)
+
+                report, snapshot = self._publish(date(2026, 8, 5), _SHA_C, stub)
+
+                self._assert_published_without_notes(report, snapshot, label)
+                self.assertEqual(stub.calls, [], label)
+
+    def test_unusable_comparisons_publish_without_notes(self) -> None:
+        cases: dict[str, tuple[dict[str, Any] | None, str]] = {
+            "fetcher returned None": (None, _SHA_C),
+            "malformed response": ({"commits": "nope"}, _SHA_C),
+            "no commits": ({"total_commits": 0, "commits": []}, _SHA_C),
+            "same source sha": (_TWO_COMMITS, _SHA_A),
+        }
+        for label, (response, new_sha) in cases.items():
+            with self.subTest(label):
+                self.pkg_repo = self.tmp / f"repo-{label.replace(' ', '-')}"
+                self._publish(date(2026, 8, 4), _SHA_A)
+                stub = _StubCompare(response)
+
+                report, snapshot = self._publish(date(2026, 8, 5), new_sha, stub)
+
+                self._assert_published_without_notes(report, snapshot, label)
+                self.assertEqual(
+                    stub.calls,
+                    [] if label == "same source sha" else [(_SHA_A, new_sha)],
+                )
+
+    def test_varver_without_history_gets_no_notes_while_the_others_do(self) -> None:
+        self._publish(date(2026, 8, 4), _SHA_A, routes=[ROW_CE15])
+        stub = _StubCompare(_TWO_COMMITS)
+
+        report, snapshot = self._publish(date(2026, 8, 5), _SHA_C, stub)
+
+        self.assertEqual(
+            set(report.touched), {("nightly", v) for v in self.VARVERS}
+        )
+        self.assertEqual(stub.calls, [(_SHA_A, _SHA_C)])
+        self.assertEqual(
+            self._notes("ce-2.8").read_bytes(),
+            _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C),
+        )
+        self.assertTrue((self._notes("ce-2.9").parent / "packagesite.pkg").is_file())
+        self.assertFalse(self._notes("ce-2.9").exists())
+
+    def test_identical_republish_stays_a_noop_and_keeps_notes_byte_identical(
+        self,
+    ) -> None:
+        self._publish(date(2026, 8, 4), _SHA_A)
+        handoff, results_dir, snapshot = self._prepare(date(2026, 8, 5), _SHA_C)
+        first = _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            compare_fetcher=_StubCompare(_TWO_COMMITS),
+        )
+        self.assertTrue(first.touched)
+        before = {
+            v: (self._notes(v).read_bytes(), self._notes(v).stat().st_mtime_ns)
+            for v in self.VARVERS
+        }
+        stub = _StubCompare(_TWO_COMMITS)
+
+        second = _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            compare_fetcher=stub,
+        )
+
+        self.assertEqual(second.touched, ())
+        self.assertTrue(second.noop)
+        self.assertEqual(stub.calls, [])
+        for varver in self.VARVERS:
+            self.assertEqual(
+                (self._notes(varver).read_bytes(), self._notes(varver).stat().st_mtime_ns),
+                before[varver],
+                varver,
+            )
+            self.assertEqual(
+                self._notes(varver).read_bytes(),
+                _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C),
+            )
+
+    def test_same_version_repair_or_resign_keeps_the_notes_byte_identical(self) -> None:
+        # The previous build is gone after the first publish of this version, so a
+        # rebuild of the same version cannot re-derive its notes: they must survive it.
+        self._publish(date(2026, 8, 4), _SHA_A)
+        handoff, results_dir, snapshot = self._prepare(date(2026, 8, 5), _SHA_C)
+        _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            compare_fetcher=_StubCompare(_TWO_COMMITS),
+        )
+        expected = _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C)
+        key = tbrp._gen_key(self.tmp / "repo.key")
+        (self._notes("ce-2.8").parent / "meta").unlink()
+        stub = _StubCompare(_TWO_COMMITS)
+
+        for label, sign_key, touched in (
+            ("descriptor repair", None, {("nightly", "ce-2.8")}),
+            (
+                "first signing",
+                key,
+                {("nightly", "ce-2.8"), ("nightly", "ce-2.9")},
+            ),
+        ):
+            with self.subTest(label):
+                report = _run(
+                    handoff=handoff,
+                    results_dir=results_dir,
+                    pkg_repo=self.pkg_repo,
+                    sign_key=sign_key,
+                    compare_fetcher=stub,
+                )
+
+                self.assertEqual(set(report.touched), touched)
+                for varver in self.VARVERS:
+                    self.assertEqual(self._notes(varver).read_bytes(), expected, varver)
+        self.assertEqual(stub.calls, [])
+
 
 
 # --------------------------------------------------------------------------- #

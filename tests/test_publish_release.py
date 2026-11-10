@@ -663,6 +663,7 @@ def _run(
     source_run_id: str = "10:1",
     source_sha: str = "a" * 40,
     sign_key: Path | None = None,
+    notes_file: Path | None = None,
 ) -> pr.PublishReport:
     rows = _honest_dependency_free_rows(rows, assets_dir)
     handoff = _write_handoff(
@@ -682,6 +683,7 @@ def _run(
         pkg_repo=pkg_repo,
         handoff_file=handoff,
         sign_key=sign_key,
+        notes_file=notes_file,
     )
 
 
@@ -4187,6 +4189,278 @@ class MainCliTests(_TempDirTestCase):
             code = pr.main(argv)
         self.assertEqual(code, 1)
         self.assertIn("::error::", err.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# pfBlockerNG/pfBlockerNG#3816 — notes.json: the Release body's top-level bullets,
+# written next to packagesite.pkg after each touched catalogue is rebuilt.
+# --------------------------------------------------------------------------- #
+
+_RELEASE_BODY = "\r\n".join(
+    [
+        "## Bug Fixes",
+        "",
+        "- Fix one",
+        "- Fix two with `code`",
+        "  - nested detail",
+        "",
+        "## Features",
+        "",
+        "* Feature three",
+        "- Feature four",
+        "- Feature five",
+        "- Feature six",
+        "- Feature seven",
+        "",
+        "**Full changelog:** [`v3.3.13` \u2192 `v3.3.14`](https://x/compare)",
+    ]
+)
+_RELEASE_NOTES = (
+    b'{"items":["Fix one","Fix two with code","Feature three","Feature four",'
+    b'"Feature five"],"link":{"kind":"release","tag":"v3.3.14"},"schema":1,'
+    b'"total":7,"version":"3.3.14"}\n'
+)
+
+
+class UpdateNotesPublishTests(_TempDirTestCase):
+    TAG = "v3.3.14"
+
+    def _write_notes(self, body: str) -> Path:
+        path = self.tmp / f"release-notes-{next(self._assets_counter)}.md"
+        path.write_bytes(body.encode("utf-8"))
+        return path
+
+    def _publish(
+        self,
+        notes_file: Path | None,
+        *,
+        tag: str = TAG,
+        channel: str = "stable",
+        destinations: str = '["stable","testing"]',
+        sign_key: Path | None = None,
+    ) -> pr.PublishReport:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir,
+            channel=channel,
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag=tag,
+            include_dependency=False,
+        )
+        return _run(
+            pkg_repo=self.pkg_repo,
+            assets_dir=assets_dir,
+            rows=(ROW_CE_NO_EXTRA,),
+            channel=channel,
+            destinations=destinations,
+            tag=tag,
+            notes_file=notes_file,
+            sign_key=sign_key,
+        )
+
+    def _catalogue(self, channel: str) -> Path:
+        return self.pkg_repo / "docs" / channel / "ce-2.8"
+
+    def _listed_versions(self, channel: str) -> list[str]:
+        return sorted(
+            str(row["version"])
+            for row in _packagesite_rows(self._catalogue(channel))
+            if row["name"] == pfb_pkg.CANONICAL_EMITTED_IDENTITY
+        )
+
+    def test_every_touched_target_gets_release_notes_matching_its_version(
+        self,
+    ) -> None:
+        report = self._publish(self._write_notes(_RELEASE_BODY))
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        for channel in ("stable", "testing"):
+            self.assertEqual(self._listed_versions(channel), ["3.3.14"], channel)
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                _RELEASE_NOTES,
+                channel,
+            )
+
+    def test_identical_republish_is_noop_and_keeps_notes_byte_identical(self) -> None:
+        notes = self._write_notes(_RELEASE_BODY)
+        self._publish(notes)
+        before = {
+            c: (
+                (self._catalogue(c) / "notes.json").read_bytes(),
+                (self._catalogue(c) / "notes.json").stat().st_mtime_ns,
+            )
+            for c in ("stable", "testing")
+        }
+
+        report = self._publish(notes)
+
+        self.assertTrue(report.noop)
+        for channel in ("stable", "testing"):
+            notes_path = self._catalogue(channel) / "notes.json"
+            self.assertEqual(
+                (notes_path.read_bytes(), notes_path.stat().st_mtime_ns),
+                before[channel],
+                channel,
+            )
+
+    def test_resigned_republish_without_a_notes_file_keeps_the_notes_in_place(
+        self,
+    ) -> None:
+        self._publish(self._write_notes(_RELEASE_BODY))
+        key = tbrp._gen_key(self.tmp / "repo.key")
+
+        # First signing rebuilds both catalogues; this run carries no release body.
+        report = self._publish(None, sign_key=key)
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        for channel in ("stable", "testing"):
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                _RELEASE_NOTES,
+                channel,
+            )
+
+    def test_notes_file_with_invalid_utf8_still_publishes_from_the_decodable_text(
+        self,
+    ) -> None:
+        raw = b"- Good one\n- Bad \xff\xfe byte\n- \xff\xfe\n- Third\n"
+        notes_file = self.tmp / "invalid-utf8.md"
+        notes_file.write_bytes(raw)
+
+        report = self._publish(notes_file)
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        for channel in ("stable", "testing"):
+            self.assertEqual(self._listed_versions(channel), ["3.3.14"], channel)
+            # undecodable bytes drop out of an item; an item with nothing else is dropped
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                b'{"items":["Good one","Bad byte","Third"],'
+                b'"link":{"kind":"release","tag":"v3.3.14"},"schema":1,'
+                b'"total":3,"version":"3.3.14"}\n',
+                channel,
+            )
+
+    def test_missing_unreadable_or_bulletless_notes_publish_without_notes_json(
+        self,
+    ) -> None:
+        cases = {
+            "no notes file": None,
+            "file does not exist": self.tmp / "absent.md",
+            "unreadable (a directory)": self.tmp,
+            "empty body": self._write_notes(""),
+            "headings and prose only": self._write_notes(
+                "## Bug Fixes\n\nJust a paragraph.\n\n**Full changelog:** x\n"
+            ),
+            "only blank and nested bullets": self._write_notes(
+                "- \n-   \n  - nested only\n"
+            ),
+        }
+        for label, notes_file in cases.items():
+            with self.subTest(label):
+                self.pkg_repo = self.tmp / f"repo-{label.replace(' ', '-')}"
+
+                report = self._publish(notes_file)
+
+                self.assertEqual(
+                    set(report.touched),
+                    {("stable", "ce-2.8"), ("testing", "ce-2.8")},
+                )
+                for channel in ("stable", "testing"):
+                    self.assertEqual(
+                        self._listed_versions(channel), ["3.3.14"], channel
+                    )
+                    self.assertFalse(
+                        (self._catalogue(channel) / "notes.json").exists(),
+                        f"{label}/{channel}",
+                    )
+
+    def test_target_backfilled_with_a_newer_slower_channel_build_gets_no_notes(
+        self,
+    ) -> None:
+        # stable already carries 3.4.0, newer than the testing build being published:
+        # testing/ce-2.8 ends up listing the backfilled 3.4.0, which these notes
+        # (written for 3.3.15.a1) do not describe — and a leftover notes.json from an
+        # earlier testing build must not outlive the rebuild either.
+        stable_dir = self._catalogue("stable")
+        stable_dir.mkdir(parents=True)
+        newer = _record(channel="stable", row=ROW_CE_NO_EXTRA, source_tag="v3.4.0")
+        name = f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{newer['canonical_package_version']}.pkg"
+        scratch = self.tmp / "seed-scratch"
+        scratch.mkdir()
+        seeded, _digest = _wrap_canonical_pkg(scratch, newer, local_name=name)
+        (stable_dir / name).write_bytes(seeded.read_bytes())
+        testing_dir = self._catalogue("testing")
+        testing_dir.mkdir(parents=True)
+        (testing_dir / "notes.json").write_bytes(b'{"stale":true}\n')
+
+        report = self._publish(
+            self._write_notes(_RELEASE_BODY),
+            tag="v3.3.15.a1",
+            channel="testing",
+            destinations='["testing"]',
+        )
+
+        self.assertEqual(report.touched, (("testing", "ce-2.8"),))
+        self.assertEqual(self._listed_versions("testing"), ["3.4.0"])
+        self.assertFalse((testing_dir / "notes.json").exists())
+
+    def test_main_forwards_notes_file_to_the_publication(self) -> None:
+        assets_dir = self.new_assets_dir()
+        _populate_assets_dir(
+            assets_dir,
+            channel="stable",
+            rows=(ROW_CE_NO_EXTRA,),
+            source_tag=self.TAG,
+            include_dependency=False,
+        )
+        handoff = _write_handoff(
+            assets_dir / "pfblockerng-release-handoff.json",
+            rows=(ROW_CE_NO_EXTRA,),
+            tag=self.TAG,
+        )
+        argv = [
+            "--source-repository",
+            _REPO,
+            "--release-id",
+            "1",
+            "--release-tag",
+            self.TAG,
+            "--destinations",
+            '["stable","testing"]',
+            "--source-run-id",
+            "10:1",
+            "--assets-dir",
+            str(assets_dir),
+            "--pkg-repo",
+            str(self.pkg_repo),
+            "--source-sha",
+            "a" * 40,
+            "--handoff",
+            str(handoff),
+            "--notes-file",
+            str(self._write_notes(_RELEASE_BODY)),
+        ]
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = pr.main(argv)
+
+        self.assertEqual(code, 0)
+        self.assertIn("updated stable/ce-2.8", out.getvalue())
+        self.assertIn("updated testing/ce-2.8", out.getvalue())
+        for channel in ("stable", "testing"):
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                _RELEASE_NOTES,
+                channel,
+            )
+
 
 
 def _packagesite_names(catalogue_dir: Path) -> set[str]:

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import catalogue_engine
 import pfb_pkg
+import update_notes
 
 
 class CatalogueAssemblyError(Exception):
@@ -111,7 +112,14 @@ def regenerate_catalogue(
     *,
     sign_key: Path | None = None,
 ) -> None:
-    """Rebuild one catalogue from its current installable package pool."""
+    """Rebuild one catalogue from its current installable package pool.
+
+    The rebuild wipes the directory, and ``notes.json`` (``update_notes``) is not part
+    of the pool, so it is read first and put back byte-identical when it still
+    describes the newest canonical version the rebuilt catalogue lists. A missing,
+    malformed, or stale file stays deleted: a publisher writes fresh notes after this
+    returns, and a catalogue must never advertise another version's notes.
+    """
     site_root = Path(site_root)
     catalogue_dir = _catalogue_dir(site_root, channel, varver)
     brp = catalogue_engine
@@ -123,7 +131,20 @@ def regenerate_catalogue(
     if not pool:
         raise CatalogueAssemblyError(f"{channel}/{varver}: empty pool")
 
+    notes_path = catalogue_dir / update_notes.NOTES_FILENAME
+    try:
+        notes = notes_path.read_bytes()
+    except OSError:
+        notes = None
     brp.emit_catalog(catalogue_dir, pool, root=site_root, sign_key=sign_key)
+    if notes is not None:
+        newest = max(
+            (version for _path, version in _iter_canonical_packages(catalogue_dir)),
+            key=pfb_pkg.pkg_version_sort_key,
+            default=None,
+        )
+        if update_notes.describes(notes, newest):
+            notes_path.write_bytes(notes)
 
 
 def _canonical_version(path: Path, manifest: Mapping[str, object]) -> str:
