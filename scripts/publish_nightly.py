@@ -588,8 +588,9 @@ def _write_notes(
     fetched: dict[tuple[str, str], dict | None],
 ) -> None:
     """Write ``notes.json`` into the freshly regenerated ``dest_dir`` — AFTER the
-    rebuild, which wipes the directory. No previous build, an unchanged commit, no
-    usable comparison or no commit subjects leave no file."""
+    rebuild, which keeps an existing file only while it describes this version. No
+    previous build, an unchanged commit, no usable comparison or no commit subjects
+    write nothing."""
     if previous_sha is None or previous_sha == source_sha:
         return
     pair = (previous_sha, source_sha)
@@ -610,7 +611,7 @@ def _write_notes(
         {"kind": "compare", "from": previous_sha, "to": source_sha},
     )
     if notes is not None:
-        (dest_dir / "notes.json").write_bytes(notes)
+        (dest_dir / update_notes.NOTES_FILENAME).write_bytes(notes)
 
 
 # --------------------------------------------------------------------------- #

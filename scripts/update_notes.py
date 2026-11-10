@@ -19,6 +19,7 @@ import subprocess
 import sys
 import unicodedata
 
+NOTES_FILENAME = "notes.json"
 _SCHEMA = 1
 _MAX_ITEMS = 5
 _MAX_ITEM_CHARS = 100
@@ -112,6 +113,17 @@ def render(version: str, items: list[str], total: int, link: dict) -> bytes | No
     }
     text = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return (text + "\n").encode("ascii")
+
+
+def describes(raw: bytes, version: str | None) -> bool:
+    """True when ``raw`` is a JSON object whose ``version`` is exactly ``version``."""
+    try:
+        doc = json.loads(raw)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    return version is not None and doc.get("version") == version
 
 
 def fetch_compare(prev_sha: str, new_sha: str) -> dict | None:

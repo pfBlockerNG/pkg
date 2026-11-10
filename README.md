@@ -73,3 +73,7 @@ only when it has something to say; without it the notice stays one line. Fetch i
   The first Nightly of a catalogue, or one where GitHub could not supply the
   comparison, gets no file.
 - The file has no timestamps, so republishing unchanged notes leaves git with no diff.
+- A rebuild that does not re-derive the notes (re-signing the catalogue, repairing its
+  descriptors) keeps the existing file byte-identical while its `version` is still the
+  catalogue's newest one, and drops it otherwise. A re-signing therefore changes only
+  `packagesite.pkg` and `data.pkg`.

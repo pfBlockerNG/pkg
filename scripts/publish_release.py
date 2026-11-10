@@ -60,7 +60,9 @@ from the GitHub Releases API's own per-asset ``digest`` field before downloading
 Update notes (pfBlockerNG/pfBlockerNG#3816): ``--notes-file`` names the Release body
 (Markdown). Each touched catalogue that ends up serving this run's build gets a
 ``notes.json`` with the body's top-level bullets (``update_notes``), written AFTER the
-rebuild; no file, no readable body, or no bullets means no ``notes.json``.
+rebuild. No file, no readable body, or no bullets writes none; a ``notes.json`` that
+still describes the catalogue's newest version survives the rebuild
+(``catalogue_assembly.regenerate_catalogue``), any other is dropped.
 
 All verification code is imported from this pkg checkout.
 """
@@ -666,9 +668,9 @@ def publish(
             if changed or evicted:
                 ca.regenerate_catalogue(site_root, channel, varver, sign_key=sign_key)
                 touched.append((channel, varver))
-                # The rebuild wiped any old notes.json. These notes describe THIS
-                # build, so a destination that ended on another one (a newer
-                # slower-channel build lifted in) gets none.
+                # Fresh notes describe THIS build, so a destination that ended on
+                # another one (a newer slower-channel build lifted in) gets none, and
+                # the rebuild has already dropped any file left for a different version.
                 notes = (
                     update_notes.render(
                         incoming,
@@ -681,7 +683,7 @@ def publish(
                     else None
                 )
                 if notes is not None:
-                    (dest_dir / "notes.json").write_bytes(notes)
+                    (dest_dir / update_notes.NOTES_FILENAME).write_bytes(notes)
 
     if source_index:
         ca.verify_multi_destination_identity(site_root, source_index)

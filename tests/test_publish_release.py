@@ -4237,6 +4237,7 @@ class UpdateNotesPublishTests(_TempDirTestCase):
         tag: str = TAG,
         channel: str = "stable",
         destinations: str = '["stable","testing"]',
+        sign_key: Path | None = None,
     ) -> pr.PublishReport:
         assets_dir = self.new_assets_dir()
         _populate_assets_dir(
@@ -4254,6 +4255,7 @@ class UpdateNotesPublishTests(_TempDirTestCase):
             destinations=destinations,
             tag=tag,
             notes_file=notes_file,
+            sign_key=sign_key,
         )
 
     def _catalogue(self, channel: str) -> Path:
@@ -4301,6 +4303,25 @@ class UpdateNotesPublishTests(_TempDirTestCase):
             self.assertEqual(
                 (notes_path.read_bytes(), notes_path.stat().st_mtime_ns),
                 before[channel],
+                channel,
+            )
+
+    def test_resigned_republish_without_a_notes_file_keeps_the_notes_in_place(
+        self,
+    ) -> None:
+        self._publish(self._write_notes(_RELEASE_BODY))
+        key = tbrp._gen_key(self.tmp / "repo.key")
+
+        # First signing rebuilds both catalogues; this run carries no release body.
+        report = self._publish(None, sign_key=key)
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        for channel in ("stable", "testing"):
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                _RELEASE_NOTES,
                 channel,
             )
 

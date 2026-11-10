@@ -1260,6 +1260,45 @@ class UpdateNotesTests(_TempDirTestCase):
                 _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C),
             )
 
+    def test_same_version_repair_or_resign_keeps_the_notes_byte_identical(self) -> None:
+        # The previous build is gone after the first publish of this version, so a
+        # rebuild of the same version cannot re-derive its notes: they must survive it.
+        self._publish(date(2026, 8, 4), _SHA_A)
+        handoff, results_dir, snapshot = self._prepare(date(2026, 8, 5), _SHA_C)
+        _run(
+            handoff=handoff,
+            results_dir=results_dir,
+            pkg_repo=self.pkg_repo,
+            compare_fetcher=_StubCompare(_TWO_COMMITS),
+        )
+        expected = _expected_notes(snapshot.pkg_version, _SHA_A, _SHA_C)
+        key = tbrp._gen_key(self.tmp / "repo.key")
+        (self._notes("ce-2.8").parent / "meta").unlink()
+        stub = _StubCompare(_TWO_COMMITS)
+
+        for label, sign_key, touched in (
+            ("descriptor repair", None, {("nightly", "ce-2.8")}),
+            (
+                "first signing",
+                key,
+                {("nightly", "ce-2.8"), ("nightly", "ce-2.9")},
+            ),
+        ):
+            with self.subTest(label):
+                report = _run(
+                    handoff=handoff,
+                    results_dir=results_dir,
+                    pkg_repo=self.pkg_repo,
+                    sign_key=sign_key,
+                    compare_fetcher=stub,
+                )
+
+                self.assertEqual(set(report.touched), touched)
+                for varver in self.VARVERS:
+                    self.assertEqual(self._notes(varver).read_bytes(), expected, varver)
+        self.assertEqual(stub.calls, [])
+
+
 
 # --------------------------------------------------------------------------- #
 # issue #2468 nightly analogue: dependency identity = filename, place-if-missing,
