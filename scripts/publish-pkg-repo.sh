@@ -97,6 +97,12 @@
 #                        pkg-owned ROUTE matrix for immutable Releases published
 #                        before handoffs existed; satisfies the HANDOFF_FILE requirement
 #
+# Optional — PUBLISH_KIND=tagged, PUBLISH_STAGE=direct|stage only:
+#   RELEASE_NOTES_FILE     the Release body (Markdown); when set and non-empty, passed
+#                        to publish_release.py as --notes-file so each touched
+#                        catalogue gets a notes.json (pfBlockerNG/pfBlockerNG#3816).
+#                        Unset or empty = no notes.json.
+#
 # Required environment — PUBLISH_KIND=tagged, PUBLISH_STAGE=promote only:
 #   RELEASE_TAG, DESTINATIONS  commit trailers
 #   ROUTE_MATRIX          exact matrix stored by the corresponding stage
@@ -579,6 +585,9 @@ while [ "$attempt" -le "$MAX_PUSH_ATTEMPTS" ]; do
                     fi
                     if [ -n "${COMPATIBILITY_ROUTE_MATRIX:-}" ]; then
                         set -- "$@" --compatibility-route-matrix "$COMPATIBILITY_ROUTE_MATRIX"
+                    fi
+                    if [ -n "${RELEASE_NOTES_FILE:-}" ]; then
+                        set -- "$@" --notes-file "$RELEASE_NOTES_FILE"
                     fi
                     ;;
                 nightly)

@@ -49,3 +49,27 @@ tagged build, install its `.pkg` from the matching
 [GitHub Release](https://github.com/pfBlockerNG/pfBlockerNG/releases), for example with
 `pkg add`. Older tagged builds are removed from this repository's catalogues; their
 Releases keep them.
+
+## Update notes (`notes.json`)
+
+Next to `packagesite.pkg`, a catalogue directory may carry a `notes.json` that tells the
+pfSense package what its newest build changed, so the update notice can say more than
+"a new version is available". The publisher writes it after it rebuilds the catalogue,
+only when it has something to say; without it the notice stays one line. Fetch it from
+`https://pkg.pfblockerng.com/<channel>/<varver>/notes.json`.
+
+```json
+{"items":["Fix one","Fix two"],"link":{"kind":"release","tag":"v3.3.14"},"schema":1,"total":2,"version":"3.3.14"}
+```
+
+- `version` is the newest `pfSense-pkg-pfBlockerNG` version in that catalogue.
+- `items` holds at most five plain-ASCII lines of at most 100 characters; `total` is the
+  full count behind them.
+- Tagged builds (stable, testing, edge): the top-level bullets of the GitHub Release
+  notes, with `link` `{"kind":"release","tag":"<tag>"}`. A catalogue that was filled
+  from a slower channel's build, or a publish without release notes, gets no file.
+- Nightly: the commit subjects between the previous published Nightly and this one,
+  newest first, with `link` `{"kind":"compare","from":"<previous sha>","to":"<sha>"}`.
+  The first Nightly of a catalogue, or one where GitHub could not supply the
+  comparison, gets no file.
+- The file has no timestamps, so republishing unchanged notes leaves git with no diff.

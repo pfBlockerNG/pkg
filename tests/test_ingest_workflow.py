@@ -384,6 +384,7 @@ def _run_tagged_intake(
     release_id: str = "123",
     pkg_digest: str | None = "sha256:" + "a" * 64,
     include_pkg: bool = True,
+    metadata_extra: dict[str, object] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     bin_dir = tmp_path / "bin"
@@ -413,6 +414,7 @@ def _run_tagged_intake(
         "tag_name": metadata_tag,
         "draft": draft,
         "assets": [*handoffs, *pkg_assets],
+        **(metadata_extra or {}),
     }
     if immutable is not None:
         metadata_object["immutable"] = immutable
@@ -578,6 +580,46 @@ def test_tagged_intake_rejects_missing_or_unverified_packages_before_download(
         )
         assert proc.returncode == 1, name
         assert "release download " not in calls
+
+
+def _github_env_values(github_env: Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in github_env.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_tagged_intake_writes_the_release_body_for_the_publisher(
+    tmp_path: Path,
+) -> None:
+    body = "## Bug Fixes\r\n\r\n- Fixed `x` \u2192 y\r\n\r\n**Full changelog:** z"
+    proc, calls, github_env = _run_tagged_intake(
+        tmp_path, handoff_count=1, metadata_extra={"body": body}
+    )
+    assert proc.returncode == 0, proc.stderr
+    notes = tmp_path / "runner" / "release-assets" / "release-notes.md"
+    assert notes.read_bytes() == body.encode("utf-8") + b"\n"
+    assert _github_env_values(github_env)["RELEASE_NOTES_FILE"] == str(notes)
+    assert "release-notes" not in calls  # the body comes from the one metadata call
+
+
+def test_tagged_intake_writes_an_empty_notes_file_when_the_release_has_no_body(
+    tmp_path: Path,
+) -> None:
+    for name, extra in (("absent", None), ("null", {"body": None})):
+        proc, _calls, github_env = _run_tagged_intake(
+            tmp_path / name, handoff_count=1, metadata_extra=extra
+        )
+        assert proc.returncode == 0, (name, proc.stderr)
+        notes = tmp_path / name / "runner" / "release-assets" / "release-notes.md"
+        assert notes.read_bytes() == b"\n", name
+        assert _github_env_values(github_env)["RELEASE_NOTES_FILE"] == str(notes), name
+
+
+def test_publish_step_can_call_gh_for_the_nightly_compare_notes() -> None:
+    steps = {str(step.get("name")): step for step in _steps(INGEST, "ingest")}
+    env = steps["Publish with guarded local commit"]["env"]
+    assert env["GH_TOKEN"] == "${{ github.token }}"
 
 
 if __name__ == "__main__":

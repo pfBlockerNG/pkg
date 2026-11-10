@@ -872,6 +872,77 @@ HOOK
     The variable invocation should include "$PFB_SIGN_KEY"
   End
 
+  # --- RELEASE_NOTES_FILE threading (pfBlockerNG/pfBlockerNG#3816) -----------
+
+  It 'rn1: tagged mode passes --notes-file to the publisher when RELEASE_NOTES_FILE is set'
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    export FAKE_INVOCATION_RECORD="${base}/tagged-invocation.txt"
+    export RELEASE_NOTES_FILE="${base}/release-notes.md"
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    invocation="$(cat "${base}/tagged-invocation.txt")"
+    The variable invocation should include '--notes-file'
+    The variable invocation should include "$RELEASE_NOTES_FILE"
+  End
+
+  It 'rn2: tagged mode omits --notes-file when RELEASE_NOTES_FILE is unset'
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    export FAKE_INVOCATION_RECORD="${base}/tagged-invocation.txt"
+    unset RELEASE_NOTES_FILE
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    invocation="$(cat "${base}/tagged-invocation.txt")"
+    The variable invocation should not include '--notes-file'
+  End
+
+  It 'rn3: tagged mode omits --notes-file when RELEASE_NOTES_FILE is set but empty'
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    export FAKE_INVOCATION_RECORD="${base}/tagged-invocation.txt"
+    export RELEASE_NOTES_FILE=''
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    invocation="$(cat "${base}/tagged-invocation.txt")"
+    The variable invocation should not include '--notes-file'
+  End
+
+  It 'rn4 (hostile): tagged mode forwards a RELEASE_NOTES_FILE path containing a space as ONE argument'
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=edge/ce-2.8
+    export FAKE_INVOCATION_RECORD="${base}/tagged-invocation.txt"
+    export RELEASE_NOTES_FILE="${base}/notes dir/release notes.md"
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    invocation="$(cat "${base}/tagged-invocation.txt")"
+    expected="$(printf '%s\n%s' --notes-file "$RELEASE_NOTES_FILE")"
+    The variable invocation should include "$expected"
+  End
+
+  It 'rn5: nightly mode never forwards --notes-file, even with RELEASE_NOTES_FILE exported'
+    nightly_env
+    export FAKE_MODE=success
+    export FAKE_TOUCHED=nightly/ce-2.8
+    export FAKE_INVOCATION_RECORD="${base}/nightly-invocation.txt"
+    export RELEASE_NOTES_FILE="${base}/release-notes.md"
+    When run script "$script"
+    The status should equal 0
+    The output should include 'ADVANCE'
+    The stderr should include 'main'
+    invocation="$(cat "${base}/nightly-invocation.txt")"
+    The variable invocation should include '--handoff'
+    The variable invocation should not include '--notes-file'
+  End
+
   It "sk5 (hostile): tagged mode forwards a --sign-key path containing a single quote as ONE argument"
     export FAKE_MODE=success
     export FAKE_TOUCHED=edge/ce-2.8

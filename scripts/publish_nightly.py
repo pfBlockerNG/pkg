@@ -14,7 +14,7 @@ import hashlib
 import json
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +30,7 @@ import nightly_contract as nc
 import pfb_pkg
 import publish_catalogues as pc
 import publish_release as pr
+import update_notes
 
 _CHANNEL = "nightly"
 _LEG_DIR_PREFIX = "nightly-result-"
@@ -549,6 +550,70 @@ def _reject_stale(site_root: Path, varver: str, incoming_version: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# notes.json (pfBlockerNG/pfBlockerNG#3816) — best effort, never fails a publication.
+# --------------------------------------------------------------------------- #
+
+_CompareFetcher = Callable[[str, str], dict | None]
+
+
+def _previous_source_sha(dest_dir: Path, incoming_version: str) -> str | None:
+    """``source_sha`` of the newest canonical build already in ``dest_dir`` that is
+    not this run's own version. Read BEFORE ``prune_retained`` evicts it."""
+    others = [
+        (path, version)
+        for path, version in ca._iter_canonical_packages(dest_dir)
+        if version != incoming_version
+    ]
+    if not others:
+        return None
+    path, _version = max(
+        others, key=lambda item: pfb_pkg.pkg_version_sort_key(item[1])
+    )
+    try:
+        record = catalogue_engine._canonical_build_record(
+            path, pfb_pkg.read_compact_manifest(path)
+        )
+    except catalogue_engine.BuildRepoError:
+        return None
+    source_sha = record.get("source_sha") if record else None
+    return source_sha if isinstance(source_sha, str) else None
+
+
+def _write_notes(
+    dest_dir: Path,
+    version: str,
+    previous_sha: str | None,
+    source_sha: str,
+    fetch: _CompareFetcher,
+    fetched: dict[tuple[str, str], dict | None],
+) -> None:
+    """Write ``notes.json`` into the freshly regenerated ``dest_dir`` — AFTER the
+    rebuild, which wipes the directory. No previous build, an unchanged commit, no
+    usable comparison or no commit subjects leave no file."""
+    if previous_sha is None or previous_sha == source_sha:
+        return
+    pair = (previous_sha, source_sha)
+    if pair not in fetched:  # one API call serves every varver sharing the pair
+        fetched[pair] = fetch(*pair)
+    compare = fetched[pair]
+    if compare is None:
+        return
+    try:
+        subjects, total = update_notes.commit_subjects(compare)
+    except ValueError as exc:
+        print(f"::warning::update_notes: unusable comparison: {exc}", file=sys.stderr)
+        return
+    notes = update_notes.render(
+        version,
+        subjects,
+        total,
+        {"kind": "compare", "from": previous_sha, "to": source_sha},
+    )
+    if notes is not None:
+        (dest_dir / "notes.json").write_bytes(notes)
+
+
+# --------------------------------------------------------------------------- #
 # Publish — mirrors publish_release.publish()'s body over a fixed "nightly" channel.
 # --------------------------------------------------------------------------- #
 
@@ -558,7 +623,9 @@ def publish(
     targets: Mapping[str, pr._Target],
     incoming_version: str,
     *,
+    source_sha: str,
     sign_key: Path | None = None,
+    compare_fetcher: _CompareFetcher = update_notes.fetch_compare,
 ) -> pr.PublishReport:
     site_root = Path(pkg_repo) / pr._SITE_SUBDIR
 
@@ -573,6 +640,7 @@ def publish(
     expected_public = pr._expected_public_member(sign_key)
     touched: list[tuple[str, str]] = []
     source_index: dict[Path, list[tuple[str, str]]] = {}
+    fetched: dict[tuple[str, str], dict | None] = {}
     for varver in sorted(targets):
         target = targets[varver]
         asset_map = pr._asset_map(target)
@@ -599,8 +667,17 @@ def publish(
             (_CHANNEL, varver)
         )
         if changed:
+            previous_sha = _previous_source_sha(dest_dir, incoming_version)
             ca.prune_retained(site_root, _CHANNEL, varver)
             ca.regenerate_catalogue(site_root, _CHANNEL, varver, sign_key=sign_key)
+            _write_notes(
+                dest_dir,
+                incoming_version,
+                previous_sha,
+                source_sha,
+                compare_fetcher,
+                fetched,
+            )
             touched.append((_CHANNEL, varver))
 
     if source_index:
@@ -621,6 +698,7 @@ def run(
     pkg_repo: str | Path,
     source_run_id: str,
     sign_key: Path | None = None,
+    compare_fetcher: _CompareFetcher = update_notes.fetch_compare,
 ) -> pr.PublishReport:
 
     handoff_path = Path(handoff_path)
@@ -645,7 +723,14 @@ def run(
         targets = _route_targets(validated.route_matrix, legs)
         # publish() reads VerifiedAsset.work_path, which lives under work_dir — must
         # run to completion BEFORE this context manager tears work_dir down.
-        return publish(pkg_repo, targets, validated.pkg_version, sign_key=sign_key)
+        return publish(
+            pkg_repo,
+            targets,
+            validated.pkg_version,
+            source_sha=validated.source_sha,
+            sign_key=sign_key,
+            compare_fetcher=compare_fetcher,
+        )
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
