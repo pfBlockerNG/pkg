@@ -51,6 +51,7 @@ _PUNCTUATION = str.maketrans(
 
 def clean_item(text: str) -> str:
     """One plain printable-ASCII line of at most 100 characters."""
+    text = text[:1000]  # the link patterns rescan per opener: bound the input first
     text = _LINK.sub(r"\1", _IMAGE.sub("", text))
     text = text.replace("`", "").replace("**", "").replace("__", "")
     text = unicodedata.normalize("NFKD", text.translate(_PUNCTUATION))

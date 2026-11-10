@@ -1183,6 +1183,43 @@ class UpdateNotesTests(_TempDirTestCase):
         self._assert_published_without_notes(report, snapshot, "first publish")
         self.assertEqual(stub.calls, [])
 
+    def test_previous_build_with_an_unloadable_record_publishes_without_notes(
+        self,
+    ) -> None:
+        # A published canonical package whose provenance annotation cannot be loaded
+        # must cost the notes, never the publication.
+        previous = _snapshot(build_date=date(2026, 8, 4), source_sha=_SHA_A)
+        cases: dict[str, object] = {
+            "truncated JSON": "{",
+            "valid JSON, invalid record": '{"schema":1}',
+            "not JSON text": "not json",
+            "not a string": 5,
+        }
+        for index, (label, annotation) in enumerate(cases.items()):
+            with self.subTest(label):
+                self.pkg_repo = self.tmp / f"repo-unloadable-{index}"
+                manifest = {
+                    "name": pfb_pkg.CANONICAL_EMITTED_IDENTITY,
+                    "version": previous.pkg_version,
+                    "abi": "FreeBSD:15:*",
+                    "origin": "net/pfSense-pkg-pfBlockerNG",
+                    "annotations": {pfb_pkg.PFB_BUILD_RECORD_KEY: annotation},
+                }
+                for varver in self.VARVERS:
+                    seeded = self.pkg_repo / "docs" / "nightly" / varver
+                    seeded.mkdir(parents=True)
+                    _write_tar_pkg(
+                        seeded
+                        / f"{pfb_pkg.CANONICAL_EMITTED_IDENTITY}-{previous.pkg_version}.pkg",
+                        [("+COMPACT_MANIFEST", json.dumps(manifest).encode(), 0o644, 0)],
+                    )
+                stub = _StubCompare(_TWO_COMMITS)
+
+                report, snapshot = self._publish(date(2026, 8, 5), _SHA_C, stub)
+
+                self._assert_published_without_notes(report, snapshot, label)
+                self.assertEqual(stub.calls, [], label)
+
     def test_unusable_comparisons_publish_without_notes(self) -> None:
         cases: dict[str, tuple[dict[str, Any] | None, str]] = {
             "fetcher returned None": (None, _SHA_C),

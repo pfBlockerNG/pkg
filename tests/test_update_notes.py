@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -84,6 +85,44 @@ class CleanItemTests(unittest.TestCase):
         self.assertEqual(
             un.clean_item("<script>alert(1)</script>"), "<script>alert(1)</script>"
         )
+
+    def test_runs_of_link_openers_are_cleaned_in_linear_time(self) -> None:
+        # The link/image patterns rescan to the end of the text from every opener, so
+        # a hostile body line must be cut before they run, not after.
+        self.assertEqual(un.clean_item("[" * 50000), "[" * 97 + "...")
+        for label, text in (
+            ("link openers", "[" * 50000),
+            ("image openers", "![" * 25000),
+            ("link openers with text", "[a](" * 12500),
+        ):
+            with self.subTest(label):
+                started = time.perf_counter()
+                cut = un.clean_item(text)
+                elapsed = time.perf_counter() - started
+                self.assertLessEqual(len(cut), 100)
+                self.assertLess(elapsed, 1.0, f"{label}: {elapsed:.2f}s")
+
+
+class DescribesTests(unittest.TestCase):
+    def test_only_an_object_naming_exactly_that_version_describes_it(self) -> None:
+        self.assertTrue(un.describes(b'{"version":"3.3.14"}', "3.3.14"))
+        self.assertTrue(un.describes(b'{"x":1,"version":"3.3.14"}\n', "3.3.14"))
+        for label, raw, version in (
+            ("other version", b'{"version":"3.3.13"}', "3.3.14"),
+            ("non-string version", b'{"version":3}', "3"),
+            ("no version key", b'{"schema":1}', "3.3.14"),
+            ("JSON array", b'[{"version":"3.3.14"}]', "3.3.14"),
+            ("not JSON", b"nope", "3.3.14"),
+            ("invalid UTF-8", b'{"version":"3.3.14"}\xff', "3.3.14"),
+            ("deep nesting", b"[" * 200_000, "3.3.14"),
+        ):
+            with self.subTest(label):
+                self.assertFalse(un.describes(raw, version))
+
+    def test_a_catalogue_with_no_newest_version_has_no_notes_to_keep(self) -> None:
+        # None must not match an object that merely lacks (or nulls) its version.
+        self.assertFalse(un.describes(b'{"schema":1}', None))
+        self.assertFalse(un.describes(b'{"version":null}', None))
 
 
 class ReleaseItemsTests(unittest.TestCase):

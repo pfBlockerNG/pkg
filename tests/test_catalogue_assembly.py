@@ -668,6 +668,25 @@ class NotesKeptAcrossRegenerateTests(_TempDirTestCase):
 
         self.assertFalse((catalogue_dir / "notes.json").exists())
 
+    def test_versionless_notes_are_dropped_when_the_pool_has_no_canonical_package(
+        self,
+    ) -> None:
+        # No newest version is None, and None must not equal a missing or null version.
+        for label, raw in (
+            ("no version", b'{"schema":1}'),
+            ("null version", b'{"version":null}'),
+        ):
+            with self.subTest(label):
+                out = self.tmp / "out"
+                shutil.rmtree(out, ignore_errors=True)
+                catalogue_dir = out / "nightly" / "ce-2.8"
+                _drop(catalogue_dir, _dep_pkg(self.tmp, local_name="dep-3.4.0.pkg"))
+                (catalogue_dir / "notes.json").write_bytes(raw)
+
+                self._regenerate(out, catalogue_dir)
+
+                self.assertFalse((catalogue_dir / "notes.json").exists())
+
     def test_a_catalogue_without_notes_stays_without(self) -> None:
         out, catalogue_dir = self._catalogue(["3.3.10"])
 

@@ -4325,6 +4325,29 @@ class UpdateNotesPublishTests(_TempDirTestCase):
                 channel,
             )
 
+    def test_notes_file_with_invalid_utf8_still_publishes_from_the_decodable_text(
+        self,
+    ) -> None:
+        raw = b"- Good one\n- Bad \xff\xfe byte\n- \xff\xfe\n- Third\n"
+        notes_file = self.tmp / "invalid-utf8.md"
+        notes_file.write_bytes(raw)
+
+        report = self._publish(notes_file)
+
+        self.assertEqual(
+            set(report.touched), {("stable", "ce-2.8"), ("testing", "ce-2.8")}
+        )
+        for channel in ("stable", "testing"):
+            self.assertEqual(self._listed_versions(channel), ["3.3.14"], channel)
+            # undecodable bytes drop out of an item; an item with nothing else is dropped
+            self.assertEqual(
+                (self._catalogue(channel) / "notes.json").read_bytes(),
+                b'{"items":["Good one","Bad byte","Third"],'
+                b'"link":{"kind":"release","tag":"v3.3.14"},"schema":1,'
+                b'"total":3,"version":"3.3.14"}\n',
+                channel,
+            )
+
     def test_missing_unreadable_or_bulletless_notes_publish_without_notes_json(
         self,
     ) -> None:
