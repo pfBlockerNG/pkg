@@ -1,0 +1,1 @@
+{"items":["The software update notice now shows what changed in the new version (#3826).","DNSBL upstream-block detection now runs when the DNS Resolver forwards queries, with or without p...","The widget no longer shows the Upstream group as disabled while the Resolver forwards."],"link":{"kind":"release","tag":"v4.0.0.b3"},"schema":1,"total":3,"version":"4.0.0.b3"}
