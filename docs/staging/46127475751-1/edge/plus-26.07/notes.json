@@ -1,0 +1,1 @@
+{"items":["A DNSBL feed whose content libmagic reports as text/x-asm, such as EasyPrivacy, is no longer reje...","A pfB-DNS start now gets 60 seconds to become ready instead of 30, and a restarted decider gets 6..."],"link":{"kind":"release","tag":"v4.0.0.b6"},"schema":1,"total":2,"version":"4.0.0.b6"}
